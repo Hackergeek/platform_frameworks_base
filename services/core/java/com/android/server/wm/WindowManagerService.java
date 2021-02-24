@@ -1417,12 +1417,17 @@ public class WindowManagerService extends IWindowManager.Stub
             }
 
             if (type >= FIRST_SUB_WINDOW && type <= LAST_SUB_WINDOW) {
+                /**
+                 * 当窗口类型为子窗口时，attrs.token为父窗口的IBinder对象
+                 * 从mWindowMap中取出Key为attr.token的条目（WindowState）
+                 */
                 parentWindow = windowForClientLocked(null, attrs.token, false);
                 if (parentWindow == null) {
                     ProtoLog.w(WM_ERROR, "Attempted to add window with token that is not a window: "
                             + "%s.  Aborting.", attrs.token);
                     return WindowManagerGlobal.ADD_BAD_SUBWINDOW_TOKEN;
                 }
+                // 从这里可以看出WMS要求窗口层级最多为两层
                 if (parentWindow.mAttrs.type >= FIRST_SUB_WINDOW
                         && parentWindow.mAttrs.type <= LAST_SUB_WINDOW) {
                     ProtoLog.w(WM_ERROR, "Attempted to add window with token that is a sub-window: "
