@@ -1109,6 +1109,7 @@ public final class SystemServer {
             mSystemServiceManager.startService(CONTENT_SERVICE_CLASS);
             t.traceEnd();
 
+            //安装SettingsProvider.apk
             t.traceBegin("InstallSystemProviders");
             mActivityManagerService.installSystemProviders();
             // Now that SettingsProvider is ready, reactivate SQLiteCompatibilityWalFlags
@@ -2227,6 +2228,7 @@ public final class SystemServer {
         final IpSecService ipSecServiceF = ipSecService;
         final WindowManagerService windowManagerF = wm;
 
+        //AMS启动完成，完成后续的工作，例如启动桌面等
         // We now tell the activity manager it is okay to run third party
         // code.  It will call back into us once it has gotten to the state
         // where third party code can really run (but before it has actually

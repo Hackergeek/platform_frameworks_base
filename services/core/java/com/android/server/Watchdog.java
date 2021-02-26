@@ -75,6 +75,7 @@ public class Watchdog extends Thread {
     // Note 2: The debug value is already below the wait time in ZygoteConnection. Wrapped
     //         applications may not work with a debug build. CTS will fail.
     private static final long DEFAULT_TIMEOUT = DB ? 10 * 1000 : 60 * 1000;
+    // 心跳周期
     private static final long CHECK_INTERVAL = DEFAULT_TIMEOUT / 2;
 
     // These are temporally ordered: larger values as lateness increases
@@ -247,6 +248,7 @@ public class Watchdog extends Thread {
                 synchronized (Watchdog.this) {
                     mCurrentMonitor = mMonitors.get(i);
                 }
+                // 在monitor方法申请锁，如果能在规定的时间内申请到锁，则说明没有死锁
                 mCurrentMonitor.monitor();
             }
 
@@ -302,6 +304,11 @@ public class Watchdog extends Thread {
     }
 
     public interface Monitor {
+        /**
+         * monitor方法的实现一般如下：
+         * synchronized (lock) { }
+         * 检查lock是否被某一线程长期持有，无法释放，如果是，则判定为死锁
+         */
         void monitor();
     }
 
