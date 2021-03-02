@@ -2098,6 +2098,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     public void setSystemProcess() {
         try {
+        	// 注册服务。首先将ActivityManagerService注册到ServiceManager中，其次将几个与系统性能调试相关 的服务注册到ServiceManager。
             ServiceManager.addService(Context.ACTIVITY_SERVICE, this, /* allowIsolated= */ true,
                     DUMP_FLAG_PRIORITY_CRITICAL | DUMP_FLAG_PRIORITY_NORMAL | DUMP_FLAG_PROTO);
             ServiceManager.addService(ProcessStats.SERVICE_NAME, mProcessStats);
@@ -2113,11 +2114,15 @@ public class ActivityManagerService extends IActivityManager.Stub
             ServiceManager.addService("processinfo", new ProcessInfoService(this));
             ServiceManager.addService("cacheinfo", new CacheBinder(this));
 
+            // 查询并处理ApplicationInfo。首先调用PackageManagerService的接口，
+            // 查询包名为android的应用程序的ApplicationInfo信息，对应于framework-res.apk。
+            // 然后以该信息为参数调用ActivityThread上的 installSystemApplicationInfo方法
             ApplicationInfo info = mContext.getPackageManager().getApplicationInfo(
                     "android", STOCK_PM_FLAGS | MATCH_SYSTEM_ONLY);
             mSystemThread.installSystemApplicationInfo(info, getClass().getClassLoader());
 
             synchronized (this) {
+            	// 创建并处理ProcessRecord。调用ActivityManagerService上的newProcessRecordLocked，创建一个ProcessRecord类型的对象，并保存该对象的信息
                 ProcessRecord app = mProcessList.newProcessRecordLocked(info, info.processName,
                         false,
                         0,
@@ -2353,6 +2358,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
         @Override
         public void onStart() {
+        	// 真正启动AMS
             mService.start();
         }
 
@@ -2618,7 +2624,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
         mEnableOffloadQueue = SystemProperties.getBoolean(
                 "persist.device_config.activity_manager_native_boot.offload_queue_enabled", false);
-
+        // 初始化管理前台、后台广播的队列， 系统会优先遍历发送前台广播
         mFgBroadcastQueue = new BroadcastQueue(this, mHandler,
                 "foreground", foreConstants, false);
         mBgBroadcastQueue = new BroadcastQueue(this, mHandler,
@@ -2629,13 +2635,17 @@ public class ActivityManagerService extends IActivityManager.Stub
         mBroadcastQueues[1] = mBgBroadcastQueue;
         mBroadcastQueues[2] = mOffloadBroadcastQueue;
 
+        // 初始化管理Service的ActiveServices对象
         mServices = new ActiveServices(this);
+        // 初始化Provider的管理者
         mProviderMap = new ProviderMap(this);
         mPackageWatchdog = PackageWatchdog.getInstance(mUiContext);
+        // 初始化APP错误日志的打印器
         mAppErrors = new AppErrors(mUiContext, this, mPackageWatchdog);
 
         final File systemDir = SystemServiceManager.ensureSystemDir();
 
+        // 创建电池统计服务，并输出到指定目录
         // TODO: Move creation of battery stats service outside of activity manager service.
         mBatteryStatsService = new BatteryStatsService(systemContext, systemDir,
                 BackgroundThread.get().getHandler());
@@ -2645,13 +2655,13 @@ public class ActivityManagerService extends IActivityManager.Stub
                 : mBatteryStatsService.getActiveStatistics().getIsOnBattery();
         mBatteryStatsService.getActiveStatistics().setCallback(this);
         mOomAdjProfiler.batteryPowerChanged(mOnBattery);
-
+        // 创建进程统计分析服务，追踪统计哪些进程有滥用或不良行为
         mProcessStats = new ProcessStatsService(this, new File(systemDir, "procstats"));
 
         mAppOpsService = mInjector.getAppOpsService(new File(systemDir, "appops.xml"), mHandler);
 
         mUgmInternal = LocalServices.getService(UriGrantsManagerInternal.class);
-
+        // 负责管理多用户
         mUserController = new UserController(this);
 
         mPendingIntentController = new PendingIntentController(
@@ -2669,6 +2679,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 DisplayThread.get().getLooper());
         mAtmInternal = LocalServices.getService(ActivityTaskManagerInternal.class);
 
+        //启动一个线程专门跟进cpu当前状态信息，AMS对当前cpu状态了如指掌，可以更加高效的安排其他工作
         mProcessCpuThread = new Thread("CpuTracker") {
             @Override
             public void run() {
@@ -2705,6 +2716,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
         mHiddenApiBlacklist = new HiddenApiSettings(mHandler, mContext);
 
+        // 看门狗，监听进程。这个类每分钟调用一次监视器。 如果进程没有任何返回就杀掉
         Watchdog.getInstance().addMonitor(this);
         Watchdog.getInstance().addThread(mHandler);
 
@@ -2748,6 +2760,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         // so that any other access to mProcessCpuTracker from main thread
         // will be blocked during mProcessCpuTracker initialization.
         try {
+        	// 等待mProcessCpuThread完成初始化后，释放锁，初始化期间禁止访问
             mProcessCpuInitLatch.await();
         } catch (InterruptedException e) {
             Slog.wtf(TAG, "Interrupted wait during start", e);
@@ -19634,6 +19647,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                     Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "startProcess:"
                             + processName);
                 }
+                // isolated为false，即一般
                 synchronized (ActivityManagerService.this) {
                     // If the process is known as top app, set a hint so when the process is
                     // started, the top priority can be applied immediately to avoid cpu being

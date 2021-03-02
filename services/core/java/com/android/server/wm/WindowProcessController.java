@@ -78,6 +78,10 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
+ *  ProcessRecord的部分副本，提供给WMS使用
+ *  在创建进程时
+ */
+/**
  * The Activity Manager (AM) package manages the lifecycle of processes in the system through
  * ProcessRecord. However, it is important for the Window Manager (WM) package to be aware
  * of the processes and their state since it affects how WM manages windows and activities. This

@@ -881,6 +881,7 @@ class ActivityStarter {
         final int userId = aInfo != null && aInfo.applicationInfo != null
                 ? UserHandle.getUserId(aInfo.applicationInfo.uid) : 0;
         if (err == ActivityManager.START_SUCCESS) {
+            // start u0日志，此时Activity并没有真正启动
             Slog.i(TAG, "START u" + userId + " {" + intent.toShortString(true, true, true, false)
                     + "} from uid " + callingUid);
         }

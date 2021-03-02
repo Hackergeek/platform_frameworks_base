@@ -320,9 +320,14 @@ public final class SystemServer {
     // will be higher than the system default
     private static final int sMaxBinderThreads = 31;
 
+
     /**
      * Default theme used by the system context. This is used to style system-provided dialogs, such
      * as the Power Off dialog, and other visual content.
+     *
+     * com.android.internal.R.style.Theme_DeviceDefault_System这个变量对应
+     * https://android.googlesource.com/platform/frameworks/base/+/master/core/res/res/values/themes_device_defaults.xml
+     * 文件中的Theme.DeviceDefault.System
      */
     private static final int DEFAULT_SYSTEM_THEME =
             com.android.internal.R.style.Theme_DeviceDefault_System;
@@ -525,6 +530,7 @@ public final class SystemServer {
             android.os.Process.setThreadPriority(
                     android.os.Process.THREAD_PRIORITY_FOREGROUND);
             android.os.Process.setCanSelfBackground(false);
+            // 初始化主线程的Looper
             Looper.prepareMainLooper();
             Looper.getMainLooper().setSlowLogThresholdMs(
                     SLOW_DISPATCH_THRESHOLD_MS, SLOW_DELIVERY_THRESHOLD_MS);
@@ -545,7 +551,7 @@ public final class SystemServer {
             // Check whether we failed to shut down last time we tried.
             // This call may not return.
             performPendingShutdown();
-
+            // 创建系统上下文
             // Initialize the system context.
             createSystemContext();
 
@@ -553,9 +559,11 @@ public final class SystemServer {
             ActivityThread.initializeMainlineModules();
 
             // Create the system service manager.
+            // SystemServiceManager用于管理系统服务的创建、启动以及其他生命周期事件
             mSystemServiceManager = new SystemServiceManager(mSystemContext);
             mSystemServiceManager.setStartInfo(mRuntimeRestart,
-                    mRuntimeStartElapsedTime, mRuntimeStartUptime);
+                    mRuntimeStartElapsedTime, mRuntimeStartUptime);\
+            // 用于存取所有SystemServer中的系统服务，如AMS，PMS
             LocalServices.addService(SystemServiceManager.class, mSystemServiceManager);
             // Prepare the thread pool for init tasks that can be parallelized
             SystemServerInitThreadPool.start();
@@ -755,6 +763,8 @@ public final class SystemServer {
         // Activity manager runs the show.
         t.traceBegin("StartActivityManager");
         // TODO: Might need to move after migration to WM.
+        // 创建并启动AMS（ActivityManagerService），
+        // 在LifeCycle的构造方法创建AMS实例，在onStart方法中真正启动AMS
         ActivityTaskManagerService atm = mSystemServiceManager.startService(
                 ActivityTaskManagerService.Lifecycle.class).getService();
         mActivityManagerService = ActivityManagerService.Lifecycle.startService(

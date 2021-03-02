@@ -315,6 +315,7 @@ public final class ActivityThread extends ClientTransactionHandler {
     @UnsupportedAppUsage
     final H mH = new H();
     final Executor mExecutor = new HandlerExecutor(mH);
+    // 记录客户端所有正在运行的Activity
     /**
      * Maps from activity token to local record of running activities in this process.
      *
@@ -330,6 +331,9 @@ public final class ActivityThread extends ClientTransactionHandler {
     // List of new activities (via ActivityRecord.nextIdle) that should
     // be reported when next we idle.
     ActivityClientRecord mNewActivities = null;
+    // 屏幕中可见Activity的数量
+    // handleStopActivity、handleDestroyActivity中mNumVisibleActivities数量减一
+    // handleResumeActivity中mNumVisibleActivities数量加一
     // Number of activities that are currently visible on-screen.
     @UnsupportedAppUsage
     int mNumVisibleActivities = 0;
@@ -480,6 +484,7 @@ public final class ActivityThread extends ClientTransactionHandler {
 
     boolean mHasImeComponent = false;
 
+    // 客户端Activity记录，用于记录真正的{@link Activity}实例。
     /** Activity client record, used for bookkeeping for the real {@link Activity} instance. */
     public static final class ActivityClientRecord {
         @UnsupportedAppUsage

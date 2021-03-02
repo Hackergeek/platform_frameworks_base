@@ -2321,6 +2321,7 @@ public final class ProcessList {
                 false /* mountExtStorageFull */, abiOverride);
     }
 
+    // 开启进程
     @GuardedBy("mService")
     final ProcessRecord startProcessLocked(String processName, ApplicationInfo info,
             boolean knownToBeDead, int intentFlags, HostingRecord hostingRecord,
@@ -2330,6 +2331,7 @@ public final class ProcessList {
         long startTime = SystemClock.uptimeMillis();
         ProcessRecord app;
         if (!isolated) {
+            // 查询进程记录
             app = getProcessRecordLocked(processName, info.uid, keepIfLarge);
             checkSlow(startTime, "startProcess: after getProcessRecord");
 

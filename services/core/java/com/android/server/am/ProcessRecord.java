@@ -86,13 +86,16 @@ class ProcessRecord implements WindowProcessListener {
     private static final String TAG = TAG_WITH_CLASS_NAME ? "ProcessRecord" : TAG_AM;
 
     private final ActivityManagerService mService; // where we came from
+    // AndroidManifest.xml中定义的Application信息
     volatile ApplicationInfo info; // all about the first app in the process
     final ProcessInfo processInfo; // if non-null, process-specific manifest info
+    // 是不是isolated进程
     final boolean isolated;     // true if this is a special isolated process
     final boolean appZygote;    // true if this is forked from the app zygote
     final int uid;              // uid of process; may be different from 'info' if isolated
     final int userId;           // user of process.
     final String processName;   // name of the process
+    // 进程中运行的包
     // List of packages running in the process
     final PackageList pkgList = new PackageList();
     final class PackageList {
@@ -131,33 +134,63 @@ class ProcessRecord implements WindowProcessListener {
 
     final ProcessList.ProcStateMemTracker procStateMemTracker
             = new ProcessList.ProcStateMemTracker();
+    // 记录已经使用的uid
     UidRecord uidRecord;        // overall state of process's uid.
+    // 进程运行依赖的包
     ArraySet<String> pkgDeps;   // additional packages we have a dependency on
+    // 它是ApplicationThread的客户端，AMS就是通过这 个对象给apk进程发送异步消息的(管理四大组件的消息)，所以只有这个对象不为空的情况下，才代表apk进程可是使用了
     IApplicationThread thread;  // the actual proc...  may be null only if
                                 // 'persistent' is true (in which case we
                                 // are in the process of launching the app)
+    // 进程状态监测器
     ProcessState baseProcessTracker;
     BatteryStatsImpl.Uid.Proc curProcBatteryStats;
     int pid;                    // The process of this application; 0 if none
+    // proc目录下每一个进程都有一个以pid命名的目录文件，这个目录下记载着进程的详细信息，这个目录及目录下的文件是内核创建的，
+    // proc是内核文件系统，proc就是 process的缩写，涉及的目的就是导出进程内核信息
     String procStatFile;        // path to /proc/<pid>/stat
     int[] gids;                 // The gids this process was launched with
+    // abi信息
     private String mRequiredAbi;// The ABI this process was launched with
+    // 指令集信息
     String instructionSet;      // The instruction set this process was launched with
+    // 进程正在启动
     boolean starting;           // True if the process is being started
+    // 上次使用时间
     long lastActivityTime;      // For managing the LRU list
+    // 上次计算pss的时间
     long lastPssTime;           // Last time we retrieved PSS data
+    // 下次计算pss的时间
     long nextPssTime;           // Next time we want to request PSS data
+    // 上次设置进程状态的时间
     long lastStateTime;         // Last time setProcState changed
+    // 初始化pss
     long initialIdlePss;        // Initial memory pss of process for idle maintenance.
+    /**
+     * VSS- Virtual Set Size 虚拟耗用内存(包含共享库占用的内存) 
+     * RSS- Resident Set Size 实际使用物理内存(包含共享库占用的内存) 
+     * PSS- Proportional Set Size 实际使用的物理内存(比例分配 共享库占用的内存) 
+     * USS- Unique Set Size 进程独自占用的物理内存(不包含共享库占用的内 存) 
+     * 一般来说内存占用大小有如下规律:VSS >= RSS >= PSS >= USS
+     */
     long lastPss;               // Last computed memory pss.
+    // 上次SwapPss数据
     long lastSwapPss;           // Last computed SwapPss.
+    // 上次CachedPss数据
     long lastCachedPss;         // Last computed pss when in cached state.
+    // 上次CachedSwapPss数据
     long lastCachedSwapPss;     // Last computed SwapPss when in cached state.
+    // 进程的adj上限(adjustment)
     int maxAdj;                 // Maximum OOM adjustment for this process
+    // 当前正在计算的adj，这个值有可能大于maxAdj
     private int mCurRawAdj;     // Current OOM unlimited adjustment for this process
+    // 上次计算的curRawAdj设置到lowmemorykiller系统后的adj
     int setRawAdj;              // Last set OOM unlimited adjustment for this process
+    // 当前正在计算的adj，这是curRawAdj被maxAdj削平的值
     int curAdj;                 // Current OOM adjustment for this process
+    // 上次计算的curAdj设置到lowmemorykiller系统后的adj
     int setAdj;                 // Last set OOM adjustment for this process
+    // setAdj校验后的值
     int verifiedAdj;            // The last adjustment that was verified as actually being set
     int curCapability;          // Current capability flags of this process. For example,
                                 // PROCESS_CAPABILITY_FOREGROUND_LOCATION is one capability.
@@ -165,16 +198,23 @@ class ProcessRecord implements WindowProcessListener {
     long lastCompactTime;       // The last time that this process was compacted
     int reqCompactAction;       // The most recent compaction action requested for this app.
     int lastCompactAction;      // The most recent compaction action performed for this app.
+    // 
     boolean frozen;             // True when the process is frozen.
     long freezeUnfreezeTime;    // Last time the app was (un)frozen, 0 for never
     boolean shouldNotFreeze;    // True if a process has a WPRI binding from an unfrozen process
+    // 正在计算的调度组
     private int mCurSchedGroup; // Currently desired scheduling class
+    // 保存上次计算的调度组
     int setSchedGroup;          // Last set to background scheduling class
     int trimMemoryLevel;        // Last selected memory trimming level
+    // 正在计算的进程状态
     private int mCurProcState = PROCESS_STATE_NONEXISTENT; // Currently computed process state
+    // 发送给apk进程的状态
     private int mRepProcState = PROCESS_STATE_NONEXISTENT; // Last reported process state
     private int mCurRawProcState = PROCESS_STATE_NONEXISTENT; // Temp state during computation
+    // 保存上次计算的进程状态
     int setProcState = PROCESS_STATE_NONEXISTENT; // Last set process state in process tracker
+    // pss进程状态
     int pssProcState = PROCESS_STATE_NONEXISTENT; // Currently requesting pss for
     int pssStatType;            // The type of stat collection that we are currently requesting
     int savedPriority;          // Previous priority value if we're switching to non-SCHED_OTHER
@@ -182,16 +222,24 @@ class ProcessRecord implements WindowProcessListener {
     ServiceRecord connectionService; // Service that applied current connectionGroup/Importance
     int connectionGroup;        // Last group set by a connection
     int connectionImportance;   // Last importance set by a connection
+    // 进程存在service B list中
     boolean serviceb;           // Process currently is on the service B list
+    // 由于内存原因，进程强制存在service B list中
     boolean serviceHighRam;     // We are forcing to service B list due to its RAM use
+    // 进程自从上次空闲，是否属于缓存进程
     boolean notCachedSinceIdle; // Has this process not been in a cached state since last idle?
+    // 进程有Activity绑定其他Service
     private boolean mHasClientActivities;  // Are there any client services with activities?
+    // 进程中包含启动了的Service
     boolean hasStartedServices; // Are there any started services running in this process?
+    // 进程中包含前台运行的Service
     private boolean mHasForegroundServices; // Running any services that are foreground?
     private int mFgServiceTypes; // Type of foreground service, if there is a foreground service.
     private int mRepFgServiceTypes; // Last reported foreground service types.
+    // 进程中包含前台运行的Activity
     private boolean mHasForegroundActivities; // Running any activities that are foreground?
     boolean repForegroundActivities; // Last reported foreground activities.
+    // 系统进程，没有显示UI
     boolean systemNoUi;         // This is a system process, but not currently showing UI.
     boolean hasShownUi;         // Has UI been shown in this process since it was started?
     private boolean mHasTopUi;  // Is this process currently showing a non-activity UI that the user
@@ -215,17 +263,27 @@ class ProcessRecord implements WindowProcessListener {
     private boolean mPendingUiClean; // Want to clean up resources from showing UI?
     boolean hasAboveClient;     // Bound using BIND_ABOVE_CLIENT, so want to be lower
     boolean treatLikeActivity;  // Bound using BIND_TREAT_LIKE_ACTIVITY
+    // 60s内连续crash两次的进程被定义为bad进程
     boolean bad;                // True if disabled in the bad process list
+    // 进程被AMS主动kill掉
     boolean killedByAm;         // True when proc has been killed by activity manager, not for RAM
+    // 进程被kill掉了
     boolean killed;             // True once we know the process has been killed
+    // 进程状态改变
     boolean procStateChanged;   // Keep track of whether we changed 'setAdj'.
+    // 是否报告交互事件
     boolean reportedInteraction;// Whether we have told usage stats about it being an interaction
+    // 解锁状态下进程启动
     boolean unlocked;           // True when proc was started in user unlocked state
     private long mInteractionEventTime; // The time we sent the last interaction event
+    // 变成前台的时间
     private long mFgInteractionTime; // When we became foreground for interaction purposes
+    // 后台进程被kill原因
     String waitingToKill;       // Process is waiting to be killed when in the bg, and reason
     Object forcingToImportant;  // Token that is forcing this process to be important
+    // 计算adj的序列数
     int adjSeq;                 // Sequence id for identifying oom_adj assignment cycles
+    // lru序列数
     int completedAdjSeq;        // Sequence id for identifying oom_adj assignment cycles
     boolean containsCycle;      // Whether this app has encountered a cycle in the most recent update
     int lruSeq;                 // Sequence id for identifying LRU update cycles
@@ -233,23 +291,35 @@ class ProcessRecord implements WindowProcessListener {
     IBinder.DeathRecipient deathRecipient; // Who is watching for the death.
     private ActiveInstrumentation mInstr; // Set to currently active instrumentation running in
                                           // process.
+    // zygote是否使用了wrapper启动apk进程
     private boolean mUsingWrapper; // Set to true when process was launched with a wrapper attached
+    // 当前进程正在执行的广播
     final ArraySet<BroadcastRecord> curReceivers = new ArraySet<BroadcastRecord>();// receivers currently running in the app
     private long mWhenUnimportant; // When (uptime) the process last became unimportant
+    // 上次计算占用cpu的时长
     long lastCpuTime;           // How long proc has run CPU at last check
+    // 当前最新占用cpu的时长
     long curCpuTime;            // How long proc has run CPU most recently
+    // 上次发送gc命令给apk进程的时间
     long lastRequestedGc;       // When we last asked the app to do a gc
+    // 上次发送低内存消息给apk进程的时间
     long lastLowMemory;         // When we last told the app that memory is low
+    // 上次进程中ContentProvider被使用的时间
     long lastProviderTime;      // The last time someone else was using a provider in this process.
+    // 上次发送交互时间时间
     long lastTopTime;           // The last time the process was in the TOP state or greater.
+    // 报告低内存
     boolean reportLowMemory;    // Set to true when waiting to report low mem
+    // 空进程，不含有任何组件的进程
     boolean empty;              // Is this an empty background process?
+    // 缓存进程
     private volatile boolean mCached;    // Is this a cached process?
     String adjType;             // Debugging: primary thing impacting oom_adj.
     int adjTypeCode;            // Debugging: adj code to report to app.
     Object adjSource;           // Debugging: option dependent object.
     int adjSourceProcState;     // Debugging: proc state of adjSource's process.
     Object adjTarget;           // Debugging: target component impacting oom_adj.
+    // crash回调
     Runnable crashHandler;      // Optional local handler to be invoked in the process crash.
     boolean bindMountPending;   // True if Android/obb and Android/data need to be bind mount .
 
@@ -263,15 +333,23 @@ class ProcessRecord implements WindowProcessListener {
     // Controller for driving the process state on the window manager side.
     private final WindowProcessController mWindowProcessController;
     // all ServiceRecord running in this process
+    // 进程启动的所有的service组件记录表
     private final ArraySet<ServiceRecord> mServices = new ArraySet<>();
     // services that are currently executing code (need to remain foreground).
+    // 正在运行(executing)是怎么定义的?首先需要明确的是系统是怎么控制组件的?发送消息给apk进程，
+    // apk进程处理消息，上报消息完成，这被定义为一个完整 的执行过程，因此正在执行(executing)被定义为发送消息到上报完成这段时间
     final ArraySet<ServiceRecord> executingServices = new ArraySet<>();
+    // 绑定service的客户端记录表
     // All ConnectionRecord this process holds
     final ArraySet<ConnectionRecord> connections = new ArraySet<>();
+    // 广播接收器的记录表
     // all IIntentReceivers that are registered from this process.
     final ArraySet<ReceiverList> receivers = new ArraySet<>();
+    // pub是publish(发布)的意思，ContentProvider需要安装然后把自己发布到系统(AMS)中后，才能使用，
+    // 安装指的是apk进程加载ContentProvider子类、初始化、创建数据库等过程，发布是将ContentProvider的binder客户端注册到AMS中
     // class (String) -> ContentProviderRecord
     final ArrayMap<String, ContentProviderRecord> pubProviders = new ArrayMap<>();
+    // 使用ContentProvider的客户端记录表
     // All ContentProviderRecord process is using
     final ArrayList<ContentProviderConnection> conProviders = new ArrayList<>();
     // A set of tokens that currently contribute to this process being temporarily whitelisted
@@ -283,10 +361,15 @@ class ProcessRecord implements WindowProcessListener {
     String isolatedEntryPoint;  // Class to run on start if this is a special isolated process.
     String[] isolatedEntryPointArgs; // Arguments to pass to isolatedEntryPoint's main().
 
+    // 前台执行Service
     boolean execServicesFg;     // do we need to be executing services in the foreground?
+    // 常驻内存进程
     private boolean mPersistent;// always keep this application running?
+    // 进程已经crash
     private boolean mCrashing;  // are we in the process of crashing?
+    // 强制crash对话框显示
     boolean forceCrashReport;   // suppress normal auto-dismiss of crash dialog & report UI?
+    // 是否处于anr状态
     private boolean mNotResponding; // does the app have a not responding dialog?
     volatile boolean removed;   // Whether this process should be killed and removed from process
                                 // list. It is set when the package is force-stopped or the process
@@ -303,15 +386,20 @@ class ProcessRecord implements WindowProcessListener {
 
     // These reports are generated & stored when an app gets into an error condition.
     // They will be "null" when all is OK.
+    // 当进程出现Crash时，生成的进程错误状态信息
     ActivityManager.ProcessErrorStateInfo crashingReport;
+    // 当进程出现ANR时，生成的进程错误状态信息
     ActivityManager.ProcessErrorStateInfo notRespondingReport;
 
+    // 接收error信息的组件
     // Who will be notified of the error. This is usually an activity in the
     // app that installed the package.
     ComponentName errorReportReceiver;
 
+    // 进程中存在backup组件在运行
     // Process is currently hosting a backup agent for backup or restore
     public boolean inFullBackup;
+    // 和电源管理相关
     // App is allowed to manage whitelists such as temporary Power Save mode whitelist.
     boolean whitelistManager;
 

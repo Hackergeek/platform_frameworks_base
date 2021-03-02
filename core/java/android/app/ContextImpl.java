@@ -2608,6 +2608,7 @@ class ContextImpl extends Context {
         mContentCaptureOptions = options;
     }
 
+    /** */
     @UnsupportedAppUsage
     static ContextImpl createSystemContext(ActivityThread mainThread) {
         LoadedApk packageInfo = new LoadedApk(mainThread);

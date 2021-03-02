@@ -1528,6 +1528,9 @@ class ActivityStack extends Task {
         return result;
     }
 
+    /**
+      *
+      */
     @GuardedBy("mService")
     private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOptions options) {
         if (!mAtmService.isBooting() && !mAtmService.isBooted()) {

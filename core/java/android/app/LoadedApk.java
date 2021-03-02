@@ -243,6 +243,7 @@ public final class LoadedApk {
 
     /**
      * Sets application info about the system package.
+     * 在ActivityManagerService的setSystemProcess方法调用installSystemApplicationInfo
      */
     void installSystemApplicationInfo(ApplicationInfo info, ClassLoader classLoader) {
         assert info.packageName.equals("android");
