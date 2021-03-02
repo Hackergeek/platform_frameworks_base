@@ -432,6 +432,7 @@ public final class ProcessList {
     private long mProcStartSeqCounter = 0;
 
     /**
+     * 存储等待启动的进程
      * Contains {@link ProcessRecord} objects for pending process starts.
      *
      * Mapping: {@link #mProcStartSeqCounter} -> {@link ProcessRecord}
@@ -1983,8 +1984,14 @@ public final class ProcessList {
         app.setStartParams(uid, hostingRecord, seInfo, startTime);
         app.setUsingWrapper(invokeWith != null
                 || Zygote.getWrapProperty(app.processName) != null);
+        /**
+         * 这里异步启动进程可能存在bug，暂时不知道为什么会出现app.startSeq的值比expectedStartSeq大，导致进程创建失败
+         * 原以为如果在短时间内创建进程,如果ProcessRecord app实例对象一样，会导致出现这个问题
+         * 但是app.pendStart在创建进程时会置为true，在startProcessLocked调用时如果该值为true，则直接返回。
+         * 所以短时间内创建进程，即使ProcessRecord实例一样，应该也不会出现app.startSeq的值比expectedStartSeq大，导致进程创建失败的问题
+         */
         mPendingStarts.put(startSeq, app);
-
+        // 异步启动进程，默认走这里
         if (mService.mConstants.FLAG_PROCESS_START_ASYNC) {
             if (DEBUG_PROCESSES) Slog.i(TAG_PROCESSES,
                     "Posting procStart msg for " + app.toShortString());
@@ -1993,6 +2000,7 @@ public final class ProcessList {
                     requiredAbi, instructionSet, invokeWith, startSeq));
             return true;
         } else {
+            // 同步启动进程
             try {
                 final Process.ProcessStartResult startResult = startProcess(hostingRecord,
                         entryPoint, app,
@@ -2293,6 +2301,7 @@ public final class ProcessList {
                         false, false,
                         new String[]{PROC_START_SEQ_IDENT + app.startSeq});
             } else {
+                // ActivityStackSupervisor.startSpecificActivity如果需要创建进程会走这里
                 startResult = Process.start(entryPoint,
                         app.processName, uid, uid, gids, runtimeFlags, mountExternal,
                         app.info.targetSdkVersion, seInfo, requiredAbi, instructionSet,
