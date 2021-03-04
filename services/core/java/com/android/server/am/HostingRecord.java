@@ -23,10 +23,11 @@ import android.content.ComponentName;
  *
  * The {@code mHostingType} field describes the reason why we started a process, and
  * is only used for logging and stats.
- *
+ * 
  * The {@code mHostingName} field describes the Component for which we are starting the
  * process, and is only used for logging and stats.
  *
+ * //描述从哪个Zygote孵化新进程
  * The {@code mHostingZygote} field describes from which Zygote the new process should be spawned.
  *
  * {@code mDefiningPackageName} contains the packageName of the package that defines the
@@ -46,6 +47,10 @@ import android.content.ComponentName;
  */
 
 public final class HostingRecord {
+    // 默认值，启动Activity如果进程没创建，会调用
+    // ActivityStackSupervisor.startSpecificActivity->ActivityTaskManagerService.startProcessAsync->ActivityManagerInternal.startProcess创建进程，
+    // 创建出来HostingRecord实例的mHostingZygote值为REGULAR_ZYGOTE
+
     private static final int REGULAR_ZYGOTE = 0;
     private static final int WEBVIEW_ZYGOTE = 1;
     private static final int APP_ZYGOTE = 2;
