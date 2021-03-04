@@ -715,6 +715,7 @@ public class ActivityStackSupervisor implements RecentTasks.Callbacks {
         return resolveActivity(intent, rInfo, startFlags, profilerInfo);
     }
 
+    // 真正启动Activity
     boolean realStartActivityLocked(ActivityRecord r, WindowProcessController proc,
             boolean andResume, boolean checkConfig) throws RemoteException {
 

@@ -1151,6 +1151,7 @@ class ActivityStarter {
             aInfo = mSupervisor.resolveActivity(intent, rInfo, startFlags, null /*profilerInfo*/);
         }
 
+        // 创建ActivityRecord
         final ActivityRecord r = new ActivityRecord(mService, callerApp, callingPid, callingUid,
                 callingPackage, callingFeatureId, intent, resolvedType, aInfo,
                 mService.getGlobalConfiguration(), resultRecord, resultWho, requestCode,
@@ -1729,6 +1730,7 @@ class ActivityStarter {
                         && !mRootWindowContainer.isTopDisplayFocusedStack(mTargetStack)) {
                     mTargetStack.moveToFront("startActivityInner");
                 }
+                // 启动Activity
                 mRootWindowContainer.resumeFocusedStacksTopActivities(
                         mTargetStack, mStartActivity, mOptions);
             }

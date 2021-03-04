@@ -1940,7 +1940,9 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
             mTmpBoolean = false; // Set to true if an activity was started.
             final PooledFunction c = PooledLambda.obtainFunction(
                     RootWindowContainer::startActivityForAttachedApplicationIfNeeded, this,
-                    PooledLambda.__(ActivityRecord.class), app, stack.topRunningActivity());
+                    PooledLambda.__(ActivityRecord.class), app, 
+                    stack.topRunningActivity()//获取前台stack中栈顶第一个非finishing的Activity
+                    );
             stack.forAllActivities(c);
             c.recycle();
             if (mTmpRemoteException != null) {
@@ -1948,6 +1950,7 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
             }
             didSomething |= mTmpBoolean;
         }
+        //启动Activity不成功，则确保有可见的Activity
         if (!didSomething) {
             ensureActivitiesVisible(null, 0, false /* preserve_windows */);
         }
@@ -1960,7 +1963,7 @@ class RootWindowContainer extends WindowContainer<DisplayContent>
                 || app.mUid != r.info.applicationInfo.uid || !app.mName.equals(r.processName)) {
             return false;
         }
-
+        // 真正启动Activity
         try {
             if (mStackSupervisor.realStartActivityLocked(r, app, top == r /*andResume*/,
                     true /*checkConfig*/)) {

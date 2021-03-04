@@ -5385,6 +5385,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         boolean badApp = false;
         boolean didSomething = false;
 
+        // 启动Activity
         // See if the top visible activity is waiting to run in this process...
         if (normalMode) {
             try {
@@ -5395,6 +5396,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
         }
 
+        // 启动服务
         // Find any services that should be running in this process...
         if (!badApp) {
             try {
