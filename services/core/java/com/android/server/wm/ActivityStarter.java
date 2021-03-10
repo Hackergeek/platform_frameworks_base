@@ -518,6 +518,7 @@ class ActivityStarter {
                 }
             }
 
+            // 收集目标意图的相关信息
             // Collect information about the target of the Intent.
             activityInfo = supervisor.resolveActivity(intent, resolveInfo, startFlags,
                     profilerInfo);
