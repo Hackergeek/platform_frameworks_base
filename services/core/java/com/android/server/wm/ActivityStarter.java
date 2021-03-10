@@ -1390,6 +1390,7 @@ class ActivityStarter {
         int result = START_CANCELED;
         final ActivityStack startedActivityStack;
         try {
+            // 暂停布局
             mService.mWindowManager.deferSurfaceLayout();
             result = startActivityUnchecked(r, sourceRecord, voiceSession, voiceInteractor,
                     startFlags, doResume, options, inTask, outActivity, restrictedBgActivity);
@@ -1427,6 +1428,7 @@ class ActivityStarter {
                     startedActivityStack.remove();
                 }
             }
+            // 继续布局
             mService.mWindowManager.continueSurfaceLayout();
         }
 
@@ -1470,10 +1472,11 @@ class ActivityStarter {
 
         final int preferredWindowingMode = mLaunchParams.mWindowingMode;
 
+        // 计算出启动的 FLAG，并将计算的值赋值给 mLaunchFlags
         computeLaunchingTaskFlags();
 
         computeSourceStack();
-
+        // 将 mLaunchFlags 设置给 Intent，达到设定 Activity 的启动方式的目的
         mIntent.setFlags(mLaunchFlags);
 
         ActivityRecord reusedActivity = getReusableIntentActivity();
@@ -1725,6 +1728,7 @@ class ActivityStarter {
                         && !mRootActivityContainer.isTopDisplayFocusedStack(mTargetStack)) {
                     mTargetStack.moveToFront("startActivityUnchecked");
                 }
+                // 调用resumeFocusedStacksTopActivities方法，最终调用到ActivityStack.resumeTopActivityUncheckedLocked() 方法
                 mRootActivityContainer.resumeFocusedStacksTopActivities(
                         mTargetStack, mStartActivity, mOptions);
             }

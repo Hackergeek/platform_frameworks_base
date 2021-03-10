@@ -1694,7 +1694,7 @@ class ActivityStack extends ConfigurationContainer {
             try {
                 EventLogTags.writeAmPauseActivity(prev.mUserId, System.identityHashCode(prev),
                         prev.shortComponentName, "userLeaving=" + userLeaving);
-
+                // 最后会调用到Activity的OnPause方法
                 mService.getLifecycleManager().scheduleTransaction(prev.app.getThread(),
                         prev.appToken, PauseActivityItem.obtain(prev.finishing, userLeaving,
                                 prev.configChangeFlags, pauseImmediately));
