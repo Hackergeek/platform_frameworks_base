@@ -19,8 +19,8 @@ import static android.app.Notification.VISIBILITY_SECRET;
 import static android.app.admin.DevicePolicyManager.ACTION_DEVICE_POLICY_MANAGER_STATE_CHANGED;
 
 import static com.android.systemui.DejankUtils.whitelistIpcs;
-import static com.android.systemui.statusbar.notification.stack.NotificationSectionsManagerKt.BUCKET_MEDIA_CONTROLS;
-import static com.android.systemui.statusbar.notification.stack.NotificationSectionsManagerKt.BUCKET_SILENT;
+import static com.android.systemui.statusbar.notification.stack.NotificationPriorityBucketKt.BUCKET_MEDIA_CONTROLS;
+import static com.android.systemui.statusbar.notification.stack.NotificationPriorityBucketKt.BUCKET_SILENT;
 
 import android.app.ActivityManager;
 import android.app.KeyguardManager;
@@ -48,47 +48,58 @@ import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.systemui.Dependency;
 import com.android.systemui.Dumpable;
 import com.android.systemui.broadcast.BroadcastDispatcher;
+import com.android.systemui.dagger.SysUISingleton;
 import com.android.systemui.dagger.qualifiers.Main;
+import com.android.systemui.dump.DumpManager;
 import com.android.systemui.plugins.statusbar.StatusBarStateController;
 import com.android.systemui.plugins.statusbar.StatusBarStateController.StateListener;
 import com.android.systemui.recents.OverviewProxyService;
 import com.android.systemui.statusbar.notification.NotificationEntryManager;
-import com.android.systemui.statusbar.notification.NotificationUtils;
 import com.android.systemui.statusbar.notification.collection.NotificationEntry;
-import com.android.systemui.statusbar.notification.logging.NotificationLogger;
+import com.android.systemui.statusbar.notification.collection.notifcollection.CommonNotifCollection;
+import com.android.systemui.statusbar.notification.collection.render.NotificationVisibilityProvider;
 import com.android.systemui.statusbar.policy.DeviceProvisionedController;
 import com.android.systemui.statusbar.policy.KeyguardStateController;
+import com.android.systemui.util.ListenerSet;
+import com.android.systemui.util.settings.SecureSettings;
 
-import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
 
 import javax.inject.Inject;
-import javax.inject.Singleton;
+
+import dagger.Lazy;
 
 /**
  * Handles keeping track of the current user, profiles, and various things related to hiding
  * contents, redacting notifications, and the lockscreen.
  */
-@Singleton
+@SysUISingleton
 public class NotificationLockscreenUserManagerImpl implements
-        Dumpable, NotificationLockscreenUserManager, StateListener {
+        Dumpable,
+        NotificationLockscreenUserManager,
+        StateListener {
     private static final String TAG = "LockscreenUserManager";
     private static final boolean ENABLE_LOCK_SCREEN_ALLOW_REMOTE_INPUT = false;
 
     private final DeviceProvisionedController mDeviceProvisionedController;
     private final KeyguardStateController mKeyguardStateController;
+    private final SecureSettings mSecureSettings;
     private final Object mLock = new Object();
 
     // Lazy
     private NotificationEntryManager mEntryManager;
 
+    private final Lazy<NotificationVisibilityProvider> mVisibilityProviderLazy;
+    private final Lazy<CommonNotifCollection> mCommonNotifCollectionLazy;
     private final DevicePolicyManager mDevicePolicyManager;
     private final SparseBooleanArray mLockscreenPublicMode = new SparseBooleanArray();
-    private final SparseBooleanArray mUsersWithSeperateWorkChallenge = new SparseBooleanArray();
+    private final SparseBooleanArray mUsersWithSeparateWorkChallenge = new SparseBooleanArray();
     private final SparseBooleanArray mUsersAllowingPrivateNotifications = new SparseBooleanArray();
     private final SparseBooleanArray mUsersAllowingNotifications = new SparseBooleanArray();
+    private final SparseBooleanArray mUsersInLockdownLatestResult = new SparseBooleanArray();
+    private final SparseBooleanArray mShouldHideNotifsLatestResult = new SparseBooleanArray();
     private final UserManager mUserManager;
     private final List<UserChangedListener> mListeners = new ArrayList<>();
     private final BroadcastDispatcher mBroadcastDispatcher;
@@ -99,6 +110,9 @@ public class NotificationLockscreenUserManagerImpl implements
     private LockPatternUtils mLockPatternUtils;
     protected KeyguardManager mKeyguardManager;
     private int mState = StatusBarState.SHADE;
+    private List<KeyguardNotificationSuppressor> mKeyguardSuppressors = new ArrayList<>();
+    private final ListenerSet<NotificationStateChangedListener> mNotifStateChangedListeners =
+            new ListenerSet<>();
 
     protected final BroadcastReceiver mAllUsersReceiver = new BroadcastReceiver() {
         @Override
@@ -110,6 +124,8 @@ public class NotificationLockscreenUserManagerImpl implements
                 mUsersAllowingPrivateNotifications.clear();
                 updateLockscreenNotificationSetting();
                 getEntryManager().updateNotifications("ACTION_DEVICE_POLICY_MANAGER_STATE_CHANGED");
+                // TODO(b/231976036): Consolidate pipeline invalidations related to this event
+                // notifyNotificationStateChanged();
             }
         }
     };
@@ -138,6 +154,15 @@ public class NotificationLockscreenUserManagerImpl implements
                         listener.onUserChanged(mCurrentUserId);
                     }
                     break;
+                case Intent.ACTION_USER_REMOVED:
+                    int removedUserId = intent.getIntExtra(Intent.EXTRA_USER_HANDLE, -1);
+                    if (removedUserId != -1) {
+                        for (UserChangedListener listener : mListeners) {
+                            listener.onUserRemoved(removedUserId);
+                        }
+                    }
+                    updateCurrentProfilesCache();
+                    break;
                 case Intent.ACTION_USER_ADDED:
                 case Intent.ACTION_MANAGED_PROFILE_AVAILABLE:
                 case Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE:
@@ -159,15 +184,8 @@ public class NotificationLockscreenUserManagerImpl implements
                         }
                     }
                     if (notificationKey != null) {
-                        NotificationEntry entry =
-                                getEntryManager().getActiveNotificationUnfiltered(notificationKey);
-                        final int count = getEntryManager().getActiveNotificationsCount();
-                        final int rank = entry != null ? entry.getRanking().getRank() : 0;
-                        NotificationVisibility.NotificationLocation location =
-                                NotificationLogger.getNotificationLocation(entry);
-                        final NotificationVisibility nv = NotificationVisibility.obtain(
-                                notificationKey,
-                                rank, count, true, location);
+                        final NotificationVisibility nv = mVisibilityProviderLazy.get()
+                                .obtain(notificationKey, true);
                         mClickNotifier.onNotificationClick(notificationKey, nv);
                     }
                     break;
@@ -184,6 +202,7 @@ public class NotificationLockscreenUserManagerImpl implements
     protected NotificationPresenter mPresenter;
     protected ContentObserver mLockscreenSettingsObserver;
     protected ContentObserver mSettingsObserver;
+    private boolean mHideSilentNotificationsOnLockscreen;
 
     private NotificationEntryManager getEntryManager() {
         if (mEntryManager == null) {
@@ -197,24 +216,33 @@ public class NotificationLockscreenUserManagerImpl implements
             BroadcastDispatcher broadcastDispatcher,
             DevicePolicyManager devicePolicyManager,
             UserManager userManager,
+            Lazy<NotificationVisibilityProvider> visibilityProviderLazy,
+            Lazy<CommonNotifCollection> commonNotifCollectionLazy,
             NotificationClickNotifier clickNotifier,
             KeyguardManager keyguardManager,
             StatusBarStateController statusBarStateController,
             @Main Handler mainHandler,
             DeviceProvisionedController deviceProvisionedController,
-            KeyguardStateController keyguardStateController) {
+            KeyguardStateController keyguardStateController,
+            SecureSettings secureSettings,
+            DumpManager dumpManager) {
         mContext = context;
         mMainHandler = mainHandler;
         mDevicePolicyManager = devicePolicyManager;
         mUserManager = userManager;
         mCurrentUserId = ActivityManager.getCurrentUser();
+        mVisibilityProviderLazy = visibilityProviderLazy;
+        mCommonNotifCollectionLazy = commonNotifCollectionLazy;
         mClickNotifier = clickNotifier;
         statusBarStateController.addCallback(this);
         mLockPatternUtils = new LockPatternUtils(context);
         mKeyguardManager = keyguardManager;
         mBroadcastDispatcher = broadcastDispatcher;
         mDeviceProvisionedController = deviceProvisionedController;
+        mSecureSettings = secureSettings;
         mKeyguardStateController = keyguardStateController;
+
+        dumpManager.registerDumpable(this);
     }
 
     public void setUpWithPresenter(NotificationPresenter presenter) {
@@ -231,6 +259,7 @@ public class NotificationLockscreenUserManagerImpl implements
                 updateLockscreenNotificationSetting();
                 getEntryManager().updateNotifications("LOCK_SCREEN_SHOW_NOTIFICATIONS,"
                         + " or LOCK_SCREEN_ALLOW_PRIVATE_NOTIFICATIONS change");
+                notifyNotificationStateChanged();
             }
         };
 
@@ -241,17 +270,25 @@ public class NotificationLockscreenUserManagerImpl implements
                 if (mDeviceProvisionedController.isDeviceProvisioned()) {
                     getEntryManager().updateNotifications("LOCK_SCREEN_ALLOW_REMOTE_INPUT"
                             + " or ZEN_MODE change");
+                    // TODO(b/231976036): Consolidate pipeline invalidations related to this event
+                    // notifyNotificationStateChanged();
                 }
             }
         };
 
         mContext.getContentResolver().registerContentObserver(
-                Settings.Secure.getUriFor(Settings.Secure.LOCK_SCREEN_SHOW_NOTIFICATIONS), false,
+                mSecureSettings.getUriFor(Settings.Secure.LOCK_SCREEN_SHOW_NOTIFICATIONS), false,
                 mLockscreenSettingsObserver,
                 UserHandle.USER_ALL);
 
         mContext.getContentResolver().registerContentObserver(
-                Settings.Secure.getUriFor(Settings.Secure.LOCK_SCREEN_ALLOW_PRIVATE_NOTIFICATIONS),
+                mSecureSettings.getUriFor(Settings.Secure.LOCK_SCREEN_ALLOW_PRIVATE_NOTIFICATIONS),
+                true,
+                mLockscreenSettingsObserver,
+                UserHandle.USER_ALL);
+
+        mContext.getContentResolver().registerContentObserver(
+                mSecureSettings.getUriFor(Settings.Secure.LOCK_SCREEN_SHOW_SILENT_NOTIFICATIONS),
                 true,
                 mLockscreenSettingsObserver,
                 UserHandle.USER_ALL);
@@ -262,7 +299,7 @@ public class NotificationLockscreenUserManagerImpl implements
 
         if (ENABLE_LOCK_SCREEN_ALLOW_REMOTE_INPUT) {
             mContext.getContentResolver().registerContentObserver(
-                    Settings.Secure.getUriFor(Settings.Secure.LOCK_SCREEN_ALLOW_REMOTE_INPUT),
+                    mSecureSettings.getUriFor(Settings.Secure.LOCK_SCREEN_ALLOW_REMOTE_INPUT),
                     false,
                     mSettingsObserver,
                     UserHandle.USER_ALL);
@@ -275,6 +312,7 @@ public class NotificationLockscreenUserManagerImpl implements
         IntentFilter filter = new IntentFilter();
         filter.addAction(Intent.ACTION_USER_SWITCHED);
         filter.addAction(Intent.ACTION_USER_ADDED);
+        filter.addAction(Intent.ACTION_USER_REMOVED);
         filter.addAction(Intent.ACTION_USER_UNLOCKED);
         filter.addAction(Intent.ACTION_MANAGED_PROFILE_AVAILABLE);
         filter.addAction(Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE);
@@ -283,8 +321,10 @@ public class NotificationLockscreenUserManagerImpl implements
 
         IntentFilter internalFilter = new IntentFilter();
         internalFilter.addAction(NOTIFICATION_UNLOCKED_BY_WORK_CHALLENGE_ACTION);
-        mContext.registerReceiver(mBaseBroadcastReceiver, internalFilter, PERMISSION_SELF, null);
+        mContext.registerReceiver(mBaseBroadcastReceiver, internalFilter, PERMISSION_SELF, null,
+                Context.RECEIVER_EXPORTED_UNAUDITED);
 
+        mCurrentUserId = ActivityManager.getCurrentUser(); // in case we reg'd receiver too late
         updateCurrentProfilesCache();
 
         mSettingsObserver.onChange(false);  // set up
@@ -312,7 +352,9 @@ public class NotificationLockscreenUserManagerImpl implements
         if (userId == UserHandle.USER_ALL) {
             userId = mCurrentUserId;
         }
-        return Dependency.get(KeyguardUpdateMonitor.class).isUserInLockdown(userId);
+        boolean inLockdown = Dependency.get(KeyguardUpdateMonitor.class).isUserInLockdown(userId);
+        mUsersInLockdownLatestResult.put(userId, inLockdown);
+        return inLockdown;
     }
 
     /**
@@ -320,9 +362,11 @@ public class NotificationLockscreenUserManagerImpl implements
      * If so, notifications should be hidden.
      */
     public boolean shouldHideNotifications(int userId) {
-        return isLockscreenPublicMode(userId) && !userAllowsNotificationsInPublic(userId)
+        boolean hide = isLockscreenPublicMode(userId) && !userAllowsNotificationsInPublic(userId)
                 || (userId != mCurrentUserId && shouldHideNotifications(mCurrentUserId))
                 || shouldTemporarilyHideNotifications(userId);
+        mShouldHideNotifsLatestResult.put(userId, hide);
+        return hide;
     }
 
     /**
@@ -330,23 +374,27 @@ public class NotificationLockscreenUserManagerImpl implements
      * package-specific override.
      */
     public boolean shouldHideNotifications(String key) {
-        if (getEntryManager() == null) {
-            Log.wtf(TAG, "mEntryManager was null!", new Throwable());
+        if (mCommonNotifCollectionLazy.get() == null) {
+            Log.wtf(TAG, "mCommonNotifCollectionLazy was null!", new Throwable());
             return true;
         }
-        NotificationEntry visibleEntry = getEntryManager().getActiveNotificationUnfiltered(key);
+        NotificationEntry visibleEntry = mCommonNotifCollectionLazy.get().getEntry(key);
         return isLockscreenPublicMode(mCurrentUserId) && visibleEntry != null
-                && visibleEntry.getRanking().getVisibilityOverride() == VISIBILITY_SECRET;
+                && visibleEntry.getRanking().getLockscreenVisibilityOverride() == VISIBILITY_SECRET;
     }
 
     public boolean shouldShowOnKeyguard(NotificationEntry entry) {
-        if (getEntryManager() == null) {
-            Log.wtf(TAG, "mEntryManager was null!", new Throwable());
+        if (mCommonNotifCollectionLazy.get() == null) {
+            Log.wtf(TAG, "mCommonNotifCollectionLazy was null!", new Throwable());
             return false;
         }
+        for (int i = 0; i < mKeyguardSuppressors.size(); i++) {
+            if (mKeyguardSuppressors.get(i).shouldSuppressOnKeyguard(entry)) {
+                return false;
+            }
+        }
         boolean exceedsPriorityThreshold;
-        if (NotificationUtils.useNewInterruptionModel(mContext)
-                && hideSilentNotificationsOnLockscreen()) {
+        if (mHideSilentNotificationsOnLockscreen) {
             exceedsPriorityThreshold =
                     entry.getBucket() == BUCKET_MEDIA_CONTROLS
                             || (entry.getBucket() != BUCKET_SILENT
@@ -355,11 +403,6 @@ public class NotificationLockscreenUserManagerImpl implements
             exceedsPriorityThreshold = !entry.getRanking().isAmbient();
         }
         return mShowLockscreenNotifications && exceedsPriorityThreshold;
-    }
-
-    private boolean hideSilentNotificationsOnLockscreen() {
-        return whitelistIpcs(() -> Settings.Secure.getInt(mContext.getContentResolver(),
-                Settings.Secure.LOCK_SCREEN_SHOW_SILENT_NOTIFICATIONS, 1) == 0);
     }
 
     private void setShowLockscreenNotifications(boolean show) {
@@ -371,7 +414,7 @@ public class NotificationLockscreenUserManagerImpl implements
     }
 
     protected void updateLockscreenNotificationSetting() {
-        final boolean show = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+        final boolean show = mSecureSettings.getIntForUser(
                 Settings.Secure.LOCK_SCREEN_SHOW_NOTIFICATIONS,
                 1,
                 mCurrentUserId) != 0;
@@ -380,10 +423,13 @@ public class NotificationLockscreenUserManagerImpl implements
         final boolean allowedByDpm = (dpmFlags
                 & DevicePolicyManager.KEYGUARD_DISABLE_SECURE_NOTIFICATIONS) == 0;
 
+        mHideSilentNotificationsOnLockscreen = mSecureSettings.getIntForUser(
+                Settings.Secure.LOCK_SCREEN_SHOW_SILENT_NOTIFICATIONS, 1, mCurrentUserId) == 0;
+
         setShowLockscreenNotifications(show && allowedByDpm);
 
         if (ENABLE_LOCK_SCREEN_ALLOW_REMOTE_INPUT) {
-            final boolean remoteInput = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+            final boolean remoteInput = mSecureSettings.getIntForUser(
                     Settings.Secure.LOCK_SCREEN_ALLOW_REMOTE_INPUT,
                     0,
                     mCurrentUserId) != 0;
@@ -406,8 +452,7 @@ public class NotificationLockscreenUserManagerImpl implements
         }
 
         if (mUsersAllowingPrivateNotifications.indexOfKey(userHandle) < 0) {
-            final boolean allowedByUser = 0 != Settings.Secure.getIntForUser(
-                    mContext.getContentResolver(),
+            final boolean allowedByUser = 0 != mSecureSettings.getIntForUser(
                     Settings.Secure.LOCK_SCREEN_ALLOW_PRIVATE_NOTIFICATIONS, 0, userHandle);
             final boolean allowedByDpm = adminAllowsKeyguardFeature(userHandle,
                     DevicePolicyManager.KEYGUARD_DISABLE_UNREDACTED_NOTIFICATIONS);
@@ -459,7 +504,7 @@ public class NotificationLockscreenUserManagerImpl implements
 
     @Override
     public boolean needsSeparateWorkChallenge(int userId) {
-        return mUsersWithSeperateWorkChallenge.get(userId, false);
+        return mUsersWithSeparateWorkChallenge.get(userId, false);
     }
 
     /**
@@ -472,8 +517,7 @@ public class NotificationLockscreenUserManagerImpl implements
         }
 
         if (mUsersAllowingNotifications.indexOfKey(userHandle) < 0) {
-            final boolean allowedByUser = 0 != Settings.Secure.getIntForUser(
-                    mContext.getContentResolver(),
+            final boolean allowedByUser = 0 != mSecureSettings.getIntForUser(
                     Settings.Secure.LOCK_SCREEN_SHOW_NOTIFICATIONS, 0, userHandle);
             final boolean allowedByDpm = adminAllowsKeyguardFeature(userHandle,
                     DevicePolicyManager.KEYGUARD_DISABLE_SECURE_NOTIFICATIONS);
@@ -509,13 +553,14 @@ public class NotificationLockscreenUserManagerImpl implements
     }
 
     private boolean packageHasVisibilityOverride(String key) {
-        if (getEntryManager() == null) {
+        if (mCommonNotifCollectionLazy.get() == null) {
             Log.wtf(TAG, "mEntryManager was null!", new Throwable());
             return true;
         }
-        NotificationEntry entry = getEntryManager().getActiveNotificationUnfiltered(key);
+        NotificationEntry entry = mCommonNotifCollectionLazy.get().getEntry(key);
         return entry != null
-                && entry.getRanking().getVisibilityOverride() == Notification.VISIBILITY_PRIVATE;
+                && entry.getRanking().getLockscreenVisibilityOverride() 
+                == Notification.VISIBILITY_PRIVATE;
     }
 
     private void updateCurrentProfilesCache() {
@@ -597,7 +642,9 @@ public class NotificationLockscreenUserManagerImpl implements
         //   - device keyguard is shown in secure mode;
         //   - profile is locked with a work challenge.
         SparseArray<UserInfo> currentProfiles = getCurrentProfiles();
-        mUsersWithSeperateWorkChallenge.clear();
+        SparseBooleanArray oldPublicModes = mLockscreenPublicMode.clone();
+        SparseBooleanArray oldWorkChallenges = mUsersWithSeparateWorkChallenge.clone();
+        mUsersWithSeparateWorkChallenge.clear();
         for (int i = currentProfiles.size() - 1; i >= 0; i--) {
             final int userId = currentProfiles.valueAt(i).id;
             boolean isProfilePublic = devicePublic;
@@ -611,9 +658,14 @@ public class NotificationLockscreenUserManagerImpl implements
                 isProfilePublic = showingKeyguard || mKeyguardManager.isDeviceLocked(userId);
             }
             setLockscreenPublicMode(isProfilePublic, userId);
-            mUsersWithSeperateWorkChallenge.put(userId, needsSeparateChallenge);
+            mUsersWithSeparateWorkChallenge.put(userId, needsSeparateChallenge);
         }
         getEntryManager().updateNotifications("NotificationLockscreenUserManager.updatePublicMode");
+        // TODO(b/234738798): Migrate KeyguardNotificationVisibilityProvider to use this listener
+        if (!mLockscreenPublicMode.equals(oldPublicModes)
+                || !mUsersWithSeparateWorkChallenge.equals(oldWorkChallenges)) {
+            notifyNotificationStateChanged();
+        }
     }
 
     @Override
@@ -622,8 +674,29 @@ public class NotificationLockscreenUserManagerImpl implements
     }
 
     @Override
+    public void addKeyguardNotificationSuppressor(KeyguardNotificationSuppressor suppressor) {
+        mKeyguardSuppressors.add(suppressor);
+    }
+
+    @Override
     public void removeUserChangedListener(UserChangedListener listener) {
         mListeners.remove(listener);
+    }
+
+    @Override
+    public void addNotificationStateChangedListener(NotificationStateChangedListener listener) {
+        mNotifStateChangedListeners.addIfAbsent(listener);
+    }
+
+    @Override
+    public void removeNotificationStateChangedListener(NotificationStateChangedListener listener) {
+        mNotifStateChangedListeners.remove(listener);
+    }
+
+    private void notifyNotificationStateChanged() {
+        for (NotificationStateChangedListener listener : mNotifStateChangedListeners) {
+            listener.onNotificationStateChanged();
+        }
     }
 
 //    public void updatePublicMode() {
@@ -658,7 +731,7 @@ public class NotificationLockscreenUserManagerImpl implements
 //    }
 
     @Override
-    public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+    public void dump(PrintWriter pw, String[] args) {
         pw.println("NotificationLockscreenUserManager state:");
         pw.print("  mCurrentUserId=");
         pw.println(mCurrentUserId);
@@ -673,6 +746,7 @@ public class NotificationLockscreenUserManagerImpl implements
                 pw.print("" + userId + " ");
             }
         }
+        pw.println();
         pw.print("  mCurrentManagedProfiles=");
         synchronized (mLock) {
             for (int i = mCurrentManagedProfiles.size() - 1; i >= 0; i--) {
@@ -680,5 +754,17 @@ public class NotificationLockscreenUserManagerImpl implements
             }
         }
         pw.println();
+        pw.print("  mLockscreenPublicMode=");
+        pw.println(mLockscreenPublicMode);
+        pw.print("  mUsersWithSeparateWorkChallenge=");
+        pw.println(mUsersWithSeparateWorkChallenge);
+        pw.print("  mUsersAllowingPrivateNotifications=");
+        pw.println(mUsersAllowingPrivateNotifications);
+        pw.print("  mUsersAllowingNotifications=");
+        pw.println(mUsersAllowingNotifications);
+        pw.print("  mUsersInLockdownLatestResult=");
+        pw.println(mUsersInLockdownLatestResult);
+        pw.print("  mShouldHideNotifsLatestResult=");
+        pw.println(mShouldHideNotifsLatestResult);
     }
 }

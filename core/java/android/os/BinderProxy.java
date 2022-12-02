@@ -18,6 +18,7 @@ package android.os;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.app.ActivityManager;
 import android.app.AppOpsManager;
 import android.util.Log;
 import android.util.SparseIntArray;
@@ -33,6 +34,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Java proxy for a native IBinder object.
@@ -48,6 +52,12 @@ public final class BinderProxy implements IBinder {
     volatile boolean mWarnOnBlocking = Binder.sWarnOnBlocking;
 
     private static volatile Binder.ProxyTransactListener sTransactListener = null;
+
+    private static class BinderProxyMapSizeException extends AssertionError {
+        BinderProxyMapSizeException(String s) {
+            super(s);
+        }
+    };
 
     /**
      * @see {@link Binder#setProxyTransactListener(listener)}.
@@ -69,8 +79,11 @@ public final class BinderProxy implements IBinder {
         private static final int LOG_MAIN_INDEX_SIZE = 8;
         private static final int MAIN_INDEX_SIZE = 1 <<  LOG_MAIN_INDEX_SIZE;
         private static final int MAIN_INDEX_MASK = MAIN_INDEX_SIZE - 1;
-        // Debuggable builds will throw an AssertionError if the number of map entries exceeds:
-        private static final int CRASH_AT_SIZE = 20_000;
+        /**
+         * Debuggable builds will throw an BinderProxyMapSizeException if the number of
+         * map entries exceeds:
+         */
+        private static final int CRASH_AT_SIZE = 25_000;
 
         /**
          * We next warn when we exceed this bucket size.
@@ -112,7 +125,7 @@ public final class BinderProxy implements IBinder {
             for (ArrayList<WeakReference<BinderProxy>> a : mMainIndexValues) {
                 if (a != null) {
                     for (WeakReference<BinderProxy> ref : a) {
-                        if (ref.get() != null) {
+                        if (!ref.refersTo(null)) {
                             ++size;
                         }
                     }
@@ -183,7 +196,7 @@ public final class BinderProxy implements IBinder {
             // This ensures that ArrayList size is bounded by the maximum occupancy of
             // that bucket.
             for (int i = 0; i < size; ++i) {
-                if (valueArray.get(i).get() == null) {
+                if (valueArray.get(i).refersTo(null)) {
                     valueArray.set(i, newWr);
                     Long[] keyArray = mMainIndexKeys[myHash];
                     keyArray[i] = key;
@@ -191,7 +204,7 @@ public final class BinderProxy implements IBinder {
                         // "Randomly" check one of the remaining entries in [i+1, size), so that
                         // needlessly long buckets are eventually pruned.
                         int rnd = Math.floorMod(++mRandom, size - (i + 1));
-                        if (valueArray.get(i + 1 + rnd).get() == null) {
+                        if (valueArray.get(i + 1 + rnd).refersTo(null)) {
                             remove(myHash, i + 1 + rnd);
                         }
                     }
@@ -224,7 +237,8 @@ public final class BinderProxy implements IBinder {
                         dumpProxyInterfaceCounts();
                         dumpPerUidProxyCounts();
                         Runtime.getRuntime().gc();
-                        throw new AssertionError("Binder ProxyMap has too many entries: "
+                        throw new BinderProxyMapSizeException(
+                                "Binder ProxyMap has too many entries: "
                                 + totalSize + " (total), " + totalUnclearedSize + " (uncleared), "
                                 + unclearedSize() + " (uncleared after GC). BinderProxy leak?");
                     } else if (totalSize > 3 * totalUnclearedSize / 2) {
@@ -255,30 +269,57 @@ public final class BinderProxy implements IBinder {
             // out of system_server to all processes hosting binder objects it holds a reference to;
             // since some of those processes might be frozen, we don't want to block here
             // forever. Disable the freezer.
-            Process.enableFreezer(false);
-            for (WeakReference<BinderProxy> weakRef : proxiesToQuery) {
-                BinderProxy bp = weakRef.get();
-                String key;
-                if (bp == null) {
-                    key = "<cleared weak-ref>";
-                } else {
-                    try {
-                        key = bp.getInterfaceDescriptor();
-                        if ((key == null || key.isEmpty()) && !bp.isBinderAlive()) {
-                            key = "<proxy to dead node>";
+            try {
+                ActivityManager.getService().enableAppFreezer(false);
+            } catch (RemoteException e) {
+                Log.e(Binder.TAG, "RemoteException while disabling app freezer");
+            }
+
+            // We run the dump on a separate thread, because there are known cases where
+            // a process overrides getInterfaceDescriptor() and somehow blocks on it, causing
+            // the calling thread (usually AMS) to hit the watchdog.
+            // Do the dumping on a separate thread instead, and give up after a while.
+            ExecutorService executorService = Executors.newSingleThreadExecutor();
+            executorService.submit(() -> {
+                for (WeakReference<BinderProxy> weakRef : proxiesToQuery) {
+                    BinderProxy bp = weakRef.get();
+                    String key;
+                    if (bp == null) {
+                        key = "<cleared weak-ref>";
+                    } else {
+                        try {
+                            key = bp.getInterfaceDescriptor();
+                            if ((key == null || key.isEmpty()) && !bp.isBinderAlive()) {
+                                key = "<proxy to dead node>";
+                            }
+                        } catch (Throwable t) {
+                            key = "<exception during getDescriptor>";
                         }
-                    } catch (Throwable t) {
-                        key = "<exception during getDescriptor>";
+                    }
+                    Integer i = counts.get(key);
+                    if (i == null) {
+                        counts.put(key, 1);
+                    } else {
+                        counts.put(key, i + 1);
                     }
                 }
-                Integer i = counts.get(key);
-                if (i == null) {
-                    counts.put(key, 1);
-                } else {
-                    counts.put(key, i + 1);
+            });
+
+            try {
+                executorService.shutdown();
+                boolean dumpDone = executorService.awaitTermination(20, TimeUnit.SECONDS);
+                if (!dumpDone) {
+                    Log.e(Binder.TAG, "Failed to complete binder proxy dump,"
+                            + " dumping what we have so far.");
                 }
+            } catch (InterruptedException e) {
+                // Ignore
             }
-            Process.enableFreezer(true);
+            try {
+                ActivityManager.getService().enableAppFreezer(true);
+            } catch (RemoteException e) {
+                Log.e(Binder.TAG, "RemoteException while re-enabling app freezer");
+            }
             Map.Entry<String, Integer>[] sorted = counts.entrySet().toArray(
                     new Map.Entry[counts.size()]);
 
@@ -485,15 +526,18 @@ public final class BinderProxy implements IBinder {
     public boolean transact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
         Binder.checkParcel(this, code, data, "Unreasonably large binder buffer");
 
-        if (mWarnOnBlocking && ((flags & FLAG_ONEWAY) == 0)
+        boolean warnOnBlocking = mWarnOnBlocking; // Cache it to reduce volatile access.
+
+        if (warnOnBlocking && ((flags & FLAG_ONEWAY) == 0)
                 && Binder.sWarnOnBlockingOnCurrentThread.get()) {
 
             // For now, avoid spamming the log by disabling after we've logged
             // about this interface at least once
             mWarnOnBlocking = false;
+            warnOnBlocking = false;
 
-            if (Build.IS_USERDEBUG) {
-                // Log this as a WTF on userdebug builds.
+            if (Build.IS_USERDEBUG || Build.IS_ENG) {
+                // Log this as a WTF on userdebug and eng builds.
                 Log.wtf(Binder.TAG,
                         "Outgoing transactions from this process must be FLAG_ONEWAY",
                         new Throwable());
@@ -504,7 +548,7 @@ public final class BinderProxy implements IBinder {
             }
         }
 
-        final boolean tracingEnabled = Binder.isTracingEnabled();
+        final boolean tracingEnabled = Binder.isStackTrackingEnabled();
         if (tracingEnabled) {
             final Throwable tr = new Throwable();
             Binder.getTransactionTracker().addTrace(tr);
@@ -537,7 +581,13 @@ public final class BinderProxy implements IBinder {
         }
 
         try {
-            return transactNative(code, data, reply, flags);
+            final boolean result = transactNative(code, data, reply, flags);
+
+            if (reply != null && !warnOnBlocking) {
+                reply.addFlags(Parcel.FLAG_IS_REPLY_FROM_BLOCKING_ALLOWED_OBJECT);
+            }
+
+            return result;
         } finally {
             AppOpsManager.resumeNotedAppOpsCollection(prevCollection);
 

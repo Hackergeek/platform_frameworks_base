@@ -30,6 +30,7 @@ import android.testing.TestableLooper;
 import android.util.Log;
 
 import androidx.test.InstrumentationRegistry;
+import androidx.test.uiautomator.UiDevice;
 
 import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.settingslib.bluetooth.LocalBluetoothManager;
@@ -39,12 +40,15 @@ import com.android.systemui.broadcast.logging.BroadcastDispatcherLogger;
 import com.android.systemui.classifier.FalsingManagerFake;
 import com.android.systemui.dump.DumpManager;
 import com.android.systemui.plugins.FalsingManager;
+import com.android.systemui.settings.UserTracker;
 import com.android.systemui.statusbar.SmartReplyController;
-import com.android.systemui.statusbar.notification.row.NotificationBlockingHelperManager;
+import com.android.systemui.statusbar.phone.SystemUIDialogManager;
 
 import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Rule;
+import org.mockito.Mockito;
 
 import java.io.FileInputStream;
 import java.io.IOException;
@@ -72,11 +76,13 @@ public abstract class SysuiTestCase {
 
     @Before
     public void SysuiSetup() throws Exception {
-        SystemUIFactory.createFromConfig(mContext);
-        mDependency = new TestableDependency(mContext);
+        SystemUIFactory.createFromConfig(mContext, true);
+        mDependency = new TestableDependency(
+                SystemUIFactory.getInstance().getSysUIComponent().createDependency());
+        Dependency.setInstance(mDependency);
         mFakeBroadcastDispatcher = new FakeBroadcastDispatcher(mContext, mock(Looper.class),
                 mock(Executor.class), mock(DumpManager.class),
-                mock(BroadcastDispatcherLogger.class));
+                mock(BroadcastDispatcherLogger.class), mock(UserTracker.class));
 
         mRealInstrumentation = InstrumentationRegistry.getInstrumentation();
         Instrumentation inst = spy(mRealInstrumentation);
@@ -107,7 +113,11 @@ public abstract class SysuiTestCase {
         // KeyguardUpdateMonitor to be created (injected).
         // TODO(b/1531701009) Clean up NotificationContentView creation to prevent this
         mDependency.injectMockDependency(SmartReplyController.class);
-        mDependency.injectMockDependency(NotificationBlockingHelperManager.class);
+
+        // Make sure that all tests on any SystemUIDialog does not crash because this dependency
+        // is missing (constructing the actual one would throw).
+        // TODO(b/219008720): Remove this.
+        mDependency.injectMockDependency(SystemUIDialogManager.class);
     }
 
     @After
@@ -118,9 +128,13 @@ public abstract class SysuiTestCase {
             TestableLooper.get(this).processAllMessages();
         }
         disallowTestableLooperAsMainThread();
-        SystemUIFactory.cleanup();
         mContext.cleanUpReceivers(this.getClass().getSimpleName());
         mFakeBroadcastDispatcher.cleanUpReceivers(this.getClass().getSimpleName());
+    }
+
+    @AfterClass
+    public static void mockitoTearDown() {
+        Mockito.framework().clearInlineMocks();
     }
 
     /**
@@ -140,8 +154,16 @@ public abstract class SysuiTestCase {
         return null;
     }
 
+    protected FakeBroadcastDispatcher getFakeBroadcastDispatcher() {
+        return mFakeBroadcastDispatcher;
+    }
+
     public SysuiTestableContext getContext() {
         return mContext;
+    }
+
+    protected UiDevice getUiDevice() {
+        return UiDevice.getInstance(mRealInstrumentation);
     }
 
     protected void runShellCommand(String command) throws IOException {
@@ -184,6 +206,11 @@ public abstract class SysuiTestCase {
             throw new RuntimeException(
                 "This method can not be called from the looper being synced");
         }
+    }
+
+    /** Delegates to {@link android.testing.TestableResources#addOverride(int, Object)}. */
+    protected void overrideResource(int resourceId, Object value) {
+        mContext.getOrCreateTestableResources().addOverride(resourceId, value);
     }
 
     public static final class EmptyRunnable implements Runnable {

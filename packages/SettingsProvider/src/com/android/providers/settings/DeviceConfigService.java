@@ -16,8 +16,13 @@
 
 package com.android.providers.settings;
 
-import android.annotation.SystemApi;
+import static android.provider.Settings.Config.SYNC_DISABLED_MODE_NONE;
+import static android.provider.Settings.Config.SYNC_DISABLED_MODE_PERSISTENT;
+import static android.provider.Settings.Config.SYNC_DISABLED_MODE_UNTIL_REBOOT;
+
+import android.annotation.SuppressLint;
 import android.app.ActivityManager;
+import android.content.AttributionSource;
 import android.content.IContentProvider;
 import android.os.Binder;
 import android.os.Bundle;
@@ -28,6 +33,7 @@ import android.os.ShellCallback;
 import android.os.ShellCommand;
 import android.provider.DeviceConfig;
 import android.provider.Settings;
+import android.provider.Settings.Config.SyncDisabledMode;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -40,10 +46,7 @@ import java.util.Map;
 /**
  * Receives shell commands from the command line related to device config flags, and dispatches them
  * to the SettingsProvider.
- *
- * @hide
  */
-@SystemApi
 public final class DeviceConfigService extends Binder {
     final SettingsProvider mProvider;
 
@@ -61,18 +64,20 @@ public final class DeviceConfigService extends Binder {
         final SettingsProvider mProvider;
 
         enum CommandVerb {
-            UNSPECIFIED,
             GET,
             PUT,
             DELETE,
             LIST,
             RESET,
+            SET_SYNC_DISABLED_FOR_TESTS,
+            GET_SYNC_DISABLED_FOR_TESTS,
         }
 
         MyShellCommand(SettingsProvider provider) {
             mProvider = provider;
         }
 
+        @SuppressLint("AndroidFrameworkRequiresPermission")
         @Override
         public int onCommand(String cmd) {
             if (cmd == null || "help".equals(cmd) || "-h".equals(cmd)) {
@@ -82,6 +87,7 @@ public final class DeviceConfigService extends Binder {
 
             final PrintWriter perr = getErrPrintWriter();
             boolean isValid = false;
+
             CommandVerb verb;
             if ("get".equalsIgnoreCase(cmd)) {
                 verb = CommandVerb.GET;
@@ -96,21 +102,33 @@ public final class DeviceConfigService extends Binder {
                 }
             } else if ("reset".equalsIgnoreCase(cmd)) {
                 verb = CommandVerb.RESET;
+            } else if ("set_sync_disabled_for_tests".equalsIgnoreCase(cmd)) {
+                verb = CommandVerb.SET_SYNC_DISABLED_FOR_TESTS;
+            } else if ("get_sync_disabled_for_tests".equalsIgnoreCase(cmd)) {
+                verb = CommandVerb.GET_SYNC_DISABLED_FOR_TESTS;
+                if (peekNextArg() != null) {
+                    perr.println("Bad arguments");
+                    return -1;
+                }
+                isValid = true;
             } else {
                 // invalid
                 perr.println("Invalid command: " + cmd);
                 return -1;
             }
 
+            // Parse args for those commands that have them.
+            int syncDisabledModeArg = -1;
             int resetMode = -1;
             boolean makeDefault = false;
             String namespace = null;
             String key = null;
             String value = null;
-            String arg = null;
+            String arg;
             while ((arg = getNextArg()) != null) {
                 if (verb == CommandVerb.RESET) {
                     if (resetMode == -1) {
+                        // RESET 1st arg (required)
                         if ("untrusted_defaults".equalsIgnoreCase(arg)) {
                             resetMode = Settings.RESET_MODE_UNTRUSTED_DEFAULTS;
                         } else if ("untrusted_clear".equalsIgnoreCase(arg)) {
@@ -126,6 +144,7 @@ public final class DeviceConfigService extends Binder {
                             isValid = true;
                         }
                     } else {
+                        // RESET 2nd arg (optional)
                         namespace = arg;
                         if (peekNextArg() == null) {
                             isValid = true;
@@ -135,7 +154,21 @@ public final class DeviceConfigService extends Binder {
                             return -1;
                         }
                     }
+                } else if (verb == CommandVerb.SET_SYNC_DISABLED_FOR_TESTS) {
+                    if (syncDisabledModeArg == -1) {
+                        // SET_SYNC_DISABLED_FOR_TESTS 1st arg (required)
+                        syncDisabledModeArg = parseSyncDisabledMode(arg);
+                        if (syncDisabledModeArg == -1) {
+                            // invalid
+                            perr.println("Invalid sync disabled mode: " + arg);
+                            return -1;
+                        }
+                        if (peekNextArg() == null) {
+                            isValid = true;
+                        }
+                    }
                 } else if (namespace == null) {
+                    // GET, PUT, DELETE, LIST 1st arg
                     namespace = arg;
                     if (verb == CommandVerb.LIST) {
                         if (peekNextArg() == null) {
@@ -147,8 +180,10 @@ public final class DeviceConfigService extends Binder {
                         }
                     }
                 } else if (key == null) {
+                    // GET, PUT, DELETE 2nd arg
                     key = arg;
                     if ((verb == CommandVerb.GET || verb == CommandVerb.DELETE)) {
+                        // GET, DELETE only have 2 args
                         if (peekNextArg() == null) {
                             isValid = true;
                         } else {
@@ -158,11 +193,13 @@ public final class DeviceConfigService extends Binder {
                         }
                     }
                 } else if (value == null) {
+                    // PUT 3rd arg (required)
                     value = arg;
                     if (verb == CommandVerb.PUT && peekNextArg() == null) {
                         isValid = true;
                     }
                 } else if ("default".equalsIgnoreCase(arg)) {
+                    // PUT 4th arg (optional)
                     makeDefault = true;
                     if (verb == CommandVerb.PUT && peekNextArg() == null) {
                         isValid = true;
@@ -210,6 +247,18 @@ public final class DeviceConfigService extends Binder {
                 case RESET:
                     DeviceConfig.resetToDefaults(resetMode, namespace);
                     break;
+                case SET_SYNC_DISABLED_FOR_TESTS:
+                    DeviceConfig.setSyncDisabledMode(syncDisabledModeArg);
+                    break;
+                case GET_SYNC_DISABLED_FOR_TESTS:
+                    int syncDisabledModeInt = DeviceConfig.getSyncDisabledMode();
+                    String syncDisabledModeString = formatSyncDisabledMode(syncDisabledModeInt);
+                    if (syncDisabledModeString == null) {
+                        perr.println("Unknown mode: " + syncDisabledModeInt);
+                        return -1;
+                    }
+                    pout.println(syncDisabledModeString);
+                    break;
                 default:
                     perr.println("Unspecified command");
                     return -1;
@@ -240,6 +289,17 @@ public final class DeviceConfigService extends Binder {
                     + "trusted_defaults}");
             pw.println("      NAMESPACE limits which flags are reset if provided, otherwise all "
                     + "flags are reset");
+            pw.println("  set_sync_disabled_for_tests SYNC_DISABLED_MODE");
+            pw.println("      Modifies bulk property setting behavior for tests. When in one of the"
+                    + " disabled modes this ensures that config isn't overwritten.");
+            pw.println("      SYNC_DISABLED_MODE is one of:");
+            pw.println("        none: Sync is not disabled. A reboot may be required to restart"
+                    + " syncing.");
+            pw.println("        persistent: Sync is disabled, this state will survive a reboot.");
+            pw.println("        until_reboot: Sync is disabled until the next reboot.");
+            pw.println("  get_sync_disabled_for_tests");
+            pw.println("      Prints one of the SYNC_DISABLED_MODE values, see"
+                    + " set_sync_disabled_for_tests");
         }
 
         private boolean delete(IContentProvider provider, String namespace, String key) {
@@ -250,7 +310,8 @@ public final class DeviceConfigService extends Binder {
                 Bundle args = new Bundle();
                 args.putInt(Settings.CALL_METHOD_USER_KEY,
                         ActivityManager.getService().getCurrentUser().id);
-                Bundle b = provider.call(resolveCallingPackage(), null, Settings.AUTHORITY,
+                Bundle b = provider.call(new AttributionSource(Process.myUid(),
+                                resolveCallingPackage(), null), Settings.AUTHORITY,
                         Settings.CALL_METHOD_DELETE_CONFIG, compositeKey, args);
                 success = (b != null && b.getInt(SettingsProvider.RESULT_ROWS_DELETED) == 1);
             } catch (RemoteException e) {
@@ -266,7 +327,8 @@ public final class DeviceConfigService extends Binder {
                 Bundle args = new Bundle();
                 args.putInt(Settings.CALL_METHOD_USER_KEY,
                         ActivityManager.getService().getCurrentUser().id);
-                Bundle b = provider.call(resolveCallingPackage(), null, Settings.AUTHORITY,
+                Bundle b = provider.call(new AttributionSource(Process.myUid(),
+                                resolveCallingPackage(), null), Settings.AUTHORITY,
                         Settings.CALL_METHOD_LIST_CONFIG, null, args);
                 if (b != null) {
                     Map<String, String> flagsToValues =
@@ -297,6 +359,33 @@ public final class DeviceConfigService extends Binder {
                     return null;
                 }
             }
+        }
+    }
+
+    private static @SyncDisabledMode int parseSyncDisabledMode(String arg) {
+        int syncDisabledMode;
+        if ("none".equalsIgnoreCase(arg)) {
+            syncDisabledMode = SYNC_DISABLED_MODE_NONE;
+        } else if ("persistent".equalsIgnoreCase(arg)) {
+            syncDisabledMode = SYNC_DISABLED_MODE_PERSISTENT;
+        } else if ("until_reboot".equalsIgnoreCase(arg)) {
+            syncDisabledMode = SYNC_DISABLED_MODE_UNTIL_REBOOT;
+        } else {
+            syncDisabledMode = -1;
+        }
+        return syncDisabledMode;
+    }
+
+    private static String formatSyncDisabledMode(@SyncDisabledMode int syncDisabledMode) {
+        switch (syncDisabledMode) {
+            case SYNC_DISABLED_MODE_NONE:
+                return "none";
+            case SYNC_DISABLED_MODE_PERSISTENT:
+                return "persistent";
+            case SYNC_DISABLED_MODE_UNTIL_REBOOT:
+                return "until_reboot";
+            default:
+                return null;
         }
     }
 }

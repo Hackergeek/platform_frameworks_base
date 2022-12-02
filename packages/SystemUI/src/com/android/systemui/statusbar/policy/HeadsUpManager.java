@@ -20,24 +20,26 @@ import static com.android.systemui.statusbar.notification.row.NotificationRowCon
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.app.Notification;
 import android.content.Context;
 import android.content.res.Resources;
 import android.database.ContentObserver;
 import android.provider.Settings;
 import android.util.ArrayMap;
-import android.util.Log;
 import android.view.accessibility.AccessibilityManager;
 
 import com.android.internal.logging.MetricsLogger;
+import com.android.internal.logging.UiEvent;
+import com.android.internal.logging.UiEventLogger;
 import com.android.systemui.Dependency;
+import com.android.systemui.EventLogTags;
 import com.android.systemui.R;
 import com.android.systemui.statusbar.AlertingNotificationManager;
 import com.android.systemui.statusbar.notification.collection.NotificationEntry;
 import com.android.systemui.statusbar.notification.row.NotificationRowContentBinder.InflationFlag;
+import com.android.systemui.util.ListenerSet;
 
-import java.io.FileDescriptor;
 import java.io.PrintWriter;
-import java.util.HashSet;
 
 /**
  * A manager which handles heads up notifications which is a special mode where
@@ -47,7 +49,7 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
     private static final String TAG = "HeadsUpManager";
     private static final String SETTING_HEADS_UP_SNOOZE_LENGTH_MS = "heads_up_snooze_length_ms";
 
-    protected final HashSet<OnHeadsUpChangedListener> mListeners = new HashSet<>();
+    protected final ListenerSet<OnHeadsUpChangedListener> mListeners = new ListenerSet<>();
 
     protected final Context mContext;
 
@@ -59,9 +61,29 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
     private final ArrayMap<String, Long> mSnoozedPackages;
     private final AccessibilityManagerWrapper mAccessibilityMgr;
 
-    public HeadsUpManager(@NonNull final Context context) {
+    private final UiEventLogger mUiEventLogger;
+
+    /**
+     * Enum entry for notification peek logged from this class.
+     */
+    enum NotificationPeekEvent implements UiEventLogger.UiEventEnum {
+        @UiEvent(doc = "Heads-up notification peeked on screen.")
+        NOTIFICATION_PEEK(801);
+
+        private final int mId;
+        NotificationPeekEvent(int id) {
+            mId = id;
+        }
+        @Override public int getId() {
+            return mId;
+        }
+    }
+
+    public HeadsUpManager(@NonNull final Context context, HeadsUpManagerLogger logger) {
+        super(logger);
         mContext = context;
         mAccessibilityMgr = Dependency.get(AccessibilityManagerWrapper.class);
+        mUiEventLogger = Dependency.get(UiEventLogger.class);
         Resources resources = context.getResources();
         mMinimumDisplayTime = resources.getInteger(R.integer.heads_up_notification_minimum_time);
         mAutoDismissNotificationDecay = resources.getInteger(R.integer.heads_up_notification_decay);
@@ -79,9 +101,7 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
                         context.getContentResolver(), SETTING_HEADS_UP_SNOOZE_LENGTH_MS, -1);
                 if (packageSnoozeLengthMs > -1 && packageSnoozeLengthMs != mSnoozeLengthMs) {
                     mSnoozeLengthMs = packageSnoozeLengthMs;
-                    if (Log.isLoggable(TAG, Log.VERBOSE)) {
-                        Log.v(TAG, "mSnoozeLengthMs = " + mSnoozeLengthMs);
-                    }
+                    mLogger.logSnoozeLengthChange(packageSnoozeLengthMs);
                 }
             }
         };
@@ -94,7 +114,7 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
      * Adds an OnHeadUpChangedListener to observe events.
      */
     public void addListener(@NonNull OnHeadsUpChangedListener listener) {
-        mListeners.add(listener);
+        mListeners.addIfAbsent(listener);
     }
 
     /**
@@ -106,9 +126,9 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
 
     public void updateNotification(@NonNull String key, boolean alert) {
         super.updateNotification(key, alert);
-        AlertEntry alertEntry = getHeadsUpEntry(key);
-        if (alert && alertEntry != null) {
-            setEntryPinned((HeadsUpEntry) alertEntry, shouldHeadsUpBecomePinned(alertEntry.mEntry));
+        HeadsUpEntry headsUpEntry = getHeadsUpEntry(key);
+        if (alert && headsUpEntry != null) {
+            setEntryPinned(headsUpEntry, shouldHeadsUpBecomePinned(headsUpEntry.mEntry));
         }
     }
 
@@ -122,13 +142,16 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
 
     protected void setEntryPinned(
             @NonNull HeadsUpManager.HeadsUpEntry headsUpEntry, boolean isPinned) {
-        if (Log.isLoggable(TAG, Log.VERBOSE)) {
-            Log.v(TAG, "setEntryPinned: " + isPinned);
-        }
+        mLogger.logSetEntryPinned(headsUpEntry.mEntry.getKey(), isPinned);
         NotificationEntry entry = headsUpEntry.mEntry;
         if (entry.isRowPinned() != isPinned) {
             entry.setRowPinned(isPinned);
             updatePinnedMode();
+            if (isPinned && entry.getSbn() != null) {
+                mUiEventLogger.logWithInstanceId(
+                        NotificationPeekEvent.NOTIFICATION_PEEK, entry.getSbn().getUid(),
+                        entry.getSbn().getPackageName(), entry.getSbn().getInstanceId());
+            }
             for (OnHeadsUpChangedListener listener : mListeners) {
                 if (isPinned) {
                     listener.onHeadsUpPinned(entry);
@@ -148,6 +171,7 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
         NotificationEntry entry = alertEntry.mEntry;
         entry.setHeadsUp(true);
         setEntryPinned((HeadsUpEntry) alertEntry, shouldHeadsUpBecomePinned(entry));
+        EventLogTags.writeSysuiHeadsUpStatus(entry.getKey(), 1 /* visible */);
         for (OnHeadsUpChangedListener listener : mListeners) {
             listener.onHeadsUpStateChanged(entry, true);
         }
@@ -158,6 +182,8 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
         NotificationEntry entry = alertEntry.mEntry;
         entry.setHeadsUp(false);
         setEntryPinned((HeadsUpEntry) alertEntry, false /* isPinned */);
+        EventLogTags.writeSysuiHeadsUpStatus(entry.getKey(), 0 /* visible */);
+        mLogger.logNotificationActuallyRemoved(entry.getKey());
         for (OnHeadsUpChangedListener listener : mListeners) {
             listener.onHeadsUpStateChanged(entry, false);
         }
@@ -168,10 +194,7 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
         if (hasPinnedNotification == mHasPinnedNotification) {
             return;
         }
-        if (Log.isLoggable(TAG, Log.VERBOSE)) {
-            Log.v(TAG, "Pinned mode changed: " + mHasPinnedNotification + " -> " +
-                       hasPinnedNotification);
-        }
+        mLogger.logUpdatePinnedMode(hasPinnedNotification);
         mHasPinnedNotification = hasPinnedNotification;
         if (mHasPinnedNotification) {
             MetricsLogger.count(mContext, "note_peek", 1);
@@ -189,12 +212,11 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
         Long snoozedUntil = mSnoozedPackages.get(key);
         if (snoozedUntil != null) {
             if (snoozedUntil > mClock.currentTimeMillis()) {
-                if (Log.isLoggable(TAG, Log.VERBOSE)) {
-                    Log.v(TAG, key + " snoozed");
-                }
+                mLogger.logIsSnoozedReturned(key);
                 return true;
             }
-            mSnoozedPackages.remove(packageName);
+            mLogger.logPackageUnsnoozed(key);
+            mSnoozedPackages.remove(key);
         }
         return false;
     }
@@ -206,8 +228,9 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
         for (String key : mAlertEntries.keySet()) {
             AlertEntry entry = getHeadsUpEntry(key);
             String packageName = entry.mEntry.getSbn().getPackageName();
-            mSnoozedPackages.put(snoozeKey(packageName, mUser),
-                    mClock.currentTimeMillis() + mSnoozeLengthMs);
+            String snoozeKey = snoozeKey(packageName, mUser);
+            mLogger.logPackageSnoozed(snoozeKey);
+            mSnoozedPackages.put(snoozeKey, mClock.currentTimeMillis() + mSnoozeLengthMs);
         }
     }
 
@@ -251,13 +274,12 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
         mUser = user;
     }
 
-    public void dump(@NonNull FileDescriptor fd, @NonNull PrintWriter pw, @NonNull String[] args) {
+    public void dump(@NonNull PrintWriter pw, @NonNull String[] args) {
         pw.println("HeadsUpManager state:");
-        dumpInternal(fd, pw, args);
+        dumpInternal(pw, args);
     }
 
-    protected void dumpInternal(
-            @NonNull FileDescriptor fd, @NonNull PrintWriter pw, @NonNull String[] args) {
+    protected void dumpInternal(@NonNull PrintWriter pw, @NonNull String[] args) {
         pw.print("  mTouchAcceptanceDelay="); pw.println(mTouchAcceptanceDelay);
         pw.print("  mSnoozeLengthMs="); pw.println(mSnoozeLengthMs);
         pw.print("  now="); pw.println(mClock.currentTimeMillis());
@@ -326,11 +348,14 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
      * @return -1 if the first argument should be ranked higher than the second, 1 if the second
      * one should be ranked higher and 0 if they are equal.
      */
-    public int compare(@NonNull NotificationEntry a, @NonNull NotificationEntry b) {
+    public int compare(@Nullable NotificationEntry a, @Nullable NotificationEntry b) {
+        if (a == null || b == null) {
+            return Boolean.compare(a == null, b == null);
+        }
         AlertEntry aEntry = getHeadsUpEntry(a.getKey());
         AlertEntry bEntry = getHeadsUpEntry(b.getKey());
         if (aEntry == null || bEntry == null) {
-            return aEntry == null ? 1 : -1;
+            return Boolean.compare(aEntry == null, bEntry == null);
         }
         return aEntry.compareTo(bEntry);
     }
@@ -355,8 +380,17 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
     public void onDensityOrFontScaleChanged() {
     }
 
-    public boolean isEntryAutoHeadsUpped(String key) {
-        return false;
+    /**
+     * Determines if the notification is for a critical call that must display on top of an active
+     * input notification.
+     * The call isOngoing check is for a special case of incoming calls (see b/164291424).
+     */
+    private static boolean isCriticalCallNotif(NotificationEntry entry) {
+        Notification n = entry.getSbn().getNotification();
+        boolean isIncomingCall = n.isStyle(Notification.CallStyle.class) && n.extras.getInt(
+                Notification.EXTRA_CALL_TYPE) == Notification.CallStyle.CALL_TYPE_INCOMING;
+        return isIncomingCall || (entry.getSbn().isOngoing()
+                && Notification.CATEGORY_CALL.equals(n.category));
     }
 
     /**
@@ -388,6 +422,15 @@ public abstract class HeadsUpManager extends AlertingNotificationManager {
             if (selfFullscreen && !otherFullscreen) {
                 return -1;
             } else if (!selfFullscreen && otherFullscreen) {
+                return 1;
+            }
+
+            boolean selfCall = isCriticalCallNotif(mEntry);
+            boolean otherCall = isCriticalCallNotif(headsUpEntry.mEntry);
+
+            if (selfCall && !otherCall) {
+                return -1;
+            } else if (!selfCall && otherCall) {
                 return 1;
             }
 

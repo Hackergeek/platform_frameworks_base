@@ -25,6 +25,8 @@ import static com.android.server.autofill.Helper.sDebug;
 import static com.android.server.autofill.Helper.sFullScreenMode;
 import static com.android.server.autofill.Helper.sVerbose;
 
+import static java.util.Objects.requireNonNull;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.UserIdInt;
@@ -67,6 +69,7 @@ import android.util.SparseBooleanArray;
 import android.util.TimeUtils;
 import android.view.autofill.AutofillId;
 import android.view.autofill.AutofillManager;
+import android.view.autofill.AutofillManager.AutofillCommitReason;
 import android.view.autofill.AutofillManager.SmartSuggestionMode;
 import android.view.autofill.AutofillManagerInternal;
 import android.view.autofill.AutofillValue;
@@ -169,7 +172,7 @@ public final class AutofillManagerService
                 // beneath it is brought back to top. Ideally, we should just hide the UI and
                 // bring it back when the activity resumes.
                 synchronized (mLock) {
-                    visitServicesLocked((s) -> s.destroyFinishedSessionsLocked());
+                    visitServicesLocked((s) -> s.forceRemoveFinishedSessionsLocked());
                 }
                 mUi.hideAll(null);
             }
@@ -207,7 +210,8 @@ public final class AutofillManagerService
 
         final IntentFilter filter = new IntentFilter();
         filter.addAction(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
-        context.registerReceiver(mBroadcastReceiver, filter, null, FgThread.getHandler());
+        context.registerReceiver(mBroadcastReceiver, filter, null, FgThread.getHandler(),
+                Context.RECEIVER_EXPORTED);
 
         mAugmentedAutofillResolver = new FrameworkResourcesServiceNameResolver(getContext(),
                 com.android.internal.R.string.config_defaultAugmentedAutofillService);
@@ -237,9 +241,6 @@ public final class AutofillManagerService
     @Override // from AbstractMasterSystemService
     protected void registerForExtraSettingsChanges(@NonNull ContentResolver resolver,
             @NonNull ContentObserver observer) {
-        resolver.registerContentObserver(Settings.Global.getUriFor(
-                Settings.Global.AUTOFILL_COMPAT_MODE_ALLOWED_PACKAGES), false, observer,
-                UserHandle.USER_ALL);
         resolver.registerContentObserver(Settings.Global.getUriFor(
                 Settings.Global.AUTOFILL_LOGGING_LEVEL), false, observer,
                 UserHandle.USER_ALL);
@@ -271,8 +272,6 @@ public final class AutofillManagerService
                 break;
             default:
                 Slog.w(TAG, "Unexpected property (" + property + "); updating cache instead");
-                // fall through
-            case Settings.Global.AUTOFILL_COMPAT_MODE_ALLOWED_PACKAGES:
                 synchronized (mLock) {
                     updateCachedServiceLocked(userId);
                 }
@@ -303,6 +302,9 @@ public final class AutofillManagerService
                 case AutofillManager.DEVICE_CONFIG_AUGMENTED_SERVICE_IDLE_UNBIND_TIMEOUT:
                 case AutofillManager.DEVICE_CONFIG_AUGMENTED_SERVICE_REQUEST_TIMEOUT:
                     setDeviceConfigProperties();
+                    break;
+                case AutofillManager.DEVICE_CONFIG_AUTOFILL_COMPAT_MODE_ALLOWED_PACKAGES:
+                    updateCachedServices();
                     break;
                 default:
                     Slog.i(mTag, "Ignoring change on " + key);
@@ -359,11 +361,11 @@ public final class AutofillManagerService
 
     @Override // from SystemService
     public boolean isUserSupported(TargetUser user) {
-        return user.getUserInfo().isFull() || user.getUserInfo().isManagedProfile();
+        return user.isFull() || user.isManagedProfile();
     }
 
     @Override // from SystemService
-    public void onSwitchUser(int userHandle) {
+    public void onUserSwitching(@Nullable TargetUser from, @NonNull TargetUser to) {
         if (sDebug) Slog.d(TAG, "Hiding UI when user switched");
         mUi.hideAll(null);
     }
@@ -385,18 +387,18 @@ public final class AutofillManagerService
     }
 
     // Called by Shell command.
-    void destroySessions(@UserIdInt int userId, IResultReceiver receiver) {
-        Slog.i(TAG, "destroySessions() for userId " + userId);
+    void removeAllSessions(@UserIdInt int userId, IResultReceiver receiver) {
+        Slog.i(TAG, "removeAllSessions() for userId " + userId);
         enforceCallingPermissionForManagement();
 
         synchronized (mLock) {
             if (userId != UserHandle.USER_ALL) {
                 AutofillManagerServiceImpl service = peekServiceForUserLocked(userId);
                 if (service != null) {
-                    service.destroySessionsLocked();
+                    service.forceRemoveAllSessionsLocked();
                 }
             } else {
-                visitServicesLocked((s) -> s.destroySessionsLocked());
+                visitServicesLocked((s) -> s.forceRemoveAllSessionsLocked());
             }
         }
 
@@ -585,6 +587,15 @@ public final class AutofillManagerService
         }
     }
 
+    private void updateCachedServices() {
+        List<UserInfo> supportedUsers = getSupportedUsers();
+        for (UserInfo userInfo : supportedUsers) {
+            synchronized (mLock) {
+                updateCachedServiceLocked(userInfo.id);
+            }
+        }
+    }
+
     // Called by Shell command.
     void calculateScore(@Nullable String algorithmName, @NonNull String value1,
             @NonNull String value2, @NonNull RemoteCallback callback) {
@@ -616,7 +627,7 @@ public final class AutofillManagerService
                 + " for " + durationMs + "ms");
         enforceCallingPermissionForManagement();
 
-        Preconditions.checkNotNull(serviceName);
+        Objects.requireNonNull(serviceName);
         if (durationMs > MAX_TEMP_AUGMENTED_SERVICE_DURATION_MS) {
             throw new IllegalArgumentException("Max duration is "
                     + MAX_TEMP_AUGMENTED_SERVICE_DURATION_MS + " (called with " + durationMs + ")");
@@ -660,6 +671,26 @@ public final class AutofillManagerService
         return false;
     }
 
+    /**
+     * Requests a count of saved passwords from the current service.
+     *
+     * @return {@code true} if the request succeeded
+     */
+    // Called by Shell command
+    boolean requestSavedPasswordCount(@UserIdInt int userId, @NonNull IResultReceiver receiver) {
+        enforceCallingPermissionForManagement();
+        synchronized (mLock) {
+            final AutofillManagerServiceImpl service = peekServiceForUserLocked(userId);
+            if (service != null) {
+                service.requestSavedPasswordCount(receiver);
+                return true;
+            } else if (sVerbose) {
+                Slog.v(TAG, "requestSavedPasswordCount(): no service for " + userId);
+            }
+        }
+        return false;
+    }
+
     private void setLoggingLevelsLocked(boolean debug, boolean verbose) {
         com.android.server.autofill.Helper.sDebug = debug;
         android.view.autofill.Helper.sDebug = debug;
@@ -679,31 +710,44 @@ public final class AutofillManagerService
             return;
         }
 
-        final Map<String, String[]> whiteListedPackages = getWhitelistedCompatModePackages();
+        final Map<String, String[]> allowedPackages = getAllowedCompatModePackages();
         final int compatPackageCount = compatPackages.size();
         for (int i = 0; i < compatPackageCount; i++) {
             final String packageName = compatPackages.keyAt(i);
-            if (whiteListedPackages == null || !whiteListedPackages.containsKey(packageName)) {
-                Slog.w(TAG, "Ignoring not whitelisted compat package " + packageName);
+            if (allowedPackages == null || !allowedPackages.containsKey(packageName)) {
+                Slog.w(TAG, "Ignoring not allowed compat package " + packageName);
                 continue;
             }
             final Long maxVersionCode = compatPackages.valueAt(i);
             if (maxVersionCode != null) {
                 mAutofillCompatState.addCompatibilityModeRequest(packageName,
-                        maxVersionCode, whiteListedPackages.get(packageName), userId);
+                        maxVersionCode, allowedPackages.get(packageName), userId);
             }
         }
     }
 
-    private String getWhitelistedCompatModePackagesFromSettings() {
+    private String getAllowedCompatModePackagesFromDeviceConfig() {
+        String config = DeviceConfig.getString(
+                DeviceConfig.NAMESPACE_AUTOFILL,
+                AutofillManager.DEVICE_CONFIG_AUTOFILL_COMPAT_MODE_ALLOWED_PACKAGES,
+                /* defaultValue */ null);
+        if (!TextUtils.isEmpty(config)) {
+            return config;
+        }
+        // Fallback to Settings.Global.AUTOFILL_COMPAT_MODE_ALLOWED_PACKAGES if
+        // the device config is null.
+        return getAllowedCompatModePackagesFromSettings();
+    }
+
+    private String getAllowedCompatModePackagesFromSettings() {
         return Settings.Global.getString(
                 getContext().getContentResolver(),
                 Settings.Global.AUTOFILL_COMPAT_MODE_ALLOWED_PACKAGES);
     }
 
     @Nullable
-    private Map<String, String[]> getWhitelistedCompatModePackages() {
-        return getWhitelistedCompatModePackages(getWhitelistedCompatModePackagesFromSettings());
+    private Map<String, String[]> getAllowedCompatModePackages() {
+        return getAllowedCompatModePackages(getAllowedCompatModePackagesFromDeviceConfig());
     }
 
     private void send(@NonNull IResultReceiver receiver, int value) {
@@ -748,7 +792,7 @@ public final class AutofillManagerService
 
     @Nullable
     @VisibleForTesting
-    static Map<String, String[]> getWhitelistedCompatModePackages(String setting) {
+    static Map<String, String[]> getAllowedCompatModePackages(String setting) {
         if (TextUtils.isEmpty(setting)) {
             return null;
         }
@@ -907,7 +951,7 @@ public final class AutofillManagerService
 
         void addDisabledAppLocked(@UserIdInt int userId, @NonNull String packageName,
                 long expiration) {
-            Preconditions.checkNotNull(packageName);
+            Objects.requireNonNull(packageName);
             synchronized (mLock) {
                 AutofillDisabledInfo info =
                         getOrCreateAutofillDisabledInfoByUserIdLocked(userId);
@@ -917,7 +961,7 @@ public final class AutofillManagerService
 
         void addDisabledActivityLocked(@UserIdInt int userId, @NonNull ComponentName componentName,
                 long expiration) {
-            Preconditions.checkNotNull(componentName);
+            Objects.requireNonNull(componentName);
             synchronized (mLock) {
                 AutofillDisabledInfo info =
                         getOrCreateAutofillDisabledInfoByUserIdLocked(userId);
@@ -927,7 +971,7 @@ public final class AutofillManagerService
 
         boolean isAutofillDisabledLocked(@UserIdInt int userId,
                 @NonNull ComponentName componentName) {
-            Preconditions.checkNotNull(componentName);
+            Objects.requireNonNull(componentName);
             final boolean disabled;
             synchronized (mLock) {
                 final AutofillDisabledInfo info = mCache.get(userId);
@@ -937,7 +981,7 @@ public final class AutofillManagerService
         }
 
         long getAppDisabledExpiration(@UserIdInt int userId, @NonNull String packageName) {
-            Preconditions.checkNotNull(packageName);
+            Objects.requireNonNull(packageName);
             final Long expiration;
             synchronized (mLock) {
                 final AutofillDisabledInfo info = mCache.get(userId);
@@ -949,7 +993,7 @@ public final class AutofillManagerService
         @Nullable
         ArrayMap<String, Long> getAppDisabledActivities(@UserIdInt int userId,
                 @NonNull String packageName) {
-            Preconditions.checkNotNull(packageName);
+            Objects.requireNonNull(packageName);
             final ArrayMap<String, Long> disabledList;
             synchronized (mLock) {
                 final AutofillDisabledInfo info = mCache.get(userId);
@@ -1370,15 +1414,16 @@ public final class AutofillManagerService
         }
 
         @Override
-        public void startSession(IBinder activityToken, IBinder appCallback, AutofillId autofillId,
-                Rect bounds, AutofillValue value, int userId, boolean hasCallback, int flags,
-                ComponentName componentName, boolean compatMode, IResultReceiver receiver) {
+        public void startSession(IBinder activityToken, IBinder clientCallback,
+                AutofillId autofillId, Rect bounds, AutofillValue value, int userId,
+                boolean hasCallback, int flags, ComponentName clientActivity,
+                boolean compatMode, IResultReceiver receiver) {
 
-            activityToken = Preconditions.checkNotNull(activityToken, "activityToken");
-            appCallback = Preconditions.checkNotNull(appCallback, "appCallback");
-            autofillId = Preconditions.checkNotNull(autofillId, "autoFillId");
-            componentName = Preconditions.checkNotNull(componentName, "componentName");
-            final String packageName = Preconditions.checkNotNull(componentName.getPackageName());
+            requireNonNull(activityToken, "activityToken");
+            requireNonNull(clientCallback, "clientCallback");
+            requireNonNull(autofillId, "autofillId");
+            requireNonNull(clientActivity, "clientActivity");
+            final String packageName = requireNonNull(clientActivity.getPackageName());
 
             Preconditions.checkArgument(userId == UserHandle.getUserId(getCallingUid()), "userId");
 
@@ -1395,7 +1440,7 @@ public final class AutofillManagerService
             synchronized (mLock) {
                 final AutofillManagerServiceImpl service = getServiceForUserLocked(userId);
                 result = service.startSessionLocked(activityToken, taskId, getCallingUid(),
-                        appCallback, autofillId, bounds, value, hasCallback, componentName,
+                        clientCallback, autofillId, bounds, value, hasCallback, clientActivity,
                         compatMode, mAllowInstantService, flags);
             }
             final int sessionId = (int) result;
@@ -1570,8 +1615,8 @@ public final class AutofillManagerService
                 @NonNull IBinder appCallback, @NonNull IResultReceiver receiver)
                 throws RemoteException {
             final int userId = UserHandle.getCallingUserId();
-            activityToken = Preconditions.checkNotNull(activityToken, "activityToken");
-            appCallback = Preconditions.checkNotNull(appCallback, "appCallback");
+            Objects.requireNonNull(activityToken, "activityToken");
+            Objects.requireNonNull(appCallback, "appCallback");
 
             boolean restored = false;
             synchronized (mLock) {
@@ -1613,11 +1658,12 @@ public final class AutofillManagerService
         }
 
         @Override
-        public void finishSession(int sessionId, int userId) {
+        public void finishSession(int sessionId, int userId,
+                @AutofillCommitReason int commitReason) {
             synchronized (mLock) {
                 final AutofillManagerServiceImpl service = peekServiceForUserLocked(userId);
                 if (service != null) {
-                    service.finishSessionLocked(sessionId, getCallingUid());
+                    service.finishSessionLocked(sessionId, getCallingUid(), commitReason);
                 } else if (sVerbose) {
                     Slog.v(TAG, "finishSession(): no service for " + userId);
                 }
@@ -1670,7 +1716,7 @@ public final class AutofillManagerService
 
         @Override
         public void onPendingSaveUi(int operation, IBinder token) {
-            Preconditions.checkNotNull(token, "token");
+            Objects.requireNonNull(token, "token");
             Preconditions.checkArgument(operation == AutofillManager.PENDING_UI_OPERATION_CANCEL
                     || operation == AutofillManager.PENDING_UI_OPERATION_RESTORE,
                     "invalid operation: %d", operation);
@@ -1732,8 +1778,8 @@ public final class AutofillManagerService
                     mUi.dump(pw);
                     pw.print("Autofill Compat State: ");
                     mAutofillCompatState.dump(prefix, pw);
-                    pw.print("from settings: ");
-                    pw.println(getWhitelistedCompatModePackagesFromSettings());
+                    pw.print("from device config: ");
+                    pw.println(getAllowedCompatModePackagesFromDeviceConfig());
                     if (mSupportedSmartSuggestionModes != 0) {
                         pw.print("Smart Suggestion modes: ");
                         pw.println(getSmartSuggestionModeToString(mSupportedSmartSuggestionModes));

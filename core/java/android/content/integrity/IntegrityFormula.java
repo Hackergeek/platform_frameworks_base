@@ -19,7 +19,6 @@ package android.content.integrity;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.content.integrity.AtomicFormula.BooleanAtomicFormula;
 import android.content.integrity.AtomicFormula.LongAtomicFormula;
 import android.content.integrity.AtomicFormula.StringAtomicFormula;
@@ -38,7 +37,6 @@ import java.util.Arrays;
  * @hide
  */
 @SystemApi
-@TestApi
 @VisibleForTesting
 public abstract class IntegrityFormula {
 
@@ -51,12 +49,21 @@ public abstract class IntegrityFormula {
         }
 
         /**
-         * Returns an integrity formula that checks if the app certificates contain {@code
-         * appCertificate}.
+         * Returns an integrity formula that checks if the app certificates contain the string
+         * provided by the appCertificate parameter.
          */
         @NonNull
         public static IntegrityFormula certificatesContain(@NonNull String appCertificate) {
             return new StringAtomicFormula(AtomicFormula.APP_CERTIFICATE, appCertificate);
+        }
+
+        /**
+         * Returns an integrity formula that checks if the app certificate lineage contains the
+         * string provided by the appCertificate parameter.
+         */
+        @NonNull
+        public static IntegrityFormula certificateLineageContains(@NonNull String appCertificate) {
+            return new StringAtomicFormula(AtomicFormula.APP_CERTIFICATE_LINEAGE, appCertificate);
         }
 
         /** Returns an integrity formula that checks the equality to a version code. */
@@ -187,6 +194,14 @@ public abstract class IntegrityFormula {
      * @hide
      */
     public abstract boolean isAppCertificateFormula();
+
+    /**
+     * Returns true when the formula (or one of its atomic formulas) has app certificate lineage as
+     * key.
+     *
+     * @hide
+     */
+    public abstract boolean isAppCertificateLineageFormula();
 
     /**
      * Returns true when the formula (or one of its atomic formulas) has installer package name or

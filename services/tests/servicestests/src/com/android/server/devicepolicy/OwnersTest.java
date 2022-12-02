@@ -16,467 +16,110 @@
 
 package com.android.server.devicepolicy;
 
+import static android.app.admin.DevicePolicyManager.DEVICE_OWNER_TYPE_DEFAULT;
+import static android.app.admin.DevicePolicyManager.DEVICE_OWNER_TYPE_FINANCED;
+import static android.app.admin.SystemUpdatePolicy.TYPE_INSTALL_WINDOWED;
+
+import static com.google.common.truth.Truth.assertThat;
+
 import android.content.ComponentName;
-import android.os.UserHandle;
+import android.os.IpcDataCache;
 import android.test.suitebuilder.annotation.SmallTest;
 
-import com.android.server.devicepolicy.DevicePolicyManagerServiceTestable.OwnersTestable;
+import androidx.test.runner.AndroidJUnit4;
+
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
 
 /**
  * Tests for the DeviceOwner object that saves & loads device and policy owner information.
- * run this test with:
- m FrameworksServicesTests &&
- adb install \
-   -r out/target/product/hammerhead/data/app/FrameworksServicesTests/FrameworksServicesTests.apk &&
- adb shell am instrument -e class com.android.server.devicepolicy.OwnersTest \
-   -w com.android.frameworks.servicestests/androidx.test.runner.AndroidJUnitRunner
-
- (mmma frameworks/base/services/tests/servicestests/ for non-ninja build)
+ *
+ * <p>Run this test with:
+ *
+ * {@code atest FrameworksServicesTests:com.android.server.devicepolicy.OwnersTest}
  */
 @SmallTest
+@RunWith(AndroidJUnit4.class)
 public class OwnersTest extends DpmTestBase {
-    public void testUpgrade01() throws Exception {
-        getServices().addUsers(10, 11, 20, 21);
 
-        // First, migrate.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
+    private static final String TESTDPC_PACKAGE = "com.afwsamples.testdpc";
 
-            DpmTestUtils.writeToFile(owners.getLegacyConfigFile(),
-                    DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/test01/input.xml"));
-
-            owners.load();
-
-            // The legacy file should be removed.
-            assertFalse(owners.getLegacyConfigFile().exists());
-
-            // File was empty, so no new files should be created.
-            assertFalse(owners.getDeviceOwnerFile().exists());
-
-            assertFalse(owners.getProfileOwnerFile(10).exists());
-            assertFalse(owners.getProfileOwnerFile(11).exists());
-            assertFalse(owners.getProfileOwnerFile(20).exists());
-            assertFalse(owners.getProfileOwnerFile(21).exists());
-
-            assertFalse(owners.hasDeviceOwner());
-            assertEquals(UserHandle.USER_NULL, owners.getDeviceOwnerUserId());
-            assertNull(owners.getSystemUpdatePolicy());
-            assertEquals(0, owners.getProfileOwnerKeys().size());
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-
-        // Then re-read and check.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-            owners.load();
-
-            assertFalse(owners.hasDeviceOwner());
-            assertEquals(UserHandle.USER_NULL, owners.getDeviceOwnerUserId());
-            assertNull(owners.getSystemUpdatePolicy());
-            assertEquals(0, owners.getProfileOwnerKeys().size());
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
+    @Before
+    public void setUp() throws Exception {
+        // Disable caches in this test process. This must happen early, since some of the
+        // following initialization steps invalidate caches.
+        IpcDataCache.disableForTestMode();
     }
 
-    public void testUpgrade02() throws Exception {
-        getServices().addUsers(10, 11, 20, 21);
+    @Test
+    public void loadProfileOwner() throws Exception {
+        getServices().addUsers(10);
 
-        // First, migrate.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
+        final Owners owners = makeOwners();
 
-            DpmTestUtils.writeToFile(owners.getLegacyConfigFile(),
-                    DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/test02/input.xml"));
-
-            owners.load();
-
-            // The legacy file should be removed.
-            assertFalse(owners.getLegacyConfigFile().exists());
-
-            assertTrue(owners.getDeviceOwnerFile().exists()); // TODO Check content
-
-            assertFalse(owners.getProfileOwnerFile(10).exists());
-            assertFalse(owners.getProfileOwnerFile(11).exists());
-            assertFalse(owners.getProfileOwnerFile(20).exists());
-            assertFalse(owners.getProfileOwnerFile(21).exists());
-
-            assertTrue(owners.hasDeviceOwner());
-            assertEquals(null, owners.getDeviceOwnerName());
-            assertEquals("com.google.android.testdpc", owners.getDeviceOwnerPackageName());
-            assertEquals(UserHandle.USER_SYSTEM, owners.getDeviceOwnerUserId());
-
-            assertNull(owners.getSystemUpdatePolicy());
-            assertEquals(0, owners.getProfileOwnerKeys().size());
-
-            assertTrue(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-
-        // Then re-read and check.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-            owners.load();
-
-            assertTrue(owners.hasDeviceOwner());
-            assertEquals(null, owners.getDeviceOwnerName());
-            assertEquals("com.google.android.testdpc", owners.getDeviceOwnerPackageName());
-            assertEquals(UserHandle.USER_SYSTEM, owners.getDeviceOwnerUserId());
-
-            assertNull(owners.getSystemUpdatePolicy());
-            assertEquals(0, owners.getProfileOwnerKeys().size());
-
-            assertTrue(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-    }
-
-    public void testUpgrade03() throws Exception {
-        getServices().addUsers(10, 11, 20, 21);
-
-        // First, migrate.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-
-            DpmTestUtils.writeToFile(owners.getLegacyConfigFile(),
-                    DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/test03/input.xml"));
-
-            owners.load();
-
-            // The legacy file should be removed.
-            assertFalse(owners.getLegacyConfigFile().exists());
-
-            assertFalse(owners.getDeviceOwnerFile().exists());
-
-            assertTrue(owners.getProfileOwnerFile(10).exists());
-            assertTrue(owners.getProfileOwnerFile(11).exists());
-            assertFalse(owners.getProfileOwnerFile(20).exists());
-            assertFalse(owners.getProfileOwnerFile(21).exists());
-
-            assertFalse(owners.hasDeviceOwner());
-            assertEquals(UserHandle.USER_NULL, owners.getDeviceOwnerUserId());
-            assertNull(owners.getSystemUpdatePolicy());
-
-            assertEquals(2, owners.getProfileOwnerKeys().size());
-            assertEquals(new ComponentName("com.google.android.testdpc",
-                            "com.google.android.testdpc.DeviceAdminReceiver0"),
-                    owners.getProfileOwnerComponent(10));
-            assertEquals("0", owners.getProfileOwnerName(10));
-            assertEquals("com.google.android.testdpc", owners.getProfileOwnerPackage(10));
-
-            assertEquals(new ComponentName("com.google.android.testdpc1", ""),
-                    owners.getProfileOwnerComponent(11));
-            assertEquals("1", owners.getProfileOwnerName(11));
-            assertEquals("com.google.android.testdpc1", owners.getProfileOwnerPackage(11));
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-
-        // Then re-read and check.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-            owners.load();
-
-            assertFalse(owners.hasDeviceOwner());
-            assertEquals(UserHandle.USER_NULL, owners.getDeviceOwnerUserId());
-            assertNull(owners.getSystemUpdatePolicy());
-
-            assertEquals(2, owners.getProfileOwnerKeys().size());
-            assertEquals(new ComponentName("com.google.android.testdpc",
-                            "com.google.android.testdpc.DeviceAdminReceiver0"),
-                    owners.getProfileOwnerComponent(10));
-            assertEquals("0", owners.getProfileOwnerName(10));
-            assertEquals("com.google.android.testdpc", owners.getProfileOwnerPackage(10));
-
-            assertEquals(new ComponentName("com.google.android.testdpc1", ""),
-                    owners.getProfileOwnerComponent(11));
-            assertEquals("1", owners.getProfileOwnerName(11));
-            assertEquals("com.google.android.testdpc1", owners.getProfileOwnerPackage(11));
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-    }
-
-    /**
-     * Note this also tests {@link Owners#setDeviceOwnerUserRestrictionsMigrated()}
-     * and {@link  Owners#setProfileOwnerUserRestrictionsMigrated(int)}.
-     */
-    public void testUpgrade04() throws Exception {
-        getServices().addUsers(10, 11, 20, 21);
-
-        // First, migrate.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-
-            DpmTestUtils.writeToFile(owners.getLegacyConfigFile(),
-                    DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/test04/input.xml"));
-
-            owners.load();
-
-            // The legacy file should be removed.
-            assertFalse(owners.getLegacyConfigFile().exists());
-
-            assertTrue(owners.getDeviceOwnerFile().exists());
-
-            assertTrue(owners.getProfileOwnerFile(10).exists());
-            assertTrue(owners.getProfileOwnerFile(11).exists());
-            assertFalse(owners.getProfileOwnerFile(20).exists());
-            assertFalse(owners.getProfileOwnerFile(21).exists());
-
-            assertTrue(owners.hasDeviceOwner());
-            assertEquals(null, owners.getDeviceOwnerName());
-            assertEquals("com.google.android.testdpc", owners.getDeviceOwnerPackageName());
-            assertEquals(UserHandle.USER_SYSTEM, owners.getDeviceOwnerUserId());
-
-            assertNotNull(owners.getSystemUpdatePolicy());
-            assertEquals(5, owners.getSystemUpdatePolicy().getPolicyType());
-
-            assertEquals(2, owners.getProfileOwnerKeys().size());
-            assertEquals(new ComponentName("com.google.android.testdpc",
-                            "com.google.android.testdpc.DeviceAdminReceiver0"),
-                    owners.getProfileOwnerComponent(10));
-            assertEquals("0", owners.getProfileOwnerName(10));
-            assertEquals("com.google.android.testdpc", owners.getProfileOwnerPackage(10));
-
-            assertEquals(new ComponentName("com.google.android.testdpc1", ""),
-                    owners.getProfileOwnerComponent(11));
-            assertEquals("1", owners.getProfileOwnerName(11));
-            assertEquals("com.google.android.testdpc1", owners.getProfileOwnerPackage(11));
-
-            assertTrue(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-
-        // Then re-read and check.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-            owners.load();
-
-            assertTrue(owners.hasDeviceOwner());
-            assertEquals(null, owners.getDeviceOwnerName());
-            assertEquals("com.google.android.testdpc", owners.getDeviceOwnerPackageName());
-            assertEquals(UserHandle.USER_SYSTEM, owners.getDeviceOwnerUserId());
-
-            assertNotNull(owners.getSystemUpdatePolicy());
-            assertEquals(5, owners.getSystemUpdatePolicy().getPolicyType());
-
-            assertEquals(2, owners.getProfileOwnerKeys().size());
-            assertEquals(new ComponentName("com.google.android.testdpc",
-                            "com.google.android.testdpc.DeviceAdminReceiver0"),
-                    owners.getProfileOwnerComponent(10));
-            assertEquals("0", owners.getProfileOwnerName(10));
-            assertEquals("com.google.android.testdpc", owners.getProfileOwnerPackage(10));
-
-            assertEquals(new ComponentName("com.google.android.testdpc1", ""),
-                    owners.getProfileOwnerComponent(11));
-            assertEquals("1", owners.getProfileOwnerName(11));
-            assertEquals("com.google.android.testdpc1", owners.getProfileOwnerPackage(11));
-
-            assertTrue(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-
-            owners.setDeviceOwnerUserRestrictionsMigrated();
-        }
-
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-            owners.load();
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-
-            owners.setProfileOwnerUserRestrictionsMigrated(11);
-        }
-
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-            owners.load();
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertTrue(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-
-            owners.setProfileOwnerUserRestrictionsMigrated(11);
-        }
-    }
-
-    public void testUpgrade05() throws Exception {
-        getServices().addUsers(10, 11, 20, 21);
-
-        // First, migrate.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-
-            DpmTestUtils.writeToFile(owners.getLegacyConfigFile(),
-                    DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/test05/input.xml"));
-
-            owners.load();
-
-            // The legacy file should be removed.
-            assertFalse(owners.getLegacyConfigFile().exists());
-
-            // Note device initializer is no longer supported.  No need to write the DO file.
-            assertFalse(owners.getDeviceOwnerFile().exists());
-
-            assertFalse(owners.getProfileOwnerFile(10).exists());
-            assertFalse(owners.getProfileOwnerFile(11).exists());
-            assertFalse(owners.getProfileOwnerFile(20).exists());
-
-            assertFalse(owners.hasDeviceOwner());
-            assertEquals(UserHandle.USER_NULL, owners.getDeviceOwnerUserId());
-
-
-            assertNull(owners.getSystemUpdatePolicy());
-            assertEquals(0, owners.getProfileOwnerKeys().size());
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-
-        // Then re-read and check.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-            owners.load();
-
-            assertFalse(owners.hasDeviceOwner());
-            assertEquals(UserHandle.USER_NULL, owners.getDeviceOwnerUserId());
-
-
-            assertNull(owners.getSystemUpdatePolicy());
-            assertEquals(0, owners.getProfileOwnerKeys().size());
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-    }
-
-    public void testUpgrade06() throws Exception {
-        getServices().addUsers(10, 11, 20, 21);
-
-        // First, migrate.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-
-            DpmTestUtils.writeToFile(owners.getLegacyConfigFile(),
-                    DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/test06/input.xml"));
-
-            owners.load();
-
-            // The legacy file should be removed.
-            assertFalse(owners.getLegacyConfigFile().exists());
-
-            assertTrue(owners.getDeviceOwnerFile().exists());
-
-            assertFalse(owners.getProfileOwnerFile(10).exists());
-            assertFalse(owners.getProfileOwnerFile(11).exists());
-            assertFalse(owners.getProfileOwnerFile(20).exists());
-
-            assertFalse(owners.hasDeviceOwner());
-            assertEquals(UserHandle.USER_NULL, owners.getDeviceOwnerUserId());
-            assertEquals(0, owners.getProfileOwnerKeys().size());
-
-            assertNotNull(owners.getSystemUpdatePolicy());
-            assertEquals(5, owners.getSystemUpdatePolicy().getPolicyType());
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-
-        // Then re-read and check.
-        {
-            final OwnersTestable owners = new OwnersTestable(getServices());
-            owners.load();
-
-            assertFalse(owners.hasDeviceOwner());
-            assertEquals(UserHandle.USER_NULL, owners.getDeviceOwnerUserId());
-            assertEquals(0, owners.getProfileOwnerKeys().size());
-
-            assertNotNull(owners.getSystemUpdatePolicy());
-            assertEquals(5, owners.getSystemUpdatePolicy().getPolicyType());
-
-            assertFalse(owners.getDeviceOwnerUserRestrictionsNeedsMigration());
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(10));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(11));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(20));
-            assertFalse(owners.getProfileOwnerUserRestrictionsNeedsMigration(21));
-        }
-    }
-
-    public void testRemoveExistingFiles() throws Exception {
-        getServices().addUsers(10, 11, 20, 21);
-
-        final OwnersTestable owners = new OwnersTestable(getServices());
-
-        // First, migrate to create new-style config files.
-        DpmTestUtils.writeToFile(owners.getLegacyConfigFile(),
-                DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/test04/input.xml"));
+        DpmTestUtils.writeToFile(owners.getProfileOwnerFile(10),
+                DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/profile_owner_1.xml"));
 
         owners.load();
 
-        assertFalse(owners.getLegacyConfigFile().exists());
+        assertThat(owners.hasDeviceOwner()).isFalse();
+        assertThat(owners.getSystemUpdatePolicy()).isNull();
 
-        assertTrue(owners.getDeviceOwnerFile().exists());
-        assertTrue(owners.getProfileOwnerFile(10).exists());
-        assertTrue(owners.getProfileOwnerFile(11).exists());
+        assertThat(owners.getProfileOwnerKeys()).hasSize(1);
+        assertThat(owners.getProfileOwnerComponent(10))
+                .isEqualTo(new ComponentName(TESTDPC_PACKAGE,
+                        "com.afwsamples.testdpc.DeviceAdminReceiver"));
+    }
 
-        // Then clear all information and save.
-        owners.clearDeviceOwner();
-        owners.clearSystemUpdatePolicy();
-        owners.removeProfileOwner(10);
-        owners.removeProfileOwner(11);
+    @Test
+    public void loadDeviceOwner() throws Exception {
+        final Owners owners = makeOwners();
 
-        owners.writeDeviceOwner();
-        owners.writeProfileOwner(10);
-        owners.writeProfileOwner(11);
-        owners.writeProfileOwner(20);
-        owners.writeProfileOwner(21);
+        DpmTestUtils.writeToFile(owners.getDeviceOwnerFile(),
+                DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/device_owner_1.xml"));
 
-        // Now all files should be removed.
-        assertFalse(owners.getDeviceOwnerFile().exists());
-        assertFalse(owners.getProfileOwnerFile(10).exists());
-        assertFalse(owners.getProfileOwnerFile(11).exists());
+        owners.load();
+
+        assertThat(owners.hasDeviceOwner()).isTrue();
+
+        assertThat(owners.getProfileOwnerKeys()).hasSize(0);
+        assertThat(owners.getDeviceOwnerComponent())
+                .isEqualTo(new ComponentName(TESTDPC_PACKAGE,
+                        "com.afwsamples.testdpc.DeviceAdminReceiver"));
+
+        assertThat(owners.getSystemUpdatePolicy().getPolicyType()).isEqualTo(TYPE_INSTALL_WINDOWED);
+    }
+
+    @Test
+    public void testDeviceOwnerType() throws Exception {
+        final Owners owners = makeOwners();
+
+        DpmTestUtils.writeToFile(owners.getDeviceOwnerFile(),
+                DpmTestUtils.readAsset(mRealTestContext, "OwnersTest/device_owner_1.xml"));
+
+        owners.load();
+
+        assertThat(owners.getDeviceOwnerType(TESTDPC_PACKAGE))
+                .isEqualTo(DEVICE_OWNER_TYPE_DEFAULT);
+
+        // Should be able to set DO type to "financed".
+        owners.setDeviceOwnerType(
+                TESTDPC_PACKAGE, DEVICE_OWNER_TYPE_FINANCED, /* isAdminTestOnly= */ false);
+        assertThat(owners.getDeviceOwnerType(TESTDPC_PACKAGE))
+                .isEqualTo(DEVICE_OWNER_TYPE_FINANCED);
+
+        // Once set, DO type cannot be changed.
+        owners.setDeviceOwnerType(
+                TESTDPC_PACKAGE, DEVICE_OWNER_TYPE_DEFAULT, /* isAdminTestOnly= */ false);
+        assertThat(owners.getDeviceOwnerType(TESTDPC_PACKAGE))
+                .isEqualTo(DEVICE_OWNER_TYPE_FINANCED);
+    }
+
+    private Owners makeOwners() {
+        final MockSystemServices services = getServices();
+        return new Owners(services.userManager, services.userManagerInternal,
+                services.packageManagerInternal, services.activityTaskManagerInternal,
+                services.activityManagerInternal, services.pathProvider);
     }
 }

@@ -16,15 +16,25 @@
 
 package com.android.server.am;
 
+import static android.Manifest.permission.INTERACT_ACROSS_PROFILES;
+import static android.Manifest.permission.INTERACT_ACROSS_USERS;
+import static android.Manifest.permission.INTERACT_ACROSS_USERS_FULL;
+import static android.app.ActivityManagerInternal.ALLOW_FULL_ONLY;
+import static android.app.ActivityManagerInternal.ALLOW_NON_FULL;
+import static android.app.ActivityManagerInternal.ALLOW_NON_FULL_IN_PROFILE;
+import static android.app.ActivityManagerInternal.ALLOW_PROFILES_OR_NON_FULL;
 import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 import static android.testing.DexmakerShareClassLoaderRule.runWithDexmakerShareClassLoader;
 
 import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentation;
 
+import static com.android.server.am.UserController.CLEAR_USER_JOURNEY_SESSION_MSG;
+import static com.android.server.am.UserController.COMPLETE_USER_SWITCH_MSG;
 import static com.android.server.am.UserController.CONTINUE_USER_SWITCH_MSG;
 import static com.android.server.am.UserController.REPORT_LOCKED_BOOT_COMPLETE_MSG;
 import static com.android.server.am.UserController.REPORT_USER_SWITCH_COMPLETE_MSG;
 import static com.android.server.am.UserController.REPORT_USER_SWITCH_MSG;
+import static com.android.server.am.UserController.USER_COMPLETED_EVENT_MSG;
 import static com.android.server.am.UserController.USER_CURRENT_MSG;
 import static com.android.server.am.UserController.USER_START_MSG;
 import static com.android.server.am.UserController.USER_SWITCH_TIMEOUT_MSG;
@@ -37,6 +47,7 @@ import static com.google.common.truth.Truth.assertWithMessage;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Matchers.any;
@@ -53,13 +64,17 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.validateMockitoUsage;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertThrows;
 
+import android.annotation.Nullable;
 import android.annotation.UserIdInt;
 import android.app.ActivityManager;
 import android.app.IUserSwitchObserver;
+import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.IIntentReceiver;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.UserInfo;
 import android.content.pm.UserInfo.UserInfoFlag;
 import android.os.Binder;
@@ -71,7 +86,7 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.RemoteException;
 import android.os.UserHandle;
-import android.os.UserManagerInternal;
+import android.os.UserManager;
 import android.os.storage.IStorageManager;
 import android.platform.test.annotations.Presubmit;
 import android.util.Log;
@@ -79,7 +94,9 @@ import android.util.Log;
 import androidx.test.filters.SmallTest;
 
 import com.android.server.FgThread;
+import com.android.server.SystemService;
 import com.android.server.am.UserState.KeyEvictedCallback;
+import com.android.server.pm.UserManagerInternal;
 import com.android.server.pm.UserManagerService;
 import com.android.server.wm.WindowManagerService;
 
@@ -151,17 +168,19 @@ public class UserControllerTest {
             mInjector = spy(new TestInjector(getInstrumentation().getTargetContext()));
             doNothing().when(mInjector).clearAllLockedTasks(anyString());
             doNothing().when(mInjector).startHomeActivity(anyInt(), anyString());
-            doReturn(false).when(mInjector).stackSupervisorSwitchUser(anyInt(), any());
-            doNothing().when(mInjector).stackSupervisorResumeFocusedStackTopActivity();
-            doNothing().when(mInjector).systemServiceManagerCleanupUser(anyInt());
+            doReturn(false).when(mInjector).taskSupervisorSwitchUser(anyInt(), any());
+            doNothing().when(mInjector).taskSupervisorResumeFocusedStackTopActivity();
+            doNothing().when(mInjector).systemServiceManagerOnUserStopped(anyInt());
+            doNothing().when(mInjector).systemServiceManagerOnUserCompletedEvent(
+                    anyInt(), anyInt());
             doNothing().when(mInjector).activityManagerForceStopPackage(anyInt(), anyString());
             doNothing().when(mInjector).activityManagerOnUserStopped(anyInt());
             doNothing().when(mInjector).clearBroadcastQueueForUser(anyInt());
-            doNothing().when(mInjector).stackSupervisorRemoveUser(anyInt());
+            doNothing().when(mInjector).taskSupervisorRemoveUser(anyInt());
             // All UserController params are set to default.
             mUserController = new UserController(mInjector);
             setUpUser(TEST_USER_ID, NO_USERINFO_FLAGS);
-            setUpUser(TEST_PRE_CREATED_USER_ID, NO_USERINFO_FLAGS, /* preCreated=*/ true);
+            setUpUser(TEST_PRE_CREATED_USER_ID, NO_USERINFO_FLAGS, /* preCreated=*/ true, null);
         });
     }
 
@@ -206,11 +225,15 @@ public class UserControllerTest {
     @Test
     public void testStartPreCreatedUser_foreground() {
         assertFalse(mUserController.startUser(TEST_PRE_CREATED_USER_ID, /* foreground= */ true));
+        // Make sure no intents have been fired for pre-created users.
+        assertTrue(mInjector.mSentIntents.isEmpty());
     }
 
     @Test
     public void testStartPreCreatedUser_background() throws Exception {
         assertTrue(mUserController.startUser(TEST_PRE_CREATED_USER_ID, /* foreground= */ false));
+        // Make sure no intents have been fired for pre-created users.
+        assertTrue(mInjector.mSentIntents.isEmpty());
 
         verify(mInjector.getWindowManager(), never()).startFreezingScreen(anyInt(), anyInt());
         verify(mInjector.getWindowManager(), never()).setSwitchingUser(anyBoolean());
@@ -318,8 +341,16 @@ public class UserControllerTest {
         assertWithMessage("No messages should be sent").that(actualCodes).isEmpty();
     }
 
+    private void continueAndCompleteUserSwitch(UserState userState, int oldUserId, int newUserId) {
+        mUserController.continueUserSwitch(userState, oldUserId, newUserId);
+        mInjector.mHandler.removeMessages(UserController.COMPLETE_USER_SWITCH_MSG);
+        mUserController.completeUserSwitch(newUserId);
+    }
+
     @Test
     public void testContinueUserSwitch() throws RemoteException {
+        mUserController.setInitialConfig(/* userSwitchUiEnabled= */ true,
+                /* maxRunningUsers= */ 3, /* delayUserDataLocking= */ false);
         // Start user -- this will update state of mUserController
         mUserController.startUser(TEST_USER_ID, true);
         Message reportMsg = mInjector.mHandler.getMessageForCode(REPORT_USER_SWITCH_MSG);
@@ -329,7 +360,28 @@ public class UserControllerTest {
         int newUserId = reportMsg.arg2;
         mInjector.mHandler.clearAllRecordedMessages();
         // Verify that continueUserSwitch worked as expected
-        mUserController.continueUserSwitch(userState, oldUserId, newUserId);
+        continueAndCompleteUserSwitch(userState, oldUserId, newUserId);
+        verify(mInjector, times(0)).dismissKeyguard(any(), anyString());
+        verify(mInjector.getWindowManager(), times(1)).stopFreezingScreen();
+        continueUserSwitchAssertions(TEST_USER_ID, false);
+    }
+
+    @Test
+    public void testContinueUserSwitchDismissKeyguard() throws RemoteException {
+        when(mInjector.mKeyguardManagerMock.isDeviceSecure(anyInt())).thenReturn(false);
+        mUserController.setInitialConfig(/* userSwitchUiEnabled= */ true,
+                /* maxRunningUsers= */ 3, /* delayUserDataLocking= */ false);
+        // Start user -- this will update state of mUserController
+        mUserController.startUser(TEST_USER_ID, true);
+        Message reportMsg = mInjector.mHandler.getMessageForCode(REPORT_USER_SWITCH_MSG);
+        assertNotNull(reportMsg);
+        UserState userState = (UserState) reportMsg.obj;
+        int oldUserId = reportMsg.arg1;
+        int newUserId = reportMsg.arg2;
+        mInjector.mHandler.clearAllRecordedMessages();
+        // Verify that continueUserSwitch worked as expected
+        continueAndCompleteUserSwitch(userState, oldUserId, newUserId);
+        verify(mInjector, times(1)).dismissKeyguard(any(), anyString());
         verify(mInjector.getWindowManager(), times(1)).stopFreezingScreen();
         continueUserSwitchAssertions(TEST_USER_ID, false);
     }
@@ -348,7 +400,7 @@ public class UserControllerTest {
         int newUserId = reportMsg.arg2;
         mInjector.mHandler.clearAllRecordedMessages();
         // Verify that continueUserSwitch worked as expected
-        mUserController.continueUserSwitch(userState, oldUserId, newUserId);
+        continueAndCompleteUserSwitch(userState, oldUserId, newUserId);
         verify(mInjector.getWindowManager(), never()).stopFreezingScreen();
         continueUserSwitchAssertions(TEST_USER_ID, false);
     }
@@ -356,8 +408,10 @@ public class UserControllerTest {
     private void continueUserSwitchAssertions(int expectedUserId, boolean backgroundUserStopping)
             throws RemoteException {
         Set<Integer> expectedCodes = new LinkedHashSet<>();
+        expectedCodes.add(COMPLETE_USER_SWITCH_MSG);
         expectedCodes.add(REPORT_USER_SWITCH_COMPLETE_MSG);
         if (backgroundUserStopping) {
+            expectedCodes.add(CLEAR_USER_JOURNEY_SESSION_MSG);
             expectedCodes.add(0); // this is for directly posting in stopping.
         }
         Set<Integer> actualCodes = mInjector.mHandler.getMessageCodes();
@@ -390,7 +444,7 @@ public class UserControllerTest {
     }
 
     @Test
-    public void testExplicitSystenUserStartInBackground() {
+    public void testExplicitSystemUserStartInBackground() {
         setUpUser(UserHandle.USER_SYSTEM, 0);
         assertFalse(mUserController.isSystemUserStarted());
         assertTrue(mUserController.startUser(UserHandle.USER_SYSTEM, false, null));
@@ -545,19 +599,215 @@ public class UserControllerTest {
                 /* keyEvictedCallback= */ mKeyEvictedCallback, /* expectLocking= */ true);
     }
 
+    @Test
+    public void testStartProfile_fullUserFails() {
+        setUpUser(TEST_USER_ID1, 0);
+        assertThrows(IllegalArgumentException.class,
+                () -> mUserController.startProfile(TEST_USER_ID1));
+    }
+
+    @Test
+    public void testStopProfile_fullUserFails() throws Exception {
+        setUpAndStartUserInBackground(TEST_USER_ID1);
+        assertThrows(IllegalArgumentException.class,
+                () -> mUserController.stopProfile(TEST_USER_ID1));
+    }
+
+    @Test
+    public void testStartProfile_disabledProfileFails() {
+        setUpUser(TEST_USER_ID1, UserInfo.FLAG_PROFILE | UserInfo.FLAG_DISABLED, /* preCreated= */
+                false, UserManager.USER_TYPE_PROFILE_MANAGED);
+        assertThat(mUserController.startProfile(TEST_USER_ID1)).isFalse();
+    }
+
+    @Test
+    public void testStartProfile() throws Exception {
+        setUpAndStartProfileInBackground(TEST_USER_ID1);
+        startBackgroundUserAssertions();
+    }
+
+    @Test
+    public void testStopProfile() throws Exception {
+        setUpAndStartProfileInBackground(TEST_USER_ID1);
+        assertProfileLockedOrUnlockedAfterStopping(TEST_USER_ID1, /* expectLocking= */ true);
+    }
+
+    /** Tests handleIncomingUser() for a variety of permissions and situations. */
+    @Test
+    public void testHandleIncomingUser() throws Exception {
+        final UserInfo user1a = new UserInfo(111, "user1a", 0);
+        final UserInfo user1b = new UserInfo(112, "user1b", 0);
+        final UserInfo user2 = new UserInfo(113, "user2", 0);
+        // user1a and user2b are in the same profile group; user2 is in a different one.
+        user1a.profileGroupId = 5;
+        user1b.profileGroupId = 5;
+        user2.profileGroupId = 6;
+
+        final List<UserInfo> users = Arrays.asList(user1a, user1b, user2);
+        when(mInjector.mUserManagerMock.getUsers(false)).thenReturn(users);
+        mUserController.onSystemReady(); // To set the profileGroupIds in UserController.
+
+
+        // Has INTERACT_ACROSS_USERS_FULL.
+        when(mInjector.checkComponentPermission(
+                eq(INTERACT_ACROSS_USERS_FULL), anyInt(), anyInt(), anyInt(), anyBoolean()))
+                .thenReturn(PackageManager.PERMISSION_GRANTED);
+        when(mInjector.checkComponentPermission(
+                eq(INTERACT_ACROSS_USERS), anyInt(), anyInt(), anyInt(), anyBoolean()))
+                .thenReturn(PackageManager.PERMISSION_DENIED);
+        when(mInjector.checkPermissionForPreflight(
+                eq(INTERACT_ACROSS_PROFILES), anyInt(), anyInt(), any())).thenReturn(false);
+
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_NON_FULL, true);
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_NON_FULL_IN_PROFILE, true);
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_FULL_ONLY, true);
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_PROFILES_OR_NON_FULL, true);
+
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_NON_FULL, true);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_NON_FULL_IN_PROFILE, true);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_FULL_ONLY, true);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_PROFILES_OR_NON_FULL, true);
+
+
+        // Has INTERACT_ACROSS_USERS.
+        when(mInjector.checkComponentPermission(
+                eq(INTERACT_ACROSS_USERS_FULL), anyInt(), anyInt(), anyInt(), anyBoolean()))
+                .thenReturn(PackageManager.PERMISSION_DENIED);
+        when(mInjector.checkComponentPermission(
+                eq(INTERACT_ACROSS_USERS), anyInt(), anyInt(), anyInt(), anyBoolean()))
+                .thenReturn(PackageManager.PERMISSION_GRANTED);
+        when(mInjector.checkPermissionForPreflight(
+                eq(INTERACT_ACROSS_PROFILES), anyInt(), anyInt(), any())).thenReturn(false);
+
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_NON_FULL, true);
+        checkHandleIncomingUser(user1a.id, user2.id,  ALLOW_NON_FULL_IN_PROFILE, false);
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_FULL_ONLY, false);
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_PROFILES_OR_NON_FULL, true);
+
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_NON_FULL, true);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_NON_FULL_IN_PROFILE, true);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_FULL_ONLY, false);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_PROFILES_OR_NON_FULL, true);
+
+
+        // Has INTERACT_ACROSS_PROFILES.
+        when(mInjector.checkComponentPermission(
+                eq(INTERACT_ACROSS_USERS_FULL), anyInt(), anyInt(), anyInt(), anyBoolean()))
+                .thenReturn(PackageManager.PERMISSION_DENIED);
+        when(mInjector.checkComponentPermission(
+                eq(INTERACT_ACROSS_USERS), anyInt(), anyInt(), anyInt(), anyBoolean()))
+                .thenReturn(PackageManager.PERMISSION_DENIED);
+        when(mInjector.checkPermissionForPreflight(
+                eq(INTERACT_ACROSS_PROFILES), anyInt(), anyInt(), any())).thenReturn(true);
+
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_NON_FULL, false);
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_NON_FULL_IN_PROFILE, false);
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_FULL_ONLY, false);
+        checkHandleIncomingUser(user1a.id, user2.id, ALLOW_PROFILES_OR_NON_FULL, false);
+
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_NON_FULL, false);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_NON_FULL_IN_PROFILE, false);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_FULL_ONLY, false);
+        checkHandleIncomingUser(user1a.id, user1b.id, ALLOW_PROFILES_OR_NON_FULL, true);
+    }
+
+    private void checkHandleIncomingUser(int fromUser, int toUser, int allowMode, boolean pass) {
+        final int pid = 100;
+        final int uid = fromUser * UserHandle.PER_USER_RANGE + 34567 + fromUser;
+        final String name = "whatever";
+        final String pkg = "some.package";
+        final boolean allowAll = false;
+
+        if (pass) {
+            mUserController.handleIncomingUser(pid, uid, toUser, allowAll, allowMode, name, pkg);
+        } else {
+            assertThrows(SecurityException.class, () -> mUserController.handleIncomingUser(
+                    pid, uid, toUser, allowAll, allowMode, name, pkg));
+        }
+    }
+
+    @Test
+    public void testScheduleOnUserCompletedEvent() throws Exception {
+        // user1 is starting, switching, and unlocked, but not scheduled unlocked yet
+        // user2 is starting and had unlocked but isn't unlocked anymore for whatever reason
+
+        final int user1 = 101;
+        final int user2 = 102;
+        setUpUser(user1, 0);
+        setUpUser(user2, 0);
+
+        mUserController.startUser(user1, /* foreground= */ true);
+        mUserController.getStartedUserState(user1).setState(UserState.STATE_RUNNING_UNLOCKED);
+
+        mUserController.startUser(user2, /* foreground= */ false);
+        mUserController.getStartedUserState(user2).setState(UserState.STATE_RUNNING_LOCKED);
+
+        final int event1a = SystemService.UserCompletedEventType.EVENT_TYPE_USER_STARTING;
+        final int event1b = SystemService.UserCompletedEventType.EVENT_TYPE_USER_SWITCHING;
+
+        final int event2a = SystemService.UserCompletedEventType.EVENT_TYPE_USER_STARTING;
+        final int event2b = SystemService.UserCompletedEventType.EVENT_TYPE_USER_UNLOCKED;
+
+
+        mUserController.scheduleOnUserCompletedEvent(user1, event1a, 2000);
+        assertNotNull(mInjector.mHandler.getMessageForCode(USER_COMPLETED_EVENT_MSG, user1));
+        assertNull(mInjector.mHandler.getMessageForCode(USER_COMPLETED_EVENT_MSG, user2));
+
+        mUserController.scheduleOnUserCompletedEvent(user2, event2a, 2000);
+        assertNotNull(mInjector.mHandler.getMessageForCode(USER_COMPLETED_EVENT_MSG, user1));
+        assertNotNull(mInjector.mHandler.getMessageForCode(USER_COMPLETED_EVENT_MSG, user2));
+
+        mUserController.scheduleOnUserCompletedEvent(user2, event2b, 2000);
+        mUserController.scheduleOnUserCompletedEvent(user1, event1b, 2000);
+        mUserController.scheduleOnUserCompletedEvent(user1, 0, 2000);
+
+        assertNotNull(mInjector.mHandler.getMessageForCode(USER_COMPLETED_EVENT_MSG, user1));
+        assertNotNull(mInjector.mHandler.getMessageForCode(USER_COMPLETED_EVENT_MSG, user2));
+
+        mUserController.reportOnUserCompletedEvent(user1);
+        verify(mInjector, times(1))
+                .systemServiceManagerOnUserCompletedEvent(eq(user1), eq(event1a | event1b));
+        verify(mInjector, never()).systemServiceManagerOnUserCompletedEvent(eq(user2), anyInt());
+
+        mUserController.reportOnUserCompletedEvent(user2);
+        verify(mInjector, times(1))
+                .systemServiceManagerOnUserCompletedEvent(eq(user2), eq(event2a));
+    }
+
     private void setUpAndStartUserInBackground(int userId) throws Exception {
         setUpUser(userId, 0);
         mUserController.startUser(userId, /* foreground= */ false);
         verify(mInjector.mStorageManagerMock, times(1))
-                .unlockUserKey(TEST_USER_ID, 0, null, null);
+                .unlockUserKey(userId, /* serialNumber= */ 0, /* secret= */ null);
+        mUserStates.put(userId, mUserController.getStartedUserState(userId));
+    }
+
+    private void setUpAndStartProfileInBackground(int userId) throws Exception {
+        setUpUser(userId, UserInfo.FLAG_PROFILE, false, UserManager.USER_TYPE_PROFILE_MANAGED);
+        assertThat(mUserController.startProfile(userId)).isTrue();
+
+        verify(mInjector.mStorageManagerMock, times(1))
+                .unlockUserKey(userId, /* serialNumber= */ 0, /* secret= */ null);
         mUserStates.put(userId, mUserController.getStartedUserState(userId));
     }
 
     private void assertUserLockedOrUnlockedAfterStopping(int userId, boolean delayedLocking,
-            KeyEvictedCallback keyEvictedCallback, boolean expectLocking)  throws Exception {
+            KeyEvictedCallback keyEvictedCallback, boolean expectLocking) throws Exception {
         int r = mUserController.stopUser(userId, /* force= */ true, /* delayedLocking= */
                 delayedLocking, null, keyEvictedCallback);
         assertThat(r).isEqualTo(ActivityManager.USER_OP_SUCCESS);
+        assertUserLockedOrUnlockedState(userId, delayedLocking, expectLocking);
+    }
+
+    private void assertProfileLockedOrUnlockedAfterStopping(int userId, boolean expectLocking)
+            throws Exception {
+        boolean profileStopped = mUserController.stopProfile(userId);
+        assertThat(profileStopped).isTrue();
+        assertUserLockedOrUnlockedState(userId, /* delayedLocking= */ false, expectLocking);
+    }
+
+    private void assertUserLockedOrUnlockedState(int userId, boolean delayedLocking,
+            boolean expectLocking) throws InterruptedException, RemoteException {
         // fake all interim steps
         UserState ussUser = mUserStates.get(userId);
         ussUser.setState(UserState.STATE_SHUTDOWN);
@@ -583,18 +833,23 @@ public class UserControllerTest {
         mUserStates.put(newUserId, userState);
         mInjector.mHandler.clearAllRecordedMessages();
         // Verify that continueUserSwitch worked as expected
-        mUserController.continueUserSwitch(userState, oldUserId, newUserId);
+        continueAndCompleteUserSwitch(userState, oldUserId, newUserId);
         verify(mInjector.getWindowManager(), times(expectedNumberOfCalls))
                 .stopFreezingScreen();
         continueUserSwitchAssertions(newUserId, expectOldUserStopping);
     }
 
     private void setUpUser(@UserIdInt int userId, @UserInfoFlag int flags) {
-        setUpUser(userId, flags, /* preCreated= */ false);
+        setUpUser(userId, flags, /* preCreated= */ false, /* userType */ null);
     }
 
-    private void setUpUser(@UserIdInt int userId, @UserInfoFlag int flags, boolean preCreated) {
-        UserInfo userInfo = new UserInfo(userId, "User" + userId, flags);
+    private void setUpUser(@UserIdInt int userId, @UserInfoFlag int flags, boolean preCreated,
+            @Nullable String userType) {
+        if (userType == null) {
+            userType = UserInfo.getDefaultUserType(flags);
+        }
+        UserInfo userInfo = new UserInfo(userId, "User" + userId, /* iconPath= */ null, flags,
+                userType);
         userInfo.preCreated = preCreated;
         when(mInjector.mUserManagerMock.getUserInfo(eq(userId))).thenReturn(userInfo);
         when(mInjector.mUserManagerMock.isPreCreated(userId)).thenReturn(preCreated);
@@ -633,6 +888,7 @@ public class UserControllerTest {
         private final IStorageManager mStorageManagerMock;
         private final UserManagerInternal mUserManagerInternalMock;
         private final WindowManagerService mWindowManagerMock;
+        private final KeyguardManager mKeyguardManagerMock;
 
         private final Context mCtx;
 
@@ -647,6 +903,8 @@ public class UserControllerTest {
             mUserManagerInternalMock = mock(UserManagerInternal.class);
             mWindowManagerMock = mock(WindowManagerService.class);
             mStorageManagerMock = mock(IStorageManager.class);
+            mKeyguardManagerMock = mock(KeyguardManager.class);
+            when(mKeyguardManagerMock.isDeviceSecure(anyInt())).thenReturn(true);
         }
 
         @Override
@@ -681,8 +939,30 @@ public class UserControllerTest {
         }
 
         @Override
+        int checkComponentPermission(String permission, int pid, int uid, int owner, boolean exp) {
+            Log.i(TAG, "checkComponentPermission " + permission);
+            return PERMISSION_GRANTED;
+        }
+
+        @Override
+        boolean checkPermissionForPreflight(String permission, int pid, int uid, String pkg) {
+            Log.i(TAG, "checkPermissionForPreflight " + permission);
+            return true;
+        }
+
+        @Override
+        boolean isCallerRecents(int uid) {
+            return false;
+        }
+
+        @Override
         WindowManagerService getWindowManager() {
             return mWindowManagerMock;
+        }
+
+        @Override
+        KeyguardManager getKeyguardManager() {
+            return mKeyguardManagerMock;
         }
 
         @Override
@@ -702,7 +982,7 @@ public class UserControllerTest {
         }
 
         @Override
-        void reportGlobalUsageEventLocked(int event) {
+        void reportGlobalUsageEvent(int event) {
         }
 
         @Override
@@ -718,6 +998,11 @@ public class UserControllerTest {
         @Override
         protected IStorageManager getStorageManager() {
             return mStorageManagerMock;
+        }
+
+        @Override
+        protected void dismissKeyguard(Runnable runnable, String reason) {
+            runnable.run();
         }
     }
 
@@ -737,8 +1022,12 @@ public class UserControllerTest {
         }
 
         Message getMessageForCode(int what) {
+            return getMessageForCode(what, null);
+        }
+
+        Message getMessageForCode(int what, Object obj) {
             for (Message msg : mMessages) {
-                if (msg.what == what) {
+                if (msg.what == what && (obj == null || obj.equals(msg.obj))) {
                     return msg;
                 }
             }

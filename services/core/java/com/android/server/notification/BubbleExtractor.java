@@ -32,6 +32,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.res.Resources;
 import android.util.Slog;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -49,10 +50,15 @@ public class BubbleExtractor implements NotificationSignalExtractor {
     private ActivityManager mActivityManager;
     private Context mContext;
 
+    boolean mSupportsBubble;
+
     public void initialize(Context context, NotificationUsageStats usageStats) {
         if (DBG) Slog.d(TAG, "Initializing  " + getClass().getSimpleName() + ".");
         mContext = context;
         mActivityManager = (ActivityManager) mContext.getSystemService(Context.ACTIVITY_SERVICE);
+
+        mSupportsBubble = Resources.getSystem().getBoolean(
+                com.android.internal.R.bool.config_supportsBubble);
     }
 
     public RankingReconsideration process(NotificationRecord record) {
@@ -71,37 +77,38 @@ public class BubbleExtractor implements NotificationSignalExtractor {
             return null;
         }
 
-        int bubblePreference =
-                mConfig.getBubblePreference(
-                        record.getSbn().getPackageName(), record.getSbn().getUid());
-        NotificationChannel recordChannel = record.getChannel();
-        boolean canPresentAsBubble = canPresentAsBubble(record)
+        boolean notifCanPresentAsBubble = canPresentAsBubble(record)
                 && !mActivityManager.isLowRamDevice()
                 && record.isConversation()
                 && record.getShortcutInfo() != null
                 && (record.getNotification().flags & FLAG_FOREGROUND_SERVICE) == 0;
 
-        if (!mConfig.bubblesEnabled()
-                || bubblePreference == BUBBLE_PREFERENCE_NONE
-                || !canPresentAsBubble) {
+        boolean userEnabledBubbles = mConfig.bubblesEnabled(record.getUser());
+        int appPreference =
+                mConfig.getBubblePreference(
+                        record.getSbn().getPackageName(), record.getSbn().getUid());
+        NotificationChannel recordChannel = record.getChannel();
+        if (!userEnabledBubbles
+                || appPreference == BUBBLE_PREFERENCE_NONE
+                || !notifCanPresentAsBubble) {
             record.setAllowBubble(false);
-            if (!canPresentAsBubble) {
+            if (!notifCanPresentAsBubble) {
                 // clear out bubble metadata since it can't be used
                 record.getNotification().setBubbleMetadata(null);
             }
         } else if (recordChannel == null) {
             // the app is allowed but there's no channel to check
             record.setAllowBubble(true);
-        } else if (bubblePreference == BUBBLE_PREFERENCE_ALL) {
+        } else if (appPreference == BUBBLE_PREFERENCE_ALL) {
             record.setAllowBubble(recordChannel.getAllowBubbles() != ALLOW_BUBBLE_OFF);
-        } else if (bubblePreference == BUBBLE_PREFERENCE_SELECTED) {
+        } else if (appPreference == BUBBLE_PREFERENCE_SELECTED) {
             record.setAllowBubble(recordChannel.canBubble());
         }
         if (DBG) {
             Slog.d(TAG, "record: " + record.getKey()
-                    + " appPref: " + bubblePreference
+                    + " appPref: " + appPreference
                     + " canBubble: " + record.canBubble()
-                    + " canPresentAsBubble: " + canPresentAsBubble
+                    + " canPresentAsBubble: " + notifCanPresentAsBubble
                     + " flagRemoved: " + record.isFlagBubbleRemoved());
         }
 
@@ -137,6 +144,10 @@ public class BubbleExtractor implements NotificationSignalExtractor {
      */
     @VisibleForTesting
     boolean canPresentAsBubble(NotificationRecord r) {
+        if (!mSupportsBubble) {
+            return false;
+        }
+
         Notification notification = r.getNotification();
         Notification.BubbleMetadata metadata = notification.getBubbleMetadata();
         String pkg = r.getSbn().getPackageName();
@@ -166,20 +177,20 @@ public class BubbleExtractor implements NotificationSignalExtractor {
             // TODO: check the shortcut intent / ensure it can show in activity view
             return true;
         }
-        return canLaunchInActivityView(mContext, metadata.getIntent(), pkg);
+        return canLaunchInTaskView(mContext, metadata.getIntent(), pkg);
     }
 
     /**
      * Whether an intent is properly configured to display in an {@link
-     * android.app.ActivityView} for bubbling.
+     * com.android.wm.shell.TaskView} for bubbling.
      *
      * @param context       the context to use.
      * @param pendingIntent the pending intent of the bubble.
      * @param packageName   the notification package name for this bubble.
      */
-    // Keep checks in sync with BubbleController#canLaunchInActivityView.
+    // Keep checks in sync with BubbleController#canLaunchInTaskView.
     @VisibleForTesting
-    protected boolean canLaunchInActivityView(Context context, PendingIntent pendingIntent,
+    protected boolean canLaunchInTaskView(Context context, PendingIntent pendingIntent,
             String packageName) {
         if (pendingIntent == null) {
             Slog.w(TAG, "Unable to create bubble -- no intent");

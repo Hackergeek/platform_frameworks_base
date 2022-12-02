@@ -16,21 +16,35 @@
 
 package android.net;
 
-import static android.net.PlatformVpnProfile.TYPE_IKEV2_IPSEC_PSK;
-import static android.net.PlatformVpnProfile.TYPE_IKEV2_IPSEC_RSA;
-import static android.net.PlatformVpnProfile.TYPE_IKEV2_IPSEC_USER_PASS;
+import static android.net.IpSecAlgorithm.AUTH_AES_CMAC;
+import static android.net.IpSecAlgorithm.AUTH_AES_XCBC;
+import static android.net.IpSecAlgorithm.AUTH_CRYPT_AES_GCM;
+import static android.net.IpSecAlgorithm.AUTH_CRYPT_CHACHA20_POLY1305;
+import static android.net.IpSecAlgorithm.AUTH_HMAC_SHA256;
+import static android.net.IpSecAlgorithm.AUTH_HMAC_SHA384;
+import static android.net.IpSecAlgorithm.AUTH_HMAC_SHA512;
+import static android.net.IpSecAlgorithm.CRYPT_AES_CBC;
+import static android.net.IpSecAlgorithm.CRYPT_AES_CTR;
 
 import static com.android.internal.annotations.VisibleForTesting.Visibility;
 import static com.android.internal.util.Preconditions.checkStringNotEmpty;
+import static com.android.net.module.util.NetworkStackConstants.IPV6_MIN_MTU;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresFeature;
 import android.content.pm.PackageManager;
-import android.os.Process;
+import android.net.ipsec.ike.IkeDerAsn1DnIdentification;
+import android.net.ipsec.ike.IkeFqdnIdentification;
+import android.net.ipsec.ike.IkeIdentification;
+import android.net.ipsec.ike.IkeIpv4AddrIdentification;
+import android.net.ipsec.ike.IkeIpv6AddrIdentification;
+import android.net.ipsec.ike.IkeKeyIdIdentification;
+import android.net.ipsec.ike.IkeRfc822AddrIdentification;
+import android.net.ipsec.ike.IkeSessionParams;
+import android.net.ipsec.ike.IkeTunnelConnectionParams;
 import android.security.Credentials;
-import android.security.KeyStore;
-import android.security.keystore.AndroidKeyStoreProvider;
+import android.util.Log;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.net.VpnProfile;
@@ -38,7 +52,9 @@ import com.android.internal.net.VpnProfile;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.Key;
 import java.security.KeyFactory;
+import java.security.KeyStore;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.cert.CertificateEncodingException;
@@ -64,25 +80,42 @@ import java.util.Objects;
  *     Exchange, Version 2 (IKEv2)</a>
  */
 public final class Ikev2VpnProfile extends PlatformVpnProfile {
+    private static final String TAG = Ikev2VpnProfile.class.getSimpleName();
     /** Prefix for when a Private Key is an alias to look for in KeyStore @hide */
     public static final String PREFIX_KEYSTORE_ALIAS = "KEYSTORE_ALIAS:";
     /** Prefix for when a Private Key is stored directly in the profile @hide */
     public static final String PREFIX_INLINE = "INLINE:";
 
+    private static final String ANDROID_KEYSTORE_PROVIDER = "AndroidKeyStore";
     private static final String MISSING_PARAM_MSG_TMPL = "Required parameter was not provided: %s";
     private static final String EMPTY_CERT = "";
 
     /** @hide */
-    public static final List<String> DEFAULT_ALGORITHMS =
-            Collections.unmodifiableList(Arrays.asList(
-                    IpSecAlgorithm.CRYPT_AES_CBC,
-                    IpSecAlgorithm.AUTH_HMAC_SHA256,
-                    IpSecAlgorithm.AUTH_HMAC_SHA384,
-                    IpSecAlgorithm.AUTH_HMAC_SHA512,
-                    IpSecAlgorithm.AUTH_CRYPT_AES_GCM));
+    public static final List<String> DEFAULT_ALGORITHMS;
 
-    @NonNull private final String mServerAddr;
-    @NonNull private final String mUserIdentity;
+    private static void addAlgorithmIfSupported(List<String> algorithms, String ipSecAlgoName) {
+        if (IpSecAlgorithm.getSupportedAlgorithms().contains(ipSecAlgoName)) {
+            algorithms.add(ipSecAlgoName);
+        }
+    }
+
+    static {
+        final List<String> algorithms = new ArrayList<>();
+        addAlgorithmIfSupported(algorithms, CRYPT_AES_CBC);
+        addAlgorithmIfSupported(algorithms, CRYPT_AES_CTR);
+        addAlgorithmIfSupported(algorithms, AUTH_HMAC_SHA256);
+        addAlgorithmIfSupported(algorithms, AUTH_HMAC_SHA384);
+        addAlgorithmIfSupported(algorithms, AUTH_HMAC_SHA512);
+        addAlgorithmIfSupported(algorithms, AUTH_AES_XCBC);
+        addAlgorithmIfSupported(algorithms, AUTH_AES_CMAC);
+        addAlgorithmIfSupported(algorithms, AUTH_CRYPT_AES_GCM);
+        addAlgorithmIfSupported(algorithms, AUTH_CRYPT_CHACHA20_POLY1305);
+
+        DEFAULT_ALGORITHMS = Collections.unmodifiableList(algorithms);
+    }
+
+    @Nullable private final String mServerAddr;
+    @Nullable private final String mUserIdentity;
 
     // PSK authentication
     @Nullable private final byte[] mPresharedKey;
@@ -104,11 +137,12 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
     private final boolean mIsMetered; // Defaults in builder
     private final int mMaxMtu; // Defaults in builder
     private final boolean mIsRestrictedToTestNetworks;
+    @Nullable private final IkeTunnelConnectionParams mIkeTunConnParams;
 
     private Ikev2VpnProfile(
             int type,
-            @NonNull String serverAddr,
-            @NonNull String userIdentity,
+            @Nullable String serverAddr,
+            @Nullable String userIdentity,
             @Nullable byte[] presharedKey,
             @Nullable X509Certificate serverRootCaCert,
             @Nullable String username,
@@ -120,11 +154,12 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
             boolean isBypassable,
             boolean isMetered,
             int maxMtu,
-            boolean restrictToTestNetworks) {
-        super(type);
+            boolean restrictToTestNetworks,
+            boolean excludeLocalRoutes,
+            boolean requiresInternetValidation,
+            @Nullable IkeTunnelConnectionParams ikeTunConnParams) {
+        super(type, excludeLocalRoutes, requiresInternetValidation);
 
-        checkNotNull(serverAddr, MISSING_PARAM_MSG_TMPL, "Server address");
-        checkNotNull(userIdentity, MISSING_PARAM_MSG_TMPL, "User Identity");
         checkNotNull(allowedAlgorithms, MISSING_PARAM_MSG_TMPL, "Allowed Algorithms");
 
         mServerAddr = serverAddr;
@@ -136,32 +171,40 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
         mPassword = password;
         mRsaPrivateKey = rsaPrivateKey;
         mUserCert = userCert;
-        mProxyInfo = new ProxyInfo(proxyInfo);
+        mProxyInfo = (proxyInfo == null) ? null : new ProxyInfo(proxyInfo);
 
         // UnmodifiableList doesn't make a defensive copy by default.
         mAllowedAlgorithms = Collections.unmodifiableList(new ArrayList<>(allowedAlgorithms));
+        if (excludeLocalRoutes && !isBypassable) {
+            throw new IllegalArgumentException(
+                    "Vpn must be bypassable if excludeLocalRoutes is set");
+        }
 
         mIsBypassable = isBypassable;
         mIsMetered = isMetered;
         mMaxMtu = maxMtu;
         mIsRestrictedToTestNetworks = restrictToTestNetworks;
+        mIkeTunConnParams = ikeTunConnParams;
 
         validate();
     }
 
     private void validate() {
+        // IPv6 MTU is greater; since profiles may be started by the system on IPv4 and IPv6
+        // networks, the VPN must provide a link fulfilling the stricter of the two conditions
+        // (at least that of the IPv6 MTU).
+        if (mMaxMtu < IPV6_MIN_MTU) {
+            throw new IllegalArgumentException("Max MTU must be at least" + IPV6_MIN_MTU);
+        }
+
+        // Skip validating the other fields if mIkeTunConnParams is set because the required
+        // information should all come from the mIkeTunConnParams.
+        if (mIkeTunConnParams != null) return;
+
         // Server Address not validated except to check an address was provided. This allows for
         // dual-stack servers and hostname based addresses.
         checkStringNotEmpty(mServerAddr, MISSING_PARAM_MSG_TMPL, "Server Address");
         checkStringNotEmpty(mUserIdentity, MISSING_PARAM_MSG_TMPL, "User Identity");
-
-        // IPv6 MTU is greater; since profiles may be started by the system on IPv4 and IPv6
-        // networks, the VPN must provide a link fulfilling the stricter of the two conditions
-        // (at least that of the IPv6 MTU).
-        if (mMaxMtu < LinkProperties.MIN_MTU_V6) {
-            throw new IllegalArgumentException(
-                    "Max MTU must be at least" + LinkProperties.MIN_MTU_V6);
-        }
 
         switch (mType) {
             case TYPE_IKEV2_IPSEC_USER_PASS:
@@ -196,11 +239,9 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
      * that provides Authentication, and one that provides Encryption. Authenticated Encryption with
      * Associated Data (AEAD) algorithms are counted as providing Authentication and Encryption.
      *
-     * @param allowedAlgorithms The list to be validated
+     * @param algorithmNames The list to be validated
      */
     private static void validateAllowedAlgorithms(@NonNull List<String> algorithmNames) {
-        VpnProfile.validateAllowedAlgorithms(algorithmNames);
-
         // First, make sure no insecure algorithms were proposed.
         if (algorithmNames.contains(IpSecAlgorithm.AUTH_HMAC_MD5)
                 || algorithmNames.contains(IpSecAlgorithm.AUTH_HMAC_SHA1)) {
@@ -241,22 +282,31 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
     /** Retrieves the server address string. */
     @NonNull
     public String getServerAddr() {
-        return mServerAddr;
+        if (mIkeTunConnParams == null) return mServerAddr;
+
+        final IkeSessionParams ikeSessionParams = mIkeTunConnParams.getIkeSessionParams();
+        return ikeSessionParams.getServerHostname();
     }
 
     /** Retrieves the user identity. */
     @NonNull
     public String getUserIdentity() {
-        return mUserIdentity;
+        if (mIkeTunConnParams == null) return mUserIdentity;
+
+        final IkeSessionParams ikeSessionParams = mIkeTunConnParams.getIkeSessionParams();
+        return getUserIdentityFromIkeSession(ikeSessionParams);
     }
 
     /**
      * Retrieves the pre-shared key.
      *
-     * <p>May be null if the profile is not using Pre-shared key authentication.
+     * <p>May be null if the profile is not using Pre-shared key authentication, or the profile is
+     * built from an {@link IkeTunnelConnectionParams}.
      */
     @Nullable
     public byte[] getPresharedKey() {
+        if (mIkeTunConnParams != null) return null;
+
         return mPresharedKey == null ? null : Arrays.copyOf(mPresharedKey, mPresharedKey.length);
     }
 
@@ -264,46 +314,62 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
      * Retrieves the certificate for the server's root CA.
      *
      * <p>May be null if the profile is not using RSA Digital Signature Authentication or
-     * Username/Password authentication
+     * Username/Password authentication, or the profile is built from an
+     * {@link IkeTunnelConnectionParams}.
      */
     @Nullable
     public X509Certificate getServerRootCaCert() {
+        if (mIkeTunConnParams != null) return null;
+
         return mServerRootCaCert;
     }
-
     /**
      * Retrieves the username.
      *
-     * <p>May be null if the profile is not using Username/Password authentication
+     * <p>May be null if the profile is not using Username/Password authentication, or the profile
+     * is built from an {@link IkeTunnelConnectionParams}.
      */
     @Nullable
     public String getUsername() {
+        if (mIkeTunConnParams != null) return null;
+
         return mUsername;
     }
 
     /**
      * Retrieves the password.
      *
-     * <p>May be null if the profile is not using Username/Password authentication
+     * <p>May be null if the profile is not using Username/Password authentication, or the profile
+     * is built from an {@link IkeTunnelConnectionParams}.
      */
     @Nullable
     public String getPassword() {
+        if (mIkeTunConnParams != null) return null;
+
         return mPassword;
     }
 
     /**
      * Retrieves the RSA private key.
      *
-     * <p>May be null if the profile is not using RSA Digital Signature authentication
+     * <p>May be null if the profile is not using RSA Digital Signature authentication, or the
+     * profile is built from an {@link IkeTunnelConnectionParams}.
      */
     @Nullable
     public PrivateKey getRsaPrivateKey() {
+        if (mIkeTunConnParams != null) return null;
+
         return mRsaPrivateKey;
     }
 
-    /** Retrieves the user certificate, if any was set. */
+    /** Retrieves the user certificate, if any was set.
+     *
+     * <p>May be null if the profile is built from an {@link IkeTunnelConnectionParams}.
+     */
     @Nullable
     public X509Certificate getUserCert() {
+        if (mIkeTunConnParams != null) return null;
+
         return mUserCert;
     }
 
@@ -313,9 +379,14 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
         return mProxyInfo;
     }
 
-    /** Returns all the algorithms allowed by this VPN profile. */
+    /** Returns all the algorithms allowed by this VPN profile.
+     *
+     *  <p>May be an empty list if the profile is built from an {@link IkeTunnelConnectionParams}.
+     */
     @NonNull
     public List<String> getAllowedAlgorithms() {
+        if (mIkeTunConnParams != null) return new ArrayList<>();
+
         return mAllowedAlgorithms;
     }
 
@@ -332,6 +403,12 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
     /** Retrieves the maximum MTU set for this VPN profile. */
     public int getMaxMtu() {
         return mMaxMtu;
+    }
+
+    /** Retrieves the ikeTunnelConnectionParams contains IKEv2 configurations, if any was set. */
+    @Nullable
+    public IkeTunnelConnectionParams getIkeTunnelConnectionParams() {
+        return mIkeTunConnParams;
     }
 
     /**
@@ -360,11 +437,14 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
                 mIsBypassable,
                 mIsMetered,
                 mMaxMtu,
-                mIsRestrictedToTestNetworks);
+                mIsRestrictedToTestNetworks,
+                mExcludeLocalRoutes,
+                mRequiresInternetValidation,
+                mIkeTunConnParams);
     }
 
     @Override
-    public boolean equals(Object obj) {
+    public boolean equals(@Nullable Object obj) {
         if (!(obj instanceof Ikev2VpnProfile)) {
             return false;
         }
@@ -384,7 +464,10 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
                 && mIsBypassable == other.mIsBypassable
                 && mIsMetered == other.mIsMetered
                 && mMaxMtu == other.mMaxMtu
-                && mIsRestrictedToTestNetworks == other.mIsRestrictedToTestNetworks;
+                && mIsRestrictedToTestNetworks == other.mIsRestrictedToTestNetworks
+                && mExcludeLocalRoutes == other.mExcludeLocalRoutes
+                && mRequiresInternetValidation == other.mRequiresInternetValidation
+                && Objects.equals(mIkeTunConnParams, other.mIkeTunConnParams);
     }
 
     /**
@@ -398,18 +481,24 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
     @NonNull
     public VpnProfile toVpnProfile() throws IOException, GeneralSecurityException {
         final VpnProfile profile = new VpnProfile("" /* Key; value unused by IKEv2VpnProfile(s) */,
-                mIsRestrictedToTestNetworks);
-        profile.type = mType;
-        profile.server = mServerAddr;
-        profile.ipsecIdentifier = mUserIdentity;
+                mIsRestrictedToTestNetworks, mExcludeLocalRoutes, mRequiresInternetValidation,
+                mIkeTunConnParams);
         profile.proxy = mProxyInfo;
-        profile.setAllowedAlgorithms(mAllowedAlgorithms);
         profile.isBypassable = mIsBypassable;
         profile.isMetered = mIsMetered;
         profile.maxMtu = mMaxMtu;
         profile.areAuthParamsInline = true;
         profile.saveLogin = true;
+        // The other fields should come from mIkeTunConnParams if it's available.
+        if (mIkeTunConnParams != null) {
+            profile.type = VpnProfile.TYPE_IKEV2_FROM_IKE_TUN_CONN_PARAMS;
+            return profile;
+        }
 
+        profile.type = mType;
+        profile.server = getServerAddr();
+        profile.ipsecIdentifier = getUserIdentity();
+        profile.setAllowedAlgorithms(mAllowedAlgorithms);
         switch (mType) {
             case TYPE_IKEV2_IPSEC_USER_PASS:
                 profile.username = mUsername;
@@ -434,35 +523,72 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
         return profile;
     }
 
-    /**
-     * Constructs a Ikev2VpnProfile from an internal-use VpnProfile instance.
-     *
-     * <p>Redundant authentication information (not related to profile type) will be discarded.
-     *
-     * @hide
-     */
-    @NonNull
-    public static Ikev2VpnProfile fromVpnProfile(@NonNull VpnProfile profile)
-            throws IOException, GeneralSecurityException {
-        return fromVpnProfile(profile, null);
+    private static PrivateKey getPrivateKeyFromAndroidKeystore(String alias) {
+        try {
+            final KeyStore keystore = KeyStore.getInstance(ANDROID_KEYSTORE_PROVIDER);
+            keystore.load(null);
+            final Key key = keystore.getKey(alias, null);
+            if (!(key instanceof PrivateKey)) {
+                throw new IllegalStateException(
+                        "Unexpected key type returned from android keystore.");
+            }
+            return (PrivateKey) key;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to load key from android keystore.", e);
+        }
     }
 
     /**
      * Builds the Ikev2VpnProfile from the given profile.
      *
      * @param profile the source VpnProfile to build from
-     * @param keyStore the Android Keystore instance to use to retrieve the private key, or null if
-     *     the private key is PEM-encoded into the profile.
      * @return The IKEv2/IPsec VPN profile
      * @hide
      */
     @NonNull
-    public static Ikev2VpnProfile fromVpnProfile(
-            @NonNull VpnProfile profile, @Nullable KeyStore keyStore)
-            throws IOException, GeneralSecurityException {
-        final Builder builder = new Builder(profile.server, profile.ipsecIdentifier);
+    public static Ikev2VpnProfile fromVpnProfile(@NonNull VpnProfile profile)
+            throws GeneralSecurityException {
+        final Builder builder;
+        if (profile.ikeTunConnParams == null) {
+            builder = new Builder(profile.server, profile.ipsecIdentifier);
+            builder.setAllowedAlgorithms(profile.getAllowedAlgorithms());
+
+            switch (profile.type) {
+                case TYPE_IKEV2_IPSEC_USER_PASS:
+                    builder.setAuthUsernamePassword(
+                            profile.username,
+                            profile.password,
+                            certificateFromPemString(profile.ipsecCaCert));
+                    break;
+                case TYPE_IKEV2_IPSEC_PSK:
+                    builder.setAuthPsk(decodeFromIpsecSecret(profile.ipsecSecret));
+                    break;
+                case TYPE_IKEV2_IPSEC_RSA:
+                    final PrivateKey key;
+                    if (profile.ipsecSecret.startsWith(PREFIX_KEYSTORE_ALIAS)) {
+                        final String alias =
+                                profile.ipsecSecret.substring(PREFIX_KEYSTORE_ALIAS.length());
+                        key = getPrivateKeyFromAndroidKeystore(alias);
+                    } else if (profile.ipsecSecret.startsWith(PREFIX_INLINE)) {
+                        key = getPrivateKey(profile.ipsecSecret.substring(PREFIX_INLINE.length()));
+                    } else {
+                        throw new IllegalArgumentException("Invalid RSA private key prefix");
+                    }
+
+                    final X509Certificate userCert =
+                            certificateFromPemString(profile.ipsecUserCert);
+                    final X509Certificate serverRootCa =
+                            certificateFromPemString(profile.ipsecCaCert);
+                    builder.setAuthDigitalSignature(userCert, key, serverRootCa);
+                    break;
+                default:
+                    throw new IllegalArgumentException("Invalid auth method set");
+            }
+        } else {
+            builder = new Builder(profile.ikeTunConnParams);
+        }
+
         builder.setProxy(profile.proxy);
-        builder.setAllowedAlgorithms(profile.getAllowedAlgorithms());
         builder.setBypassable(profile.isBypassable);
         builder.setMetered(profile.isMetered);
         builder.setMaxMtu(profile.maxMtu);
@@ -470,38 +596,12 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
             builder.restrictToTestNetworks();
         }
 
-        switch (profile.type) {
-            case TYPE_IKEV2_IPSEC_USER_PASS:
-                builder.setAuthUsernamePassword(
-                        profile.username,
-                        profile.password,
-                        certificateFromPemString(profile.ipsecCaCert));
-                break;
-            case TYPE_IKEV2_IPSEC_PSK:
-                builder.setAuthPsk(decodeFromIpsecSecret(profile.ipsecSecret));
-                break;
-            case TYPE_IKEV2_IPSEC_RSA:
-                final PrivateKey key;
-                if (profile.ipsecSecret.startsWith(PREFIX_KEYSTORE_ALIAS)) {
-                    Objects.requireNonNull(keyStore, "Missing Keystore for aliased PrivateKey");
-
-                    final String alias =
-                            profile.ipsecSecret.substring(PREFIX_KEYSTORE_ALIAS.length());
-                    key = AndroidKeyStoreProvider.loadAndroidKeyStorePrivateKeyFromKeystore(
-                            keyStore, alias, Process.myUid());
-                } else if (profile.ipsecSecret.startsWith(PREFIX_INLINE)) {
-                    key = getPrivateKey(profile.ipsecSecret.substring(PREFIX_INLINE.length()));
-                } else {
-                    throw new IllegalArgumentException("Invalid RSA private key prefix");
-                }
-
-                final X509Certificate userCert = certificateFromPemString(profile.ipsecUserCert);
-                final X509Certificate serverRootCa = certificateFromPemString(profile.ipsecCaCert);
-                builder.setAuthDigitalSignature(userCert, key, serverRootCa);
-                break;
-            default:
-                throw new IllegalArgumentException("Invalid auth method set");
+        if (profile.excludeLocalRoutes && !profile.isBypassable) {
+            Log.w(TAG, "ExcludeLocalRoutes should only be set in the bypassable VPN");
         }
+
+        builder.setLocalRoutesExcluded(profile.excludeLocalRoutes && profile.isBypassable);
+        builder.setRequiresInternetValidation(profile.requiresInternetValidation);
 
         return builder.build();
     }
@@ -616,11 +716,40 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
         return Objects.requireNonNull(reference, String.format(messageTemplate, messageArgs));
     }
 
+    private static void checkBuilderSetter(boolean constructedFromIkeTunConParams,
+            @NonNull String field) {
+        if (constructedFromIkeTunConParams) {
+            throw new IllegalArgumentException(
+                    field + " can't be set with IkeTunnelConnectionParams builder");
+        }
+    }
+
+    @NonNull
+    private static String getUserIdentityFromIkeSession(@NonNull IkeSessionParams params) {
+        final IkeIdentification ident = params.getLocalIdentification();
+        // Refer to VpnIkev2Utils.parseIkeIdentification().
+        if (ident instanceof IkeKeyIdIdentification) {
+            return "@#" + new String(((IkeKeyIdIdentification) ident).keyId);
+        } else if (ident instanceof IkeRfc822AddrIdentification) {
+            return "@@" + ((IkeRfc822AddrIdentification) ident).rfc822Name;
+        } else if (ident instanceof IkeFqdnIdentification) {
+            return "@" + ((IkeFqdnIdentification) ident).fqdn;
+        } else if (ident instanceof IkeIpv4AddrIdentification) {
+            return ((IkeIpv4AddrIdentification) ident).ipv4Address.getHostAddress();
+        } else if (ident instanceof IkeIpv6AddrIdentification) {
+            return ((IkeIpv6AddrIdentification) ident).ipv6Address.getHostAddress();
+        } else if (ident instanceof IkeDerAsn1DnIdentification) {
+            throw new IllegalArgumentException("Unspported ASN.1 encoded identities");
+        } else {
+            throw new IllegalArgumentException("Unknown IkeIdentification to get user identity");
+        }
+    }
+
     /** A incremental builder for IKEv2 VPN profiles */
     public static final class Builder {
         private int mType = -1;
-        @NonNull private final String mServerAddr;
-        @NonNull private final String mUserIdentity;
+        @Nullable private final String mServerAddr;
+        @Nullable private final String mUserIdentity;
 
         // PSK authentication
         @Nullable private byte[] mPresharedKey;
@@ -638,10 +767,13 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
 
         @Nullable private ProxyInfo mProxyInfo;
         @NonNull private List<String> mAllowedAlgorithms = DEFAULT_ALGORITHMS;
+        private boolean mRequiresInternetValidation = false;
         private boolean mIsBypassable = false;
         private boolean mIsMetered = true;
         private int mMaxMtu = PlatformVpnProfile.MAX_MTU_DEFAULT;
         private boolean mIsRestrictedToTestNetworks = false;
+        private boolean mExcludeLocalRoutes = false;
+        @Nullable private final IkeTunnelConnectionParams mIkeTunConnParams;
 
         /**
          * Creates a new builder with the basic parameters of an IKEv2/IPsec VPN.
@@ -656,6 +788,23 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
 
             mServerAddr = serverAddr;
             mUserIdentity = identity;
+
+            mIkeTunConnParams = null;
+        }
+
+        /**
+         * Creates a new builder from a {@link IkeTunnelConnectionParams}
+         *
+         * @param ikeTunConnParams the {@link IkeTunnelConnectionParams} contains IKEv2
+         *                         configurations
+         */
+        @RequiresFeature(PackageManager.FEATURE_IPSEC_TUNNELS)
+        public Builder(@NonNull IkeTunnelConnectionParams ikeTunConnParams) {
+            checkNotNull(ikeTunConnParams, MISSING_PARAM_MSG_TMPL, "ikeTunConnParams");
+
+            mIkeTunConnParams = ikeTunConnParams;
+            mServerAddr = null;
+            mUserIdentity = null;
         }
 
         private void resetAuthParams() {
@@ -674,6 +823,10 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
          * authentication method may be set. This method will overwrite any previously set
          * authentication method.
          *
+         * <p>If this {@link Builder} is constructed with an {@link IkeTunnelConnectionParams},
+         * authentication details should be configured there, and calling this method will result
+         * in an exception being thrown.
+         *
          * @param user the username to be used for EAP-MSCHAPv2 authentication
          * @param pass the password to be used for EAP-MSCHAPv2 authentication
          * @param serverRootCa the root certificate to be used for verifying the identity of the
@@ -690,6 +843,7 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
                 @Nullable X509Certificate serverRootCa) {
             checkNotNull(user, MISSING_PARAM_MSG_TMPL, "user");
             checkNotNull(pass, MISSING_PARAM_MSG_TMPL, "pass");
+            checkBuilderSetter(mIkeTunConnParams != null, "authUsernamePassword");
 
             // Test to make sure all auth params can be encoded safely.
             if (serverRootCa != null) checkCert(serverRootCa);
@@ -709,6 +863,10 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
          * Only one authentication method may be set. This method will overwrite any previously set
          * authentication method.
          *
+         * <p>If this {@link Builder} is constructed with an {@link IkeTunnelConnectionParams},
+         * authentication details should be configured there, and calling this method will result in
+         * an exception being thrown.
+         *
          * @param userCert the username to be used for RSA Digital signiture authentication
          * @param key the PrivateKey instance associated with the user ceritificate, used for
          *     constructing the signature
@@ -726,6 +884,7 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
                 @Nullable X509Certificate serverRootCa) {
             checkNotNull(userCert, MISSING_PARAM_MSG_TMPL, "userCert");
             checkNotNull(key, MISSING_PARAM_MSG_TMPL, "key");
+            checkBuilderSetter(mIkeTunConnParams != null, "authDigitalSignature");
 
             // Test to make sure all auth params can be encoded safely.
             checkCert(userCert);
@@ -746,6 +905,10 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
          * authentication method may be set. This method will overwrite any previously set
          * authentication method.
          *
+         * <p>If this {@link Builder} is constructed with an {@link IkeTunnelConnectionParams},
+         * authentication details should be configured there, and calling this method will result in
+         * an exception being thrown.
+         *
          * @param psk the key to be used for Pre-Shared Key authentication
          * @return this {@link Builder} object to facilitate chaining of method calls
          */
@@ -753,6 +916,7 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
         @RequiresFeature(PackageManager.FEATURE_IPSEC_TUNNELS)
         public Builder setAuthPsk(@NonNull byte[] psk) {
             checkNotNull(psk, MISSING_PARAM_MSG_TMPL, "psk");
+            checkBuilderSetter(mIkeTunConnParams != null, "authPsk");
 
             resetAuthParams();
             mPresharedKey = psk;
@@ -811,11 +975,34 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
             // IPv6 MTU is greater; since profiles may be started by the system on IPv4 and IPv6
             // networks, the VPN must provide a link fulfilling the stricter of the two conditions
             // (at least that of the IPv6 MTU).
-            if (mtu < LinkProperties.MIN_MTU_V6) {
-                throw new IllegalArgumentException(
-                        "Max MTU must be at least " + LinkProperties.MIN_MTU_V6);
+            if (mtu < IPV6_MIN_MTU) {
+                throw new IllegalArgumentException("Max MTU must be at least " + IPV6_MIN_MTU);
             }
             mMaxMtu = mtu;
+            return this;
+        }
+
+        /**
+         * Request that this VPN undergoes Internet validation.
+         *
+         * If this is true, the platform will perform basic validation checks for Internet
+         * connectivity over this VPN. If and when they succeed, the VPN network capabilities will
+         * reflect this by gaining the {@link NetworkCapabilities#NET_CAPABILITY_VALIDATED}
+         * capability.
+         *
+         * If this is false, the platform assumes the VPN either is always capable of reaching the
+         * Internet or intends not to. In this case, the VPN network capabilities will
+         * always gain the {@link NetworkCapabilities#NET_CAPABILITY_VALIDATED} capability
+         * immediately after it connects, whether it can reach public Internet destinations or not.
+         *
+         * @param requiresInternetValidation {@code true} if the framework should attempt to
+         *                                   validate this VPN for Internet connectivity. Defaults
+         *                                   to {@code false}.
+         */
+        @NonNull
+        @RequiresFeature(PackageManager.FEATURE_IPSEC_TUNNELS)
+        public Builder setRequiresInternetValidation(boolean requiresInternetValidation) {
+            mRequiresInternetValidation = requiresInternetValidation;
             return this;
         }
 
@@ -854,6 +1041,10 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
          * Authentication, and one that provides Encryption. Authenticated Encryption with
          * Associated Data (AEAD) algorithms provide both Authentication and Encryption.
          *
+         * <p>If this {@link Builder} is constructed with an {@link IkeTunnelConnectionParams},
+         * authentication details should be configured there, and calling this method will result in
+         * an exception being thrown.
+         *
          * <p>By default, this profile will use any algorithm defined in {@link IpSecAlgorithm},
          * with the exception of those considered insecure (as described above).
          *
@@ -865,6 +1056,7 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
         @RequiresFeature(PackageManager.FEATURE_IPSEC_TUNNELS)
         public Builder setAllowedAlgorithms(@NonNull List<String> algorithmNames) {
             checkNotNull(algorithmNames, MISSING_PARAM_MSG_TMPL, "algorithmNames");
+            checkBuilderSetter(mIkeTunConnParams != null, "algorithmNames");
             validateAllowedAlgorithms(algorithmNames);
 
             mAllowedAlgorithms = algorithmNames;
@@ -884,6 +1076,30 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
         @RequiresFeature(PackageManager.FEATURE_IPSEC_TUNNELS)
         public Builder restrictToTestNetworks() {
             mIsRestrictedToTestNetworks = true;
+            return this;
+        }
+
+        /**
+         * Sets whether the local traffic is exempted from the VPN.
+         *
+         * When this is set, the system will not use the VPN network when an app
+         * tries to send traffic for an IP address that is on a local network.
+         *
+         * Note that there are important security implications. In particular, the
+         * networks that the device connects to typically decides what IP addresses
+         * are part of the local network. This means that for VPNs setting this
+         * flag, it is possible for anybody to set up a public network in such a
+         * way that traffic to arbitrary IP addresses will bypass the VPN, including
+         * traffic to services like DNS. When using this API, please consider the
+         * security implications for your particular case.
+         *
+         * Note that because the local traffic will always bypass the VPN,
+         * it is not possible to set this flag on a non-bypassable VPN.
+         */
+        @NonNull
+        @RequiresFeature(PackageManager.FEATURE_IPSEC_TUNNELS)
+        public Builder setLocalRoutesExcluded(boolean excludeLocalRoutes) {
+            mExcludeLocalRoutes = excludeLocalRoutes;
             return this;
         }
 
@@ -910,7 +1126,10 @@ public final class Ikev2VpnProfile extends PlatformVpnProfile {
                     mIsBypassable,
                     mIsMetered,
                     mMaxMtu,
-                    mIsRestrictedToTestNetworks);
+                    mIsRestrictedToTestNetworks,
+                    mExcludeLocalRoutes,
+                    mRequiresInternetValidation,
+                    mIkeTunConnParams);
         }
     }
 }

@@ -280,7 +280,7 @@ void ReportFile::addReport(const IncidentReportArgs& args) {
                 // Lower privacy policy (less restrictive) wins.
                 report->set_privacy_policy(args.getPrivacyPolicy());
             }
-            report->set_all_sections(report->all_sections() | args.all());
+            report->set_all_sections(report->all_sections() || args.all());
             for (int section: args.sections()) {
                 if (!has_section(*report, section)) {
                     report->add_section(section);
@@ -400,6 +400,7 @@ status_t ReportFile::startFilteringData(int writeFd, const IncidentReportArgs& a
     if (dataFd < 0) {
         ALOGW("Error opening incident report '%s' %s", getDataFileName().c_str(), strerror(-errno));
         close(writeFd);
+        close(dataFd);
         return -errno;
     }
 
@@ -409,6 +410,7 @@ status_t ReportFile::startFilteringData(int writeFd, const IncidentReportArgs& a
         ALOGW("Error running fstat incident report '%s' %s", getDataFileName().c_str(),
               strerror(-errno));
         close(writeFd);
+        close(dataFd);
         return -errno;
     }
     if (st.st_size != mEnvelope.data_file_size()) {
@@ -418,6 +420,7 @@ status_t ReportFile::startFilteringData(int writeFd, const IncidentReportArgs& a
         ALOGW("Removing incident report");
         mWorkDirectory->remove(this);
         close(writeFd);
+        close(dataFd);
         return BAD_VALUE;
     }
 
@@ -427,11 +430,13 @@ status_t ReportFile::startFilteringData(int writeFd, const IncidentReportArgs& a
         if (!zipPipe.init()) {
             ALOGE("[ReportFile] Failed to setup pipe for gzip");
             close(writeFd);
+            close(dataFd);
             return -errno;
         }
         int status = 0;
         zipPid = fork_execute_cmd((char* const*)GZIP, zipPipe.readFd().release(), writeFd, &status);
         close(writeFd);
+        close(dataFd);
         if (zipPid < 0 || status != 0) {
             ALOGE("[ReportFile] Failed to fork and exec gzip");
             return status;
@@ -459,6 +464,7 @@ status_t ReportFile::startFilteringData(int writeFd, const IncidentReportArgs& a
     }
 
     close(writeFd);
+    close(dataFd);
     if (zipPid > 0) {
         status_t err = wait_child(zipPid, /* timeout_ms= */ 10 * 1000);
         if (err != 0) {
@@ -527,7 +533,7 @@ status_t ReportFile::load_envelope_impl(bool cleanup) {
 WorkDirectory::WorkDirectory()
         :mDirectory("/data/misc/incidents"),
          mMaxFileCount(100),
-         mMaxDiskUsageBytes(100 * 1024 * 1024) {  // Incident reports can take up to 100MB on disk.
+         mMaxDiskUsageBytes(400 * 1024 * 1024) {  // Incident reports can take up to 400MB on disk.
                                                  // TODO: Should be a flag.
     create_directory(mDirectory.c_str());
 }

@@ -18,12 +18,14 @@ package com.android.server.connectivity;
 
 import static android.util.TimeUtils.NANOS_PER_MS;
 
+import android.annotation.Nullable;
 import android.content.Context;
 import android.net.ConnectivityManager;
 import android.net.INetdEventCallback;
 import android.net.MacAddress;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.metrics.ConnectStats;
 import android.net.metrics.DnsEvent;
 import android.net.metrics.INetdEventListener;
@@ -98,6 +100,7 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
     private final TokenBucket mConnectTb =
             new TokenBucket(CONNECT_LATENCY_FILL_RATE, CONNECT_LATENCY_BURST_LIMIT);
 
+    final TransportForNetIdNetworkCallback mCallback = new TransportForNetIdNetworkCallback();
 
     /**
      * There are only 3 possible callbacks.
@@ -158,6 +161,9 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
     public NetdEventListenerService(ConnectivityManager cm) {
         // We are started when boot is complete, so ConnectivityService should already be running.
         mCm = cm;
+        // Clear all capabilities to listen all networks.
+        mCm.registerNetworkCallback(new NetworkRequest.Builder().clearCapabilities().build(),
+                mCallback);
     }
 
     private static long projectSnapshotTime(long timeMs) {
@@ -165,25 +171,28 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
     }
 
     private NetworkMetrics getMetricsForNetwork(long timeMs, int netId) {
-        collectPendingMetricsSnapshot(timeMs);
         NetworkMetrics metrics = mNetworkMetrics.get(netId);
-        if (metrics == null) {
-            // TODO: allow to change transport for a given netid.
-            metrics = new NetworkMetrics(netId, getTransports(netId), mConnectTb);
+        final NetworkCapabilities nc = mCallback.getNetworkCapabilities(netId);
+        final long transports = (nc != null) ? BitUtils.packBits(nc.getTransportTypes()) : 0;
+        final boolean forceCollect =
+                (metrics != null && nc != null && metrics.transports != transports);
+        collectPendingMetricsSnapshot(timeMs, forceCollect);
+        if (metrics == null || forceCollect) {
+            metrics = new NetworkMetrics(netId, transports, mConnectTb);
             mNetworkMetrics.put(netId, metrics);
         }
         return metrics;
     }
 
     private NetworkMetricsSnapshot[] getNetworkMetricsSnapshots() {
-        collectPendingMetricsSnapshot(System.currentTimeMillis());
+        collectPendingMetricsSnapshot(System.currentTimeMillis(), false /* forceCollect */);
         return mNetworkMetricsSnapshots.toArray();
     }
 
-    private void collectPendingMetricsSnapshot(long timeMs) {
+    private void collectPendingMetricsSnapshot(long timeMs, boolean forceCollect) {
         // Detects time differences larger than the snapshot collection period.
         // This is robust against clock jumps and long inactivity periods.
-        if (Math.abs(timeMs - mLastSnapshot) <= METRICS_SNAPSHOT_SPAN_MS) {
+        if (!forceCollect && Math.abs(timeMs - mLastSnapshot) <= METRICS_SNAPSHOT_SPAN_MS) {
             return;
         }
         mLastSnapshot = projectSnapshotTime(timeMs);
@@ -388,19 +397,6 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
         return list;
     }
 
-    private long getTransports(int netId) {
-        // TODO: directly query ConnectivityService instead of going through Binder interface.
-        NetworkCapabilities nc = mCm.getNetworkCapabilities(new Network(netId));
-        if (nc == null) {
-            return 0;
-        }
-        return BitUtils.packBits(nc.getTransportTypes());
-    }
-
-    private static void maybeLog(String s, Object... args) {
-        if (DBG) Log.d(TAG, String.format(s, args));
-    }
-
     /** Helper class for buffering summaries of NetworkMetrics at regular time intervals */
     static class NetworkMetricsSnapshot {
 
@@ -426,6 +422,31 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
                 j.add(s.toString());
             }
             return String.format("%tT.%tL: %s", timeMs, timeMs, j.toString());
+        }
+    }
+
+    private class TransportForNetIdNetworkCallback extends ConnectivityManager.NetworkCallback {
+        private final SparseArray<NetworkCapabilities> mCapabilities = new SparseArray<>();
+
+        @Override
+        public void onCapabilitiesChanged(Network network, NetworkCapabilities nc) {
+            synchronized (mCapabilities) {
+                mCapabilities.put(network.getNetId(), nc);
+            }
+        }
+
+        @Override
+        public void onLost(Network network) {
+            synchronized (mCapabilities) {
+                mCapabilities.remove(network.getNetId());
+            }
+        }
+
+        @Nullable
+        public NetworkCapabilities getNetworkCapabilities(int netId) {
+            synchronized (mCapabilities) {
+                return mCapabilities.get(netId);
+            }
         }
     }
 }

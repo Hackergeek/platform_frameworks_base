@@ -19,6 +19,7 @@ package com.android.internal.app;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.ActivityManager;
+import android.app.ActivityThread;
 import android.app.IActivityManager;
 import android.app.ListFragment;
 import android.app.backup.BackupManager;
@@ -26,6 +27,7 @@ import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.content.res.Resources;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.LocaleList;
 import android.os.RemoteException;
@@ -77,7 +79,7 @@ public class LocalePicker extends ListFragment {
             return label;
         }
 
-        @UnsupportedAppUsage
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         public Locale getLocale() {
             return locale;
         }
@@ -314,7 +316,8 @@ public class LocalePicker extends ListFragment {
             config.setLocales(locales);
             config.userSetLocale = true;
 
-            am.updatePersistentConfiguration(config);
+            am.updatePersistentConfigurationWithAttribution(config,
+                    ActivityThread.currentOpPackageName(), null);
             // Trigger the dirty bit for the Settings Provider.
             BackupManager.dataChanged("com.android.providers.settings");
         } catch (RemoteException e) {

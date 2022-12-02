@@ -147,7 +147,8 @@ final class WifiDisplayAdapter extends DisplayAdapter {
                         getContext(), getHandler(), mWifiDisplayListener);
 
                 getContext().registerReceiverAsUser(mBroadcastReceiver, UserHandle.ALL,
-                        new IntentFilter(ACTION_DISCONNECT), null, mHandler);
+                        new IntentFilter(ACTION_DISCONNECT), null, mHandler,
+                        Context.RECEIVER_NOT_EXPORTED);
             }
         });
     }
@@ -598,7 +599,8 @@ final class WifiDisplayAdapter extends DisplayAdapter {
         public WifiDisplayDevice(IBinder displayToken, String name,
                 int width, int height, float refreshRate, int flags, String address,
                 Surface surface) {
-            super(WifiDisplayAdapter.this, displayToken, DISPLAY_NAME_PREFIX + address);
+            super(WifiDisplayAdapter.this, displayToken, DISPLAY_NAME_PREFIX + address,
+                    getContext());
             mName = name;
             mWidth = width;
             mHeight = height;

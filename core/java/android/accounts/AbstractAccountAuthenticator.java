@@ -88,12 +88,14 @@ import java.util.Arrays;
  * {@link AccountManager#KEY_INTENT}.
  * <p>
  * The activity needs to return the final result when it is complete so the Intent should contain
- * the {@link AccountAuthenticatorResponse} as {@link AccountManager#KEY_ACCOUNT_MANAGER_RESPONSE}.
+ * the {@link AccountAuthenticatorResponse} as
+ * {@link AccountManager#KEY_ACCOUNT_AUTHENTICATOR_RESPONSE}.
  * The activity must then call {@link AccountAuthenticatorResponse#onResult} or
  * {@link AccountAuthenticatorResponse#onError} when it is complete.
  * <li> If the authenticator cannot synchronously process the request and return a result then it
  * may choose to return null and then use the AccountManagerResponse to send the result
- * when it has completed the request.
+ * when it has completed the request. This asynchronous option is not available for the
+ * {@link #addAccount} method, which must complete synchronously.
  * </ul>
  * <p>
  * The following descriptions of each of the abstract authenticator methods will not describe the
@@ -101,7 +103,7 @@ import java.util.Arrays;
  * parameters and the expected result.
  * <p>
  * When writing an activity to satisfy these requests one must pass in the AccountManagerResponse
- * and return the result via that response when the activity finishes (or whenever else  the
+ * and return the result via that response when the activity finishes (or whenever else the
  * activity author deems it is the correct time to respond).
  */
 public abstract class AbstractAccountAuthenticator {
@@ -118,27 +120,27 @@ public abstract class AbstractAccountAuthenticator {
     /**
      * Bundle key used for the {@link String} account type in session bundle.
      * This is used in the default implementation of
-     * {@link #startAddAccountSession} and {@link startUpdateCredentialsSession}.
+     * {@link #startAddAccountSession} and {@link #startUpdateCredentialsSession}.
      */
     private static final String KEY_AUTH_TOKEN_TYPE =
             "android.accounts.AbstractAccountAuthenticato.KEY_AUTH_TOKEN_TYPE";
     /**
      * Bundle key used for the {@link String} array of required features in
      * session bundle. This is used in the default implementation of
-     * {@link #startAddAccountSession} and {@link startUpdateCredentialsSession}.
+     * {@link #startAddAccountSession} and {@link #startUpdateCredentialsSession}.
      */
     private static final String KEY_REQUIRED_FEATURES =
             "android.accounts.AbstractAccountAuthenticator.KEY_REQUIRED_FEATURES";
     /**
      * Bundle key used for the {@link Bundle} options in session bundle. This is
      * used in default implementation of {@link #startAddAccountSession} and
-     * {@link startUpdateCredentialsSession}.
+     * {@link #startUpdateCredentialsSession}.
      */
     private static final String KEY_OPTIONS =
             "android.accounts.AbstractAccountAuthenticator.KEY_OPTIONS";
     /**
      * Bundle key used for the {@link Account} account in session bundle. This is used
-     * used in default implementation of {@link startUpdateCredentialsSession}.
+     * used in default implementation of {@link #startUpdateCredentialsSession}.
      */
     private static final String KEY_ACCOUNT =
             "android.accounts.AbstractAccountAuthenticator.KEY_ACCOUNT";

@@ -18,25 +18,31 @@ package com.android.server.wm;
 
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
+import static android.app.WindowConfiguration.WINDOWING_MODE_MULTI_WINDOW;
 import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
-import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
-import static android.hardware.camera2.params.OutputConfiguration.ROTATION_90;
+import static android.view.InsetsState.ITYPE_IME;
+import static android.view.InsetsState.ITYPE_NAVIGATION_BAR;
 import static android.view.InsetsState.ITYPE_STATUS_BAR;
 import static android.view.Surface.ROTATION_0;
+import static android.view.Surface.ROTATION_270;
+import static android.view.Surface.ROTATION_90;
 import static android.view.WindowManager.LayoutParams.FIRST_SUB_WINDOW;
 import static android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM;
 import static android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+import static android.view.WindowManager.LayoutParams.FLAG_SPLIT_TOUCH;
+import static android.view.WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_ABOVE_SUB_PANEL;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_MEDIA;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_MEDIA_OVERLAY;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_PANEL;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_STARTING;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL;
 import static android.view.WindowManager.LayoutParams.TYPE_BASE_APPLICATION;
 import static android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD;
-import static android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
+import static android.view.WindowManager.LayoutParams.TYPE_TOAST;
 
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.doNothing;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.doReturn;
@@ -47,6 +53,9 @@ import static com.android.dx.mockito.inline.extended.ExtendedMockito.reset;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.spy;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.spyOn;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.verify;
+import static com.android.server.wm.DisplayContent.IME_TARGET_CONTROL;
+import static com.android.server.wm.DisplayContent.IME_TARGET_LAYERING;
+import static com.android.server.wm.WindowContainer.SYNC_STATE_WAITING_FOR_DRAW;
 
 import static com.google.common.truth.Truth.assertThat;
 
@@ -54,6 +63,8 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
@@ -63,28 +74,37 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atMost;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.when;
 
-import android.graphics.Insets;
+import android.content.res.CompatibilityInfo;
+import android.content.res.Configuration;
 import android.graphics.Matrix;
+import android.graphics.Point;
 import android.graphics.Rect;
+import android.os.IBinder;
+import android.os.InputConfig;
 import android.os.RemoteException;
 import android.platform.test.annotations.Presubmit;
-import android.util.Size;
-import android.view.DisplayCutout;
+import android.util.ArraySet;
+import android.view.Gravity;
+import android.view.InputWindowHandle;
 import android.view.InsetsSource;
+import android.view.InsetsState;
+import android.view.InsetsVisibilities;
 import android.view.SurfaceControl;
 import android.view.WindowManager;
 
 import androidx.test.filters.SmallTest;
 
-import com.android.server.wm.utils.WmDisplayCutout;
-
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 
@@ -92,7 +112,7 @@ import java.util.List;
  * Tests for the {@link WindowState} class.
  *
  * Build/Install/Run:
- *  atest WmTests:WindowStateTests
+ * atest WmTests:WindowStateTests
  */
 @SmallTest
 @Presubmit
@@ -176,9 +196,9 @@ public class WindowStateTests extends WindowTestsBase {
         final WindowState overlayWindow = spy(createWindow(null, TYPE_APPLICATION_OVERLAY,
                 "overlayWindow"));
         overlayWindow.setHiddenWhileSuspended(true);
-        verify(overlayWindow).hideLw(true, true);
+        verify(overlayWindow).hide(true /* doAnimation */, true /* requestAnim */);
         overlayWindow.setHiddenWhileSuspended(false);
-        verify(overlayWindow).showLw(true, true);
+        verify(overlayWindow).show(true /* doAnimation */, true /* requestAnim */);
     }
 
     @Test
@@ -203,7 +223,7 @@ public class WindowStateTests extends WindowTestsBase {
         final WindowState window = createWindow(null, TYPE_APPLICATION, "window");
         window.setHasSurface(true);
         assertTrue(window.isOnScreen());
-        window.hideLw(false /* doAnimation */);
+        window.hide(false /* doAnimation */, false /* requestAnim */);
         assertFalse(window.isOnScreen());
     }
 
@@ -239,49 +259,32 @@ public class WindowStateTests extends WindowTestsBase {
         assertFalse(appWindow.canBeImeTarget());
         appWindow.mActivityRecord.setWindowingMode(initialMode);
 
+        // Verify that app window can still be IME target as long as it is visible (even if
+        // it is going to become invisible).
+        appWindow.mActivityRecord.mVisibleRequested = false;
+        assertTrue(appWindow.canBeImeTarget());
+
         // Make windows invisible
-        appWindow.hideLw(false /* doAnimation */);
-        imeWindow.hideLw(false /* doAnimation */);
+        appWindow.hide(false /* doAnimation */, false /* requestAnim */);
+        imeWindow.hide(false /* doAnimation */, false /* requestAnim */);
 
         // Invisible window can't be IME targets even if they have the right flags.
         assertFalse(appWindow.canBeImeTarget());
         assertFalse(imeWindow.canBeImeTarget());
 
-        // Simulate the window is in split screen primary stack and the current state is
-        // minimized and home stack is resizable, so that we should ignore input for the stack.
-        final DockedStackDividerController controller =
+        // Simulate the window is in split screen root task.
+        final DockedTaskDividerController controller =
                 mDisplayContent.getDockedDividerController();
-        final ActivityStack stack = createTaskStackOnDisplay(WINDOWING_MODE_SPLIT_SCREEN_PRIMARY,
-                ACTIVITY_TYPE_STANDARD, mDisplayContent);
+        final Task rootTask = createTask(mDisplayContent,
+                WINDOWING_MODE_MULTI_WINDOW, ACTIVITY_TYPE_STANDARD);
         spyOn(appWindow);
         spyOn(controller);
-        spyOn(stack);
-        stack.setFocusable(false);
-        doReturn(stack).when(appWindow).getRootTask();
+        spyOn(rootTask);
+        rootTask.setFocusable(false);
+        doReturn(rootTask).when(appWindow).getRootTask();
 
-        // Make sure canBeImeTarget is false due to shouldIgnoreInput is true;
+        // Make sure canBeImeTarget is false;
         assertFalse(appWindow.canBeImeTarget());
-        assertTrue(stack.shouldIgnoreInput());
-    }
-
-    @Test
-    public void testCanWindowWithEmbeddedDisplayBeImeTarget() {
-        final WindowState appWindow = createWindow(null, TYPE_APPLICATION, "appWindow");
-        final WindowState imeWindow = createWindow(null, TYPE_INPUT_METHOD, "imeWindow");
-
-        imeWindow.setHasSurface(true);
-        appWindow.setHasSurface(true);
-
-        appWindow.mAttrs.flags |= FLAG_NOT_FOCUSABLE;
-        assertFalse(appWindow.canBeImeTarget());
-
-        DisplayContent secondDisplay = createNewDisplay();
-        final WindowState embeddedWindow = createWindow(null, TYPE_APPLICATION, secondDisplay,
-                "embeddedWindow");
-        appWindow.addEmbeddedDisplayContent(secondDisplay);
-        embeddedWindow.setHasSurface(true);
-        embeddedWindow.mAttrs.flags &= ~FLAG_NOT_FOCUSABLE;
-        assertTrue(appWindow.canBeImeTarget());
     }
 
     @Test
@@ -318,8 +321,7 @@ public class WindowStateTests extends WindowTestsBase {
     public void testPrepareWindowToDisplayDuringRelayout() {
         // Call prepareWindowToDisplayDuringRelayout for a window without FLAG_TURN_SCREEN_ON before
         // calling setCurrentLaunchCanTurnScreenOn for windows with flag in the same activity.
-        final ActivityRecord activity = createActivityRecord(mDisplayContent,
-                WINDOWING_MODE_FULLSCREEN, ACTIVITY_TYPE_STANDARD);
+        final ActivityRecord activity = createActivityRecord(mDisplayContent);
         final WindowState first = createWindow(null, TYPE_APPLICATION, activity, "first");
         final WindowState second = createWindow(null, TYPE_APPLICATION, activity, "second");
 
@@ -358,8 +360,7 @@ public class WindowStateTests extends WindowTestsBase {
 
         // Call prepareWindowToDisplayDuringRelayout for a windows that are not children of an
         // activity. Both windows have the FLAG_TURNS_SCREEN_ON so both should call wakeup
-        final WindowToken windowToken = WindowTestUtils.createTestWindowToken(FIRST_SUB_WINDOW,
-                mDisplayContent);
+        final WindowToken windowToken = createTestWindowToken(FIRST_SUB_WINDOW, mDisplayContent);
         final WindowState firstWindow = createWindow(null, TYPE_APPLICATION, windowToken,
                 "firstWindow");
         final WindowState secondWindow = createWindow(null, TYPE_APPLICATION, windowToken,
@@ -417,20 +418,23 @@ public class WindowStateTests extends WindowTestsBase {
         assertFalse(app.canAffectSystemUiFlags());
     }
 
+    @UseTestDisplay(addWindows = {W_ACTIVITY, W_STATUS_BAR})
     @Test
     public void testVisibleWithInsetsProvider() {
-        final WindowState statusBar = createWindow(null, TYPE_STATUS_BAR, "statusBar");
-        final WindowState app = createWindow(null, TYPE_APPLICATION, "app");
+        final WindowState statusBar = mStatusBarWindow;
+        final WindowState app = mAppWindow;
         statusBar.mHasSurface = true;
         assertTrue(statusBar.isVisible());
         mDisplayContent.getInsetsStateController().getSourceProvider(ITYPE_STATUS_BAR)
-                .setWindow(statusBar, null /* frameProvider */, null /* imeFrameProvider */);
+                .setWindowContainer(statusBar, null /* frameProvider */,
+                        null /* imeFrameProvider */);
         mDisplayContent.getInsetsStateController().onBarControlTargetChanged(
                 app, null /* fakeTopControlling */, app, null /* fakeNavControlling */);
-        final InsetsSource source = new InsetsSource(ITYPE_STATUS_BAR);
-        source.setVisible(false);
+        final InsetsVisibilities requestedVisibilities = new InsetsVisibilities();
+        requestedVisibilities.setVisibility(ITYPE_STATUS_BAR, false);
+        app.setRequestedVisibilities(requestedVisibilities);
         mDisplayContent.getInsetsStateController().getSourceProvider(ITYPE_STATUS_BAR)
-                .onInsetsModified(app, source);
+                .updateClientVisibility(app);
         waitUntilHandlersIdle();
         assertFalse(statusBar.isVisible());
     }
@@ -446,6 +450,64 @@ public class WindowStateTests extends WindowTestsBase {
         child2.mAnimatingExit = false;
         root.mAnimatingExit = true;
         assertTrue(child2.isSelfOrAncestorWindowAnimatingExit());
+    }
+
+    @Test
+    public void testDeferredRemovalByAnimating() {
+        final WindowState appWindow = createWindow(null, TYPE_APPLICATION, "appWindow");
+        makeWindowVisible(appWindow);
+        spyOn(appWindow.mWinAnimator);
+        doReturn(true).when(appWindow.mWinAnimator).getShown();
+        final AnimationAdapter animation = mock(AnimationAdapter.class);
+        final ActivityRecord activity = appWindow.mActivityRecord;
+        activity.startAnimation(appWindow.getPendingTransaction(),
+                animation, false /* hidden */, SurfaceAnimator.ANIMATION_TYPE_APP_TRANSITION);
+
+        appWindow.removeIfPossible();
+        assertTrue(appWindow.mAnimatingExit);
+        assertFalse(appWindow.mRemoved);
+
+        activity.cancelAnimation();
+        assertFalse(appWindow.mAnimatingExit);
+        assertTrue(appWindow.mRemoved);
+    }
+
+    @Test
+    public void testOnExitAnimationDone() {
+        final WindowState parent = createWindow(null, TYPE_APPLICATION, "parent");
+        final WindowState child = createWindow(parent, TYPE_APPLICATION_PANEL, "child");
+        final SurfaceControl.Transaction t = parent.getPendingTransaction();
+        child.startAnimation(t, mock(AnimationAdapter.class), false /* hidden */,
+                SurfaceAnimator.ANIMATION_TYPE_WINDOW_ANIMATION);
+        parent.mAnimatingExit = parent.mRemoveOnExit = parent.mWindowRemovalAllowed = true;
+        child.mAnimatingExit = child.mRemoveOnExit = child.mWindowRemovalAllowed = true;
+        final int[] numRemovals = new int[2];
+        parent.registerWindowContainerListener(new WindowContainerListener() {
+            @Override
+            public void onRemoved() {
+                numRemovals[0]++;
+            }
+        });
+        child.registerWindowContainerListener(new WindowContainerListener() {
+            @Override
+            public void onRemoved() {
+                numRemovals[1]++;
+            }
+        });
+        spyOn(parent);
+        // parent onExitAnimationDone
+        //   -> child onExitAnimationDone() -> no-op because isAnimating()
+        //   -> parent destroySurface()
+        //     -> parent removeImmediately() because mDestroying+mRemoveOnExit
+        //       -> child removeImmediately() -> cancelAnimation()
+        //       -> child onExitAnimationDone()
+        //         -> child destroySurface() because animation is canceled
+        //           -> child removeImmediately() -> no-op because mRemoved
+        parent.onExitAnimationDone();
+        // There must be no additional destroySurface() of parent from its child.
+        verify(parent, atMost(1)).destroySurface(anyBoolean(), anyBoolean());
+        assertEquals(1, numRemovals[0]);
+        assertEquals(1, numRemovals[1]);
     }
 
     @Test
@@ -465,11 +527,30 @@ public class WindowStateTests extends WindowTestsBase {
     public void testDisplayIdUpdatedOnReparent() {
         final WindowState app = createWindow(null, TYPE_APPLICATION, "app");
         // fake a different display
-        app.mInputWindowHandle.displayId = mDisplayContent.getDisplayId() + 1;
+        app.mInputWindowHandle.setDisplayId(mDisplayContent.getDisplayId() + 1);
         app.onDisplayChanged(mDisplayContent);
 
-        assertThat(app.mInputWindowHandle.displayId, is(mDisplayContent.getDisplayId()));
+        assertThat(app.mInputWindowHandle.getDisplayId(), is(mDisplayContent.getDisplayId()));
         assertThat(app.getDisplayId(), is(mDisplayContent.getDisplayId()));
+    }
+
+    @Test
+    public void testApplyWithNextDraw() {
+        final WindowState win = createWindow(null, TYPE_APPLICATION_OVERLAY, "app");
+        final SurfaceControl.Transaction[] handledT = { null };
+        // The normal case that the draw transaction is applied with finishing drawing.
+        win.applyWithNextDraw(t -> handledT[0] = t);
+        assertTrue(win.useBLASTSync());
+        final SurfaceControl.Transaction drawT = new StubTransaction();
+        assertTrue(win.finishDrawing(drawT, Integer.MAX_VALUE));
+        assertEquals(drawT, handledT[0]);
+        assertFalse(win.useBLASTSync());
+
+        // If the window is gone before reporting drawn, the sync state should be cleared.
+        win.applyWithNextDraw(t -> handledT[0] = t);
+        win.destroySurfaceUnchecked();
+        assertFalse(win.useBLASTSync());
+        assertNotEquals(drawT, handledT[0]);
     }
 
     @Test
@@ -477,51 +558,49 @@ public class WindowStateTests extends WindowTestsBase {
         final WindowState app = createWindow(null, TYPE_APPLICATION, "app");
         final SurfaceControl.Transaction t = spy(StubTransaction.class);
 
-        app.mHasSurface = true;
+        makeWindowVisible(app);
         app.mSurfaceControl = mock(SurfaceControl.class);
-        try {
-            app.getFrameLw().set(10, 20, 60, 80);
-            app.updateSurfacePosition(t);
+        final Rect frame = app.getFrame();
+        frame.set(10, 20, 60, 80);
+        app.updateSurfacePosition(t);
+        assertTrue(app.mLastSurfacePosition.equals(frame.left, frame.top));
+        app.seamlesslyRotateIfAllowed(t, ROTATION_0, ROTATION_90, true /* requested */);
+        assertTrue(app.mSeamlesslyRotated);
 
-            app.seamlesslyRotateIfAllowed(t, ROTATION_0, ROTATION_90, true);
+        // Verify we un-rotate the window state surface.
+        final Matrix matrix = new Matrix();
+        // Un-rotate 90 deg.
+        matrix.setRotate(270);
+        // Translate it back to origin.
+        matrix.postTranslate(0, mDisplayInfo.logicalWidth);
+        verify(t).setMatrix(eq(app.mSurfaceControl), eq(matrix), any(float[].class));
 
-            assertTrue(app.mSeamlesslyRotated);
+        // Verify we update the position as well.
+        final float[] curSurfacePos = {app.mLastSurfacePosition.x, app.mLastSurfacePosition.y};
+        matrix.mapPoints(curSurfacePos);
+        verify(t).setPosition(eq(app.mSurfaceControl), eq(curSurfacePos[0]), eq(curSurfacePos[1]));
 
-            // Verify we un-rotate the window state surface.
-            Matrix matrix = new Matrix();
-            // Un-rotate 90 deg
-            matrix.setRotate(270);
-            // Translate it back to origin
-            matrix.postTranslate(0, mDisplayInfo.logicalWidth);
-            verify(t).setMatrix(eq(app.mSurfaceControl), eq(matrix), any(float[].class));
+        app.finishSeamlessRotation(t);
+        assertFalse(app.mSeamlesslyRotated);
+        assertNull(app.mPendingSeamlessRotate);
 
-            // Verify we update the position as well.
-            float[] currentSurfacePos = {app.mLastSurfacePosition.x, app.mLastSurfacePosition.y};
-            matrix.mapPoints(currentSurfacePos);
-            verify(t).setPosition(eq(app.mSurfaceControl), eq(currentSurfacePos[0]),
-                    eq(currentSurfacePos[1]));
-        } finally {
-            app.mSurfaceControl = null;
-            app.mHasSurface = false;
-        }
-    }
+        // Simulate the case with deferred layout and animation.
+        app.resetSurfacePositionForAnimationLeash(t);
+        clearInvocations(t);
+        mWm.mWindowPlacerLocked.deferLayout();
+        app.updateSurfacePosition(t);
+        // Because layout is deferred, the position should keep the reset value.
+        assertTrue(app.mLastSurfacePosition.equals(0, 0));
 
-    @Test
-    public void testDisplayCutoutIsCalculatedRelativeToFrame() {
-        final WindowState app = createWindow(null, TYPE_APPLICATION, "app");
-        WindowFrames wf = app.getWindowFrames();
-        wf.mParentFrame.set(7, 10, 185, 380);
-        wf.mDisplayFrame.set(wf.mParentFrame);
-        final DisplayCutout cutout = new DisplayCutout(
-                Insets.of(0, 15, 0, 22) /* safeInset */,
-                null /* boundLeft */,
-                new Rect(95, 0, 105, 15),
-                null /* boundRight */,
-                new Rect(95, 378, 105, 400));
-        wf.setDisplayCutout(new WmDisplayCutout(cutout, new Size(200, 400)));
-
-        app.computeFrameLw();
-        assertThat(app.getWmDisplayCutout().getDisplayCutout(), is(cutout.inset(7, 10, 5, 20)));
+        app.seamlesslyRotateIfAllowed(t, ROTATION_0, ROTATION_270, true /* requested */);
+        // The last position must be updated so the surface can be unrotated properly.
+        assertTrue(app.mLastSurfacePosition.equals(frame.left, frame.top));
+        matrix.setRotate(90);
+        matrix.postTranslate(mDisplayInfo.logicalHeight, 0);
+        curSurfacePos[0] = frame.left;
+        curSurfacePos[1] = frame.top;
+        matrix.mapPoints(curSurfacePos);
+        verify(t).setPosition(eq(app.mSurfaceControl), eq(curSurfacePos[0]), eq(curSurfacePos[1]));
     }
 
     @Test
@@ -543,12 +622,80 @@ public class WindowStateTests extends WindowTestsBase {
     }
 
     @Test
+    public void testCompatOverrideScale() {
+        final float overrideScale = 2; // 0.5x on client side.
+        final CompatModePackages cmp = mWm.mAtmService.mCompatModePackages;
+        spyOn(cmp);
+        doReturn(overrideScale).when(cmp).getCompatScale(anyString(), anyInt());
+        final WindowState w = createWindow(null, TYPE_APPLICATION_OVERLAY, "win");
+        final WindowState child = createWindow(w, TYPE_APPLICATION_PANEL, "child");
+
+        assertTrue(w.hasCompatScale());
+        assertTrue(child.hasCompatScale());
+
+        makeWindowVisible(w, child);
+        w.setRequestedSize(100, 200);
+        child.setRequestedSize(50, 100);
+        child.mAttrs.width = child.mAttrs.height = 0;
+        w.mAttrs.x = w.mAttrs.y = 100;
+        w.mAttrs.width = w.mAttrs.height = WindowManager.LayoutParams.WRAP_CONTENT;
+        w.mAttrs.gravity = Gravity.TOP | Gravity.LEFT;
+        child.mAttrs.gravity = Gravity.CENTER;
+        DisplayContentTests.performLayout(mDisplayContent);
+        final Rect parentFrame = w.getFrame();
+        final Rect childFrame = child.getFrame();
+
+        // Frame on screen = 200x400 (200, 200 - 400, 600). Compat frame on client = 100x200.
+        final Rect unscaledCompatFrame = new Rect(w.getWindowFrames().mCompatFrame);
+        unscaledCompatFrame.scale(overrideScale);
+        assertEquals(parentFrame, unscaledCompatFrame);
+
+        // Frame on screen = 100x200 (250, 300 - 350, 500). Compat frame on client = 50x100.
+        unscaledCompatFrame.set(child.getWindowFrames().mCompatFrame);
+        unscaledCompatFrame.scale(overrideScale);
+        assertEquals(childFrame, unscaledCompatFrame);
+
+        // The position of child is relative to parent. So the local coordinates should be scaled.
+        final Point expectedChildPos = new Point(
+                (int) ((childFrame.left - parentFrame.left) / overrideScale),
+                (int) ((childFrame.top - parentFrame.top) / overrideScale));
+        final Point childPos = new Point();
+        child.transformFrameToSurfacePosition(childFrame.left, childFrame.top, childPos);
+        assertEquals(expectedChildPos, childPos);
+
+        // Surface should apply the scale.
+        w.prepareSurfaces();
+        verify(w.getPendingTransaction()).setMatrix(w.getSurfaceControl(),
+                overrideScale, 0, 0, overrideScale);
+        // Child surface inherits parent's scale, so it doesn't need to scale.
+        verify(child.getPendingTransaction(), never()).setMatrix(any(), anyInt(), anyInt(),
+                anyInt(), anyInt());
+
+        // According to "dp * density / 160 = px", density is scaled and the size in dp is the same.
+        final CompatibilityInfo compatInfo = cmp.compatibilityInfoForPackageLocked(
+                mContext.getApplicationInfo());
+        final Configuration winConfig = w.getConfiguration();
+        final Configuration clientConfig = new Configuration(w.getConfiguration());
+        compatInfo.applyToConfiguration(clientConfig.densityDpi, clientConfig);
+
+        assertEquals(winConfig.screenWidthDp, clientConfig.screenWidthDp);
+        assertEquals(winConfig.screenHeightDp, clientConfig.screenHeightDp);
+        assertEquals(winConfig.smallestScreenWidthDp, clientConfig.smallestScreenWidthDp);
+        assertEquals(winConfig.densityDpi, (int) (clientConfig.densityDpi * overrideScale));
+
+        final Rect unscaledClientBounds = new Rect(clientConfig.windowConfiguration.getBounds());
+        unscaledClientBounds.scale(overrideScale);
+        assertEquals(w.getWindowConfiguration().getBounds(), unscaledClientBounds);
+    }
+
+    @UseTestDisplay(addWindows = {W_ABOVE_ACTIVITY, W_NOTIFICATION_SHADE})
+    @Test
     public void testRequestDrawIfNeeded() {
         final WindowState startingApp = createWindow(null /* parent */,
                 TYPE_BASE_APPLICATION, "startingApp");
         final WindowState startingWindow = createWindow(null /* parent */,
                 TYPE_APPLICATION_STARTING, startingApp.mToken, "starting");
-        startingApp.mActivityRecord.startingWindow = startingWindow;
+        startingApp.mActivityRecord.mStartingWindow = startingWindow;
         final WindowState keyguardHostWindow = mNotificationShadeWindow;
         final WindowState allDrawnApp = mAppWindow;
         allDrawnApp.mActivityRecord.allDrawn = true;
@@ -567,6 +714,7 @@ public class WindowStateTests extends WindowTestsBase {
         assertEquals(Arrays.asList(keyguardHostWindow, startingWindow), outWaitingForDrawn);
     }
 
+    @UseTestDisplay(addWindows = W_ABOVE_ACTIVITY)
     @Test
     public void testReportResizedWithRemoteException() {
         final WindowState win = mChildAppWindowAbove;
@@ -580,12 +728,11 @@ public class WindowStateTests extends WindowTestsBase {
         mWm.mResizingWindows.remove(win);
         spyOn(win.mClient);
         try {
-            doThrow(new RemoteException("test")).when(win.mClient).resized(any() /* frame */,
-                    any() /* contentInsets */, any() /* visibleInsets */, any() /* stableInsets */,
+            doThrow(new RemoteException("test")).when(win.mClient).resized(any() /* frames */,
                     anyBoolean() /* reportDraw */, any() /* mergedConfig */,
-                    any() /* backDropFrame */, anyBoolean() /* forceLayout */,
+                    any() /* insetsState */, anyBoolean() /* forceLayout */,
                     anyBoolean() /* alwaysConsumeSystemBars */, anyInt() /* displayId */,
-                    any() /* displayCutout */);
+                    anyInt() /* seqId */, anyInt() /* resizeMode */);
         } catch (RemoteException ignored) {
         }
         win.reportResized();
@@ -597,6 +744,7 @@ public class WindowStateTests extends WindowTestsBase {
         assertFalse(win.getOrientationChanging());
     }
 
+    @UseTestDisplay(addWindows = W_ABOVE_ACTIVITY)
     @Test
     public void testRequestResizeForBlastSync() {
         final WindowState win = mChildAppWindowAbove;
@@ -608,7 +756,8 @@ public class WindowStateTests extends WindowTestsBase {
 
         // Check that the window is in resizing if using blast sync.
         win.reportResized();
-        win.prepareForSync(mock(BLASTSyncEngine.TransactionReadyListener.class), 1);
+        win.prepareSync();
+        assertEquals(SYNC_STATE_WAITING_FOR_DRAW, win.mSyncState);
         win.updateResizingWindowIfNeeded();
         assertThat(mWm.mResizingWindows).contains(win);
 
@@ -621,81 +770,417 @@ public class WindowStateTests extends WindowTestsBase {
     }
 
     @Test
-    public void testGetTransformationMatrix() {
-        final int PARENT_WINDOW_OFFSET = 1;
-        final int DISPLAY_IN_PARENT_WINDOW_OFFSET = 2;
-        final int WINDOW_OFFSET = 3;
-        final float OFFSET_SUM =
-                PARENT_WINDOW_OFFSET + DISPLAY_IN_PARENT_WINDOW_OFFSET + WINDOW_OFFSET;
-
-        final WindowState win0 = createWindow(null, TYPE_APPLICATION, "win0");
-
-        final DisplayContent dc = createNewDisplay();
-        win0.getFrameLw().offsetTo(PARENT_WINDOW_OFFSET, 0);
-        dc.reparentDisplayContent(win0, win0.getSurfaceControl());
-        dc.updateLocation(win0, DISPLAY_IN_PARENT_WINDOW_OFFSET, 0);
-
-        final float[] values = new float[9];
-        final Matrix matrix = new Matrix();
-        final SurfaceControl.Transaction t = spy(StubTransaction.class);
-        final WindowState win1 = createWindow(null, TYPE_APPLICATION, dc, "win1");
-        win1.mHasSurface = true;
-        win1.mSurfaceControl = mock(SurfaceControl.class);
-        win1.mAttrs.surfaceInsets.set(1, 2, 3, 4);
-        win1.getFrameLw().offsetTo(WINDOW_OFFSET, 0);
-        win1.updateSurfacePosition(t);
-        win1.getTransformationMatrix(values, matrix);
-
-        matrix.getValues(values);
-        assertEquals(OFFSET_SUM, values[Matrix.MTRANS_X], 0f);
-        assertEquals(0f, values[Matrix.MTRANS_Y], 0f);
-    }
-
-    @Test
-    public void testCantReceiveTouchDuringRecentsAnimation() {
-        final WindowState win0 = createWindow(null, TYPE_APPLICATION, "win0");
-
-        // Mock active recents animation
-        RecentsAnimationController recentsController = mock(RecentsAnimationController.class);
-        when(recentsController.shouldApplyInputConsumer(win0.mActivityRecord)).thenReturn(true);
-        mWm.setRecentsAnimationController(recentsController);
-        assertTrue(win0.cantReceiveTouchInput());
-    }
-
-    @Test
     public void testCantReceiveTouchWhenAppTokenHiddenRequested() {
         final WindowState win0 = createWindow(null, TYPE_APPLICATION, "win0");
         win0.mActivityRecord.mVisibleRequested = false;
-        assertTrue(win0.cantReceiveTouchInput());
+        assertFalse(win0.canReceiveTouchInput());
     }
 
     @Test
     public void testCantReceiveTouchWhenNotFocusable() {
         final WindowState win0 = createWindow(null, TYPE_APPLICATION, "win0");
-        win0.mActivityRecord.getStack().setWindowingMode(WINDOWING_MODE_SPLIT_SCREEN_PRIMARY);
-        win0.mActivityRecord.getStack().setFocusable(false);
-        assertTrue(win0.cantReceiveTouchInput());
+        final Task rootTask = win0.mActivityRecord.getRootTask();
+        spyOn(rootTask);
+        when(rootTask.shouldIgnoreInput()).thenReturn(true);
+        assertFalse(win0.canReceiveTouchInput());
     }
 
+    private boolean testFlag(int flags, int test) {
+        return (flags & test) == test;
+    }
+
+    @Test
+    public void testUpdateInputWindowHandle() {
+        final WindowState win = createWindow(null, TYPE_APPLICATION, "win");
+        win.mAttrs.inputFeatures = WindowManager.LayoutParams.INPUT_FEATURE_DISABLE_USER_ACTIVITY;
+        win.mAttrs.flags = FLAG_WATCH_OUTSIDE_TOUCH | FLAG_SPLIT_TOUCH;
+        final InputWindowHandle handle = new InputWindowHandle(
+                win.mInputWindowHandle.getInputApplicationHandle(), win.getDisplayId());
+        final InputWindowHandleWrapper handleWrapper = new InputWindowHandleWrapper(handle);
+        final IBinder inputChannelToken = mock(IBinder.class);
+        win.mInputChannelToken = inputChannelToken;
+
+        mDisplayContent.getInputMonitor().populateInputWindowHandle(handleWrapper, win);
+
+        assertTrue(handleWrapper.isChanged());
+        assertTrue(testFlag(handle.inputConfig, InputConfig.WATCH_OUTSIDE_TOUCH));
+        assertFalse(testFlag(handle.inputConfig, InputConfig.PREVENT_SPLITTING));
+        assertTrue(testFlag(handle.inputConfig, InputConfig.DISABLE_USER_ACTIVITY));
+        // The window of standard resizable task should not use surface crop as touchable region.
+        assertFalse(handle.replaceTouchableRegionWithCrop);
+        assertEquals(inputChannelToken, handle.token);
+        assertEquals(win.mActivityRecord.getInputApplicationHandle(false /* update */),
+                handle.inputApplicationHandle);
+
+        final SurfaceControl sc = mock(SurfaceControl.class);
+        final SurfaceControl.Transaction transaction = mSystemServicesTestRule.mTransaction;
+        InputMonitor.setInputWindowInfoIfNeeded(transaction, sc, handleWrapper);
+
+        // The fields of input window handle are changed, so it must set input window info
+        // successfully. And then the changed flag should be reset.
+        verify(transaction).setInputWindowInfo(eq(sc), eq(handle));
+        assertFalse(handleWrapper.isChanged());
+        // Populate the same states again, the handle should not detect change.
+        mDisplayContent.getInputMonitor().populateInputWindowHandle(handleWrapper, win);
+        assertFalse(handleWrapper.isChanged());
+
+        // Apply the no change handle, the invocation of setInputWindowInfo should be skipped.
+        clearInvocations(transaction);
+        InputMonitor.setInputWindowInfoIfNeeded(transaction, sc, handleWrapper);
+        verify(transaction, never()).setInputWindowInfo(any(), any());
+
+        // The rotated bounds have higher priority as the touchable region.
+        final Rect rotatedBounds = new Rect(0, 0, 123, 456);
+        doReturn(rotatedBounds).when(win.mToken).getFixedRotationTransformDisplayBounds();
+        mDisplayContent.getInputMonitor().populateInputWindowHandle(handleWrapper, win);
+        assertEquals(rotatedBounds, handle.touchableRegion.getBounds());
+
+        // Populate as an overlay to disable the input of window.
+        InputMonitor.populateOverlayInputInfo(handleWrapper);
+        // The overlay attributes should be set.
+        assertTrue(handleWrapper.isChanged());
+        assertFalse(handleWrapper.isFocusable());
+        assertNull(handle.token);
+        assertEquals(0L, handle.dispatchingTimeoutMillis);
+        assertTrue(testFlag(handle.inputConfig, InputConfig.NO_INPUT_CHANNEL));
+    }
+
+    @Test
+    public void testHasActiveVisibleWindow() {
+        final int uid = ActivityBuilder.DEFAULT_FAKE_UID;
+
+        final WindowState app = createWindow(null, TYPE_APPLICATION, "app", uid);
+        app.mActivityRecord.setVisible(false);
+        app.mActivityRecord.setVisibility(false /* visible */, false /* deferHidingClient */);
+        assertFalse(mAtm.hasActiveVisibleWindow(uid));
+
+        app.mActivityRecord.setVisibility(true /* visible */, false /* deferHidingClient */);
+        assertTrue(mAtm.hasActiveVisibleWindow(uid));
+
+        // Make the activity invisible and add a visible toast. The uid should have no active
+        // visible window because toast can be misused by legacy app to bypass background check.
+        app.mActivityRecord.setVisibility(false /* visible */, false /* deferHidingClient */);
+        final WindowState overlay = createWindow(null, TYPE_APPLICATION_OVERLAY, "overlay", uid);
+        final WindowState toast = createWindow(null, TYPE_TOAST, app.mToken, "toast", uid);
+        toast.onSurfaceShownChanged(true);
+        assertFalse(mAtm.hasActiveVisibleWindow(uid));
+
+        // Though starting window should belong to system. Make sure it is ignored to avoid being
+        // allow-list unexpectedly, see b/129563343.
+        final WindowState starting =
+                createWindow(null, TYPE_APPLICATION_STARTING, app.mToken, "starting", uid);
+        starting.onSurfaceShownChanged(true);
+        assertFalse(mAtm.hasActiveVisibleWindow(uid));
+
+        // Make the application overlay window visible. It should be a valid active visible window.
+        overlay.onSurfaceShownChanged(true);
+        assertTrue(mAtm.hasActiveVisibleWindow(uid));
+
+        // The number of windows should be independent of the existence of uid state.
+        mAtm.mActiveUids.onUidInactive(uid);
+        mAtm.mActiveUids.onUidActive(uid, 0 /* any proc state */);
+        assertTrue(mAtm.mActiveUids.hasNonAppVisibleWindow(uid));
+    }
+
+    @UseTestDisplay(addWindows = {W_ACTIVITY, W_INPUT_METHOD})
     @Test
     public void testNeedsRelativeLayeringToIme_notAttached() {
         WindowState sameTokenWindow = createWindow(null, TYPE_BASE_APPLICATION, mAppWindow.mToken,
                 "SameTokenWindow");
-        mDisplayContent.mInputMethodTarget = mAppWindow;
-        sameTokenWindow.mActivityRecord.getStack().setWindowingMode(
-                WINDOWING_MODE_SPLIT_SCREEN_PRIMARY);
+        mDisplayContent.setImeLayeringTarget(mAppWindow);
+        makeWindowVisible(mImeWindow);
+        sameTokenWindow.mActivityRecord.getRootTask().setWindowingMode(WINDOWING_MODE_MULTI_WINDOW);
         assertTrue(sameTokenWindow.needsRelativeLayeringToIme());
         sameTokenWindow.removeImmediately();
         assertFalse(sameTokenWindow.needsRelativeLayeringToIme());
     }
 
+    @UseTestDisplay(addWindows = {W_ACTIVITY, W_INPUT_METHOD})
     @Test
     public void testNeedsRelativeLayeringToIme_startingWindow() {
         WindowState sameTokenWindow = createWindow(null, TYPE_APPLICATION_STARTING,
                 mAppWindow.mToken, "SameTokenWindow");
-        mDisplayContent.mInputMethodTarget = mAppWindow;
-        sameTokenWindow.mActivityRecord.getStack().setWindowingMode(
-                WINDOWING_MODE_SPLIT_SCREEN_PRIMARY);
+        mDisplayContent.setImeLayeringTarget(mAppWindow);
+        makeWindowVisible(mImeWindow);
+        sameTokenWindow.mActivityRecord.getRootTask().setWindowingMode(WINDOWING_MODE_MULTI_WINDOW);
         assertFalse(sameTokenWindow.needsRelativeLayeringToIme());
+    }
+
+    @Test
+    public void testSetFreezeInsetsState() {
+        final WindowState app = createWindow(null, TYPE_APPLICATION, "app");
+        spyOn(app);
+        doReturn(true).when(app).isVisible();
+
+        // Set freezing the insets state to make the window ignore to dispatch insets changed.
+        final InsetsState expectedState = new InsetsState(app.getInsetsState(),
+                true /* copySources */);
+        app.freezeInsetsState();
+        assertEquals(expectedState, app.getFrozenInsetsState());
+        assertFalse(app.isReadyToDispatchInsetsState());
+        assertEquals(expectedState, app.getInsetsState());
+        mDisplayContent.getInsetsStateController().notifyInsetsChanged();
+        verify(app, never()).notifyInsetsChanged();
+
+        // Unfreeze the insets state to make the window can dispatch insets changed.
+        app.clearFrozenInsetsState();
+        assertTrue(app.isReadyToDispatchInsetsState());
+        mDisplayContent.getInsetsStateController().notifyInsetsChanged();
+        verify(app).notifyInsetsChanged();
+
+        // Verify that invisible non-activity window won't dispatch insets changed.
+        final WindowState overlay = createWindow(null, TYPE_APPLICATION_OVERLAY, "overlay");
+        makeWindowVisible(overlay);
+        assertTrue(overlay.isReadyToDispatchInsetsState());
+        overlay.mHasSurface = false;
+        assertFalse(overlay.isReadyToDispatchInsetsState());
+        mDisplayContent.getInsetsStateController().notifyInsetsChanged();
+        assertFalse(overlay.getWindowFrames().hasInsetsChanged());
+    }
+
+    @UseTestDisplay(addWindows = {W_INPUT_METHOD, W_ACTIVITY})
+    @Test
+    public void testImeAlwaysReceivesVisibleNavigationBarInsets() {
+        final InsetsSource navSource = new InsetsSource(ITYPE_NAVIGATION_BAR);
+        mImeWindow.mAboveInsetsState.addSource(navSource);
+        mAppWindow.mAboveInsetsState.addSource(navSource);
+
+        navSource.setVisible(false);
+        assertTrue(mImeWindow.getInsetsState().getSourceOrDefaultVisibility(ITYPE_NAVIGATION_BAR));
+        assertFalse(mAppWindow.getInsetsState().getSourceOrDefaultVisibility(ITYPE_NAVIGATION_BAR));
+
+        navSource.setVisible(true);
+        assertTrue(mImeWindow.getInsetsState().getSourceOrDefaultVisibility(ITYPE_NAVIGATION_BAR));
+        assertTrue(mAppWindow.getInsetsState().getSourceOrDefaultVisibility(ITYPE_NAVIGATION_BAR));
+    }
+
+    @Test
+    public void testAdjustImeInsetsVisibilityWhenSwitchingApps() {
+        final WindowState app = createWindow(null, TYPE_APPLICATION, "app");
+        final WindowState app2 = createWindow(null, TYPE_APPLICATION, "app2");
+        final WindowState imeWindow = createWindow(null, TYPE_APPLICATION, "imeWindow");
+        spyOn(imeWindow);
+        doReturn(true).when(imeWindow).isVisible();
+        mDisplayContent.mInputMethodWindow = imeWindow;
+
+        final InsetsStateController controller = mDisplayContent.getInsetsStateController();
+        controller.getImeSourceProvider().setWindowContainer(imeWindow, null, null);
+
+        // Simulate app requests IME with updating all windows Insets State when IME is above app.
+        mDisplayContent.setImeLayeringTarget(app);
+        mDisplayContent.setImeInputTarget(app);
+        assertTrue(mDisplayContent.shouldImeAttachedToApp());
+        controller.getImeSourceProvider().scheduleShowImePostLayout(app);
+        controller.getImeSourceProvider().getSource().setVisible(true);
+        controller.updateAboveInsetsState(false);
+
+        // Expect all app windows behind IME can receive IME insets visible.
+        assertTrue(app.getInsetsState().getSource(ITYPE_IME).isVisible());
+        assertTrue(app2.getInsetsState().getSource(ITYPE_IME).isVisible());
+
+        // Simulate app plays closing transition to app2.
+        app.mActivityRecord.commitVisibility(false, false);
+        assertTrue(app.mActivityRecord.mLastImeShown);
+        assertTrue(app.mActivityRecord.mImeInsetsFrozenUntilStartInput);
+
+        // Verify the IME insets is visible on app, but not for app2 during app task switching.
+        assertTrue(app.getInsetsState().getSource(ITYPE_IME).isVisible());
+        assertFalse(app2.getInsetsState().getSource(ITYPE_IME).isVisible());
+    }
+
+    @Test
+    public void testAdjustImeInsetsVisibilityWhenSwitchingApps_toAppInMultiWindowMode() {
+        final WindowState app = createWindow(null, TYPE_APPLICATION, "app");
+        final WindowState app2 = createWindow(null, WINDOWING_MODE_MULTI_WINDOW,
+                ACTIVITY_TYPE_STANDARD, TYPE_APPLICATION, mDisplayContent, "app2");
+        final WindowState imeWindow = createWindow(null, TYPE_APPLICATION, "imeWindow");
+        spyOn(imeWindow);
+        doReturn(true).when(imeWindow).isVisible();
+        mDisplayContent.mInputMethodWindow = imeWindow;
+
+        final InsetsStateController controller = mDisplayContent.getInsetsStateController();
+        controller.getImeSourceProvider().setWindowContainer(imeWindow, null, null);
+
+        // Simulate app2 in multi-window mode is going to background to switch to the fullscreen
+        // app which requests IME with updating all windows Insets State when IME is above app.
+        app2.mActivityRecord.mImeInsetsFrozenUntilStartInput = true;
+        mDisplayContent.setImeLayeringTarget(app);
+        mDisplayContent.setImeInputTarget(app);
+        assertTrue(mDisplayContent.shouldImeAttachedToApp());
+        controller.getImeSourceProvider().scheduleShowImePostLayout(app);
+        controller.getImeSourceProvider().getSource().setVisible(true);
+        controller.updateAboveInsetsState(false);
+
+        // Expect app windows behind IME can receive IME insets visible,
+        // but not for app2 in background.
+        assertTrue(app.getInsetsState().getSource(ITYPE_IME).isVisible());
+        assertFalse(app2.getInsetsState().getSource(ITYPE_IME).isVisible());
+
+        // Simulate app plays closing transition to app2.
+        // And app2 is now IME layering target but not yet to be the IME input target.
+        mDisplayContent.setImeLayeringTarget(app2);
+        app.mActivityRecord.commitVisibility(false, false);
+        assertTrue(app.mActivityRecord.mLastImeShown);
+        assertTrue(app.mActivityRecord.mImeInsetsFrozenUntilStartInput);
+
+        // Verify the IME insets is still visible on app, but not for app2 during task switching.
+        assertTrue(app.getInsetsState().getSource(ITYPE_IME).isVisible());
+        assertFalse(app2.getInsetsState().getSource(ITYPE_IME).isVisible());
+    }
+
+    @UseTestDisplay(addWindows = {W_ACTIVITY})
+    @Test
+    public void testUpdateImeControlTargetWhenLeavingMultiWindow() {
+        WindowState app = createWindow(null, TYPE_BASE_APPLICATION,
+                mAppWindow.mToken, "app");
+        mDisplayContent.setRemoteInsetsController(createDisplayWindowInsetsController());
+
+        spyOn(app);
+        mDisplayContent.setImeInputTarget(mAppWindow);
+        mDisplayContent.setImeLayeringTarget(mAppWindow);
+
+        // Simulate entering multi-window mode and verify if the IME control target is remote.
+        app.mActivityRecord.getRootTask().setWindowingMode(WINDOWING_MODE_MULTI_WINDOW);
+        assertEquals(WINDOWING_MODE_MULTI_WINDOW, app.getWindowingMode());
+        assertEquals(mDisplayContent.mRemoteInsetsControlTarget,
+                mDisplayContent.computeImeControlTarget());
+
+        // Simulate exiting multi-window mode and verify if the IME control target changed
+        // to the app window.
+        spyOn(app.getDisplayContent());
+        app.mActivityRecord.getRootTask().setWindowingMode(WINDOWING_MODE_FULLSCREEN);
+
+        verify(app.getDisplayContent()).updateImeControlTarget();
+        assertEquals(mAppWindow, mDisplayContent.getImeTarget(IME_TARGET_CONTROL).getWindow());
+    }
+
+    @UseTestDisplay(addWindows = {W_ACTIVITY, W_INPUT_METHOD, W_NOTIFICATION_SHADE})
+    @Test
+    public void testNotificationShadeHasImeInsetsWhenMultiWindow() {
+        WindowState app = createWindow(null, TYPE_BASE_APPLICATION,
+                mAppWindow.mToken, "app");
+
+        // Simulate entering multi-window mode and windowing mode is multi-window.
+        app.mActivityRecord.getRootTask().setWindowingMode(WINDOWING_MODE_MULTI_WINDOW);
+        assertEquals(WINDOWING_MODE_MULTI_WINDOW, app.getWindowingMode());
+
+        // Simulate notificationShade is shown and being IME layering target.
+        mNotificationShadeWindow.setHasSurface(true);
+        mNotificationShadeWindow.mAttrs.flags &= ~FLAG_NOT_FOCUSABLE;
+        assertTrue(mNotificationShadeWindow.canBeImeTarget());
+        mDisplayContent.getInsetsStateController().getSourceProvider(ITYPE_IME).setWindowContainer(
+                mImeWindow, null, null);
+
+        mDisplayContent.computeImeTarget(true);
+        assertEquals(mNotificationShadeWindow, mDisplayContent.getImeTarget(IME_TARGET_LAYERING));
+        mDisplayContent.getInsetsStateController().getRawInsetsState()
+                .setSourceVisible(ITYPE_IME, true);
+
+        // Verify notificationShade can still get IME insets even windowing mode is multi-window.
+        InsetsState state = mNotificationShadeWindow.getInsetsState();
+        assertNotNull(state.peekSource(ITYPE_IME));
+        assertTrue(state.getSource(ITYPE_IME).isVisible());
+    }
+
+    @Test
+    public void testRequestedVisibility() {
+        final WindowState app = createWindow(null, TYPE_APPLICATION, "app");
+        app.mActivityRecord.setVisible(false);
+        app.mActivityRecord.setVisibility(false /* visible */, false /* deferHidingClient */);
+        assertFalse(app.isVisibleRequested());
+
+        // It doesn't have a surface yet, but should still be visible requested.
+        app.setHasSurface(false);
+        app.mActivityRecord.setVisibility(true /* visible */, false /* deferHidingClient */);
+
+        assertFalse(app.isVisible());
+        assertTrue(app.isVisibleRequested());
+    }
+
+    @Test
+    public void testKeepClearAreas() {
+        final WindowState window = createWindow(null, TYPE_APPLICATION, "window");
+        makeWindowVisible(window);
+
+        final Rect keepClearArea1 = new Rect(0, 0, 10, 10);
+        final Rect keepClearArea2 = new Rect(5, 10, 15, 20);
+        final List<Rect> keepClearAreas = Arrays.asList(keepClearArea1, keepClearArea2);
+        window.setKeepClearAreas(keepClearAreas, Collections.emptyList());
+
+        // Test that the keep-clear rects are stored and returned
+        final List<Rect> windowKeepClearAreas = new ArrayList();
+        window.getKeepClearAreas(windowKeepClearAreas, new ArrayList());
+        assertEquals(new ArraySet(keepClearAreas), new ArraySet(windowKeepClearAreas));
+
+        // Test that keep-clear rects are overwritten
+        window.setKeepClearAreas(Collections.emptyList(), Collections.emptyList());
+        windowKeepClearAreas.clear();
+        window.getKeepClearAreas(windowKeepClearAreas, new ArrayList());
+        assertEquals(0, windowKeepClearAreas.size());
+
+        // Move the window position
+        final SurfaceControl.Transaction t = spy(StubTransaction.class);
+        window.mSurfaceControl = mock(SurfaceControl.class);
+        final Rect frame = window.getFrame();
+        frame.set(10, 20, 60, 80);
+        window.updateSurfacePosition(t);
+        assertEquals(new Point(frame.left, frame.top), window.mLastSurfacePosition);
+
+        // Test that the returned keep-clear rects are translated to display space
+        window.setKeepClearAreas(keepClearAreas, Collections.emptyList());
+        Rect expectedArea1 = new Rect(keepClearArea1);
+        expectedArea1.offset(frame.left, frame.top);
+        Rect expectedArea2 = new Rect(keepClearArea2);
+        expectedArea2.offset(frame.left, frame.top);
+
+        windowKeepClearAreas.clear();
+        window.getKeepClearAreas(windowKeepClearAreas, new ArrayList());
+        assertEquals(new ArraySet(Arrays.asList(expectedArea1, expectedArea2)),
+                     new ArraySet(windowKeepClearAreas));
+    }
+
+    @Test
+    public void testUnrestrictedKeepClearAreas() {
+        final WindowState window = createWindow(null, TYPE_APPLICATION, "window");
+        makeWindowVisible(window);
+
+        final Rect keepClearArea1 = new Rect(0, 0, 10, 10);
+        final Rect keepClearArea2 = new Rect(5, 10, 15, 20);
+        final List<Rect> keepClearAreas = Arrays.asList(keepClearArea1, keepClearArea2);
+        window.setKeepClearAreas(Collections.emptyList(), keepClearAreas);
+
+        // Test that the keep-clear rects are stored and returned
+        final List<Rect> restrictedKeepClearAreas = new ArrayList();
+        final List<Rect> unrestrictedKeepClearAreas = new ArrayList();
+        window.getKeepClearAreas(restrictedKeepClearAreas, unrestrictedKeepClearAreas);
+        assertEquals(Collections.emptySet(), new ArraySet(restrictedKeepClearAreas));
+        assertEquals(new ArraySet(keepClearAreas), new ArraySet(unrestrictedKeepClearAreas));
+
+        // Test that keep-clear rects are overwritten
+        window.setKeepClearAreas(Collections.emptyList(), Collections.emptyList());
+        unrestrictedKeepClearAreas.clear();
+        window.getKeepClearAreas(unrestrictedKeepClearAreas, new ArrayList());
+        assertEquals(0, unrestrictedKeepClearAreas.size());
+
+        // Move the window position
+        final SurfaceControl.Transaction t = spy(StubTransaction.class);
+        window.mSurfaceControl = mock(SurfaceControl.class);
+        final Rect frame = window.getFrame();
+        frame.set(10, 20, 60, 80);
+        window.updateSurfacePosition(t);
+        assertEquals(new Point(frame.left, frame.top), window.mLastSurfacePosition);
+
+        // Test that the returned keep-clear rects are translated to display space
+        window.setKeepClearAreas(Collections.emptyList(), keepClearAreas);
+        Rect expectedArea1 = new Rect(keepClearArea1);
+        expectedArea1.offset(frame.left, frame.top);
+        Rect expectedArea2 = new Rect(keepClearArea2);
+        expectedArea2.offset(frame.left, frame.top);
+
+        unrestrictedKeepClearAreas.clear();
+        window.getKeepClearAreas(restrictedKeepClearAreas, unrestrictedKeepClearAreas);
+        assertEquals(Collections.emptySet(), new ArraySet(restrictedKeepClearAreas));
+        assertEquals(new ArraySet(Arrays.asList(expectedArea1, expectedArea2)),
+                     new ArraySet(unrestrictedKeepClearAreas));
     }
 }

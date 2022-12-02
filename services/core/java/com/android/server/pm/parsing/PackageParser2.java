@@ -19,13 +19,9 @@ package com.android.server.pm.parsing;
 import android.annotation.AnyThread;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.app.ActivityThread;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageParser;
-import android.content.pm.PackageParser.PackageParserException;
-import android.content.pm.parsing.ParsingPackage;
-import android.content.pm.parsing.ParsingPackageUtils;
-import android.content.pm.parsing.ParsingUtils;
 import android.content.pm.parsing.result.ParseInput;
 import android.content.pm.parsing.result.ParseResult;
 import android.content.pm.parsing.result.ParseTypeImpl;
@@ -33,18 +29,24 @@ import android.content.res.TypedArray;
 import android.os.Build;
 import android.os.ServiceManager;
 import android.os.SystemClock;
+import android.permission.PermissionManager;
 import android.util.DisplayMetrics;
 import android.util.Slog;
 
 import com.android.internal.compat.IPlatformCompat;
+import com.android.server.pm.PackageManagerException;
 import com.android.server.pm.PackageManagerService;
 import com.android.server.pm.parsing.pkg.PackageImpl;
 import com.android.server.pm.parsing.pkg.ParsedPackage;
+import com.android.server.pm.pkg.parsing.ParsingPackage;
+import com.android.server.pm.pkg.parsing.ParsingPackageUtils;
+import com.android.server.pm.pkg.parsing.ParsingUtils;
 
 import java.io.File;
+import java.util.List;
 
 /**
- * The v2 of {@link PackageParser} for use when parsing is initiated in the server and must
+ * The v2 of package parsing for use when parsing is initiated in the server and must
  * contain state contained by the server.
  *
  * The {@link AutoCloseable} helps signal that this class contains resources that must be freed.
@@ -71,7 +73,7 @@ public class PackageParser2 implements AutoCloseable {
                     return platformCompat.isChangeEnabled(changeId, appInfo);
                 } catch (Exception e) {
                     // This shouldn't happen, but assume enforcement if it does
-                    Slog.wtf(ParsingUtils.TAG, "IPlatformCompat query failed", e);
+                    Slog.wtf(TAG, "IPlatformCompat query failed", e);
                     return true;
                 }
             }
@@ -87,7 +89,7 @@ public class PackageParser2 implements AutoCloseable {
         });
     }
 
-    static final String TAG = "PackageParser2";
+    private static final String TAG = ParsingUtils.TAG;
 
     private static final boolean LOG_PARSE_TIMINGS = Build.IS_DEBUGGABLE;
     private static final int LOG_PARSE_TIMINGS_THRESHOLD_MS = 100;
@@ -118,10 +120,15 @@ public class PackageParser2 implements AutoCloseable {
             displayMetrics.setToDefaults();
         }
 
+        PermissionManager permissionManager = ActivityThread.currentApplication()
+                .getSystemService(PermissionManager.class);
+        List<PermissionManager.SplitPermissionInfo> splitPermissions = permissionManager
+                .getSplitPermissions();
+
         mCacher = cacheDir == null ? null : new PackageCacher(cacheDir);
 
         parsingUtils = new ParsingPackageUtils(onlyCoreApps, separateProcesses, displayMetrics,
-                callback);
+                splitPermissions, callback);
 
         ParseInput.Callback enforcementCallback = (changeId, packageName, targetSdkVersion) -> {
             ApplicationInfo appInfo = mSharedAppInfo.get();
@@ -139,7 +146,16 @@ public class PackageParser2 implements AutoCloseable {
      */
     @AnyThread
     public ParsedPackage parsePackage(File packageFile, int flags, boolean useCaches)
-            throws PackageParserException {
+            throws PackageManagerException {
+        return parsePackage(packageFile, flags, useCaches, /* frameworkSplits= */ null);
+    }
+
+    /**
+     * TODO(b/135203078): Document new package parsing
+     */
+    @AnyThread
+    public ParsedPackage parsePackage(File packageFile, int flags, boolean useCaches,
+            List<File> frameworkSplits) throws PackageManagerException {
         if (useCaches && mCacher != null) {
             ParsedPackage parsed = mCacher.getCachedResult(packageFile, flags);
             if (parsed != null) {
@@ -149,9 +165,10 @@ public class PackageParser2 implements AutoCloseable {
 
         long parseTime = LOG_PARSE_TIMINGS ? SystemClock.uptimeMillis() : 0;
         ParseInput input = mSharedResult.get().reset();
-        ParseResult<ParsingPackage> result = parsingUtils.parsePackage(input, packageFile, flags);
+        ParseResult<ParsingPackage> result = parsingUtils.parsePackage(input, packageFile, flags,
+                frameworkSplits);
         if (result.isError()) {
-            throw new PackageParserException(result.getErrorCode(), result.getErrorMessage(),
+            throw new PackageManagerException(result.getErrorCode(), result.getErrorMessage(),
                     result.getException());
         }
 

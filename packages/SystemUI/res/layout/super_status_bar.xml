@@ -18,7 +18,7 @@
 -->
 
 <!-- This is the status bar window. -->
-<com.android.systemui.statusbar.phone.StatusBarWindowView
+<com.android.systemui.statusbar.window.StatusBarWindowView
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:sysui="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
@@ -26,8 +26,13 @@
     android:fitsSystemWindows="true">
 
     <FrameLayout
+        android:id="@+id/status_bar_launch_animation_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <FrameLayout
         android:id="@+id/status_bar_container"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="@drawable/system_bar_background" />
-</com.android.systemui.statusbar.phone.StatusBarWindowView>
+</com.android.systemui.statusbar.window.StatusBarWindowView>

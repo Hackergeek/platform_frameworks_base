@@ -22,6 +22,8 @@ import static android.os.ParcelFileDescriptor.MODE_READ_ONLY;
 import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 import static android.os.ParcelFileDescriptor.MODE_TRUNCATE;
 import static android.os.ParcelFileDescriptor.MODE_WRITE_ONLY;
+import static android.system.OsConstants.EINVAL;
+import static android.system.OsConstants.ENOSYS;
 import static android.system.OsConstants.F_OK;
 import static android.system.OsConstants.O_ACCMODE;
 import static android.system.OsConstants.O_APPEND;
@@ -40,13 +42,19 @@ import static android.system.OsConstants.W_OK;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.TestApi;
+import android.app.AppGlobals;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ContentResolver;
+import android.content.Context;
+import android.content.pm.PackageManager;
+import android.content.pm.ProviderInfo;
 import android.provider.DocumentsContract.Document;
+import android.provider.MediaStore;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.StructStat;
 import android.text.TextUtils;
+import android.util.DataUnit;
 import android.util.Log;
 import android.util.Slog;
 import android.webkit.MimeTypeMap;
@@ -76,6 +84,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -108,6 +117,9 @@ public final class FileUtils {
     private FileUtils() {
     }
 
+    private static final String CAMERA_DIR_LOWER_CASE = "/storage/emulated/" + UserHandle.myUserId()
+            + "/dcim/camera";
+
     /** Regular expression for safe filenames: no spaces or metacharacters.
       *
       * Use a preload holder so that FileUtils can be compile-time initialized.
@@ -118,6 +130,7 @@ public final class FileUtils {
 
     // non-final so it can be toggled by Robolectric's ShadowFileUtils
     private static boolean sEnableCopyOptimizations = true;
+    private static volatile int sMediaProviderAppId = -1;
 
     private static final long COPY_CHECKPOINT_BYTES = 524288;
 
@@ -181,7 +194,7 @@ public final class FileUtils {
      * @return 0 on success, otherwise errno.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static int setPermissions(FileDescriptor fd, int mode, int uid, int gid) {
         try {
             Os.fchmod(fd, mode);
@@ -432,7 +445,19 @@ public final class FileUtils {
                 final StructStat st_in = Os.fstat(in);
                 final StructStat st_out = Os.fstat(out);
                 if (S_ISREG(st_in.st_mode) && S_ISREG(st_out.st_mode)) {
-                    return copyInternalSendfile(in, out, count, signal, executor, listener);
+                    try {
+                        return copyInternalSendfile(in, out, count, signal, executor, listener);
+                    } catch (ErrnoException e) {
+                        if (e.errno == EINVAL || e.errno == ENOSYS) {
+                            // sendfile(2) will fail in at least any of the following conditions:
+                            // 1. |in| doesn't support mmap(2)
+                            // 2. |out| was opened with O_APPEND
+                            // We fallback to userspace copy if that fails
+                            return copyInternalUserspace(in, out, count, signal, executor,
+                                    listener);
+                        }
+                        throw e;
+                    }
                 } else if (S_ISFIFO(st_in.st_mode) || S_ISFIFO(st_out.st_mode)) {
                     return copyInternalSplice(in, out, count, signal, executor, listener);
                 }
@@ -664,7 +689,7 @@ public final class FileUtils {
     }
 
     /** {@hide} */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static void stringToFile(File file, String string) throws IOException {
         stringToFile(file.getAbsolutePath(), string);
     }
@@ -713,7 +738,7 @@ public final class FileUtils {
      *             to its potential for collision.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     @Deprecated
     public static long checksumCrc32(File file) throws FileNotFoundException, IOException {
         CRC32 checkSummer = new CRC32();
@@ -800,7 +825,7 @@ public final class FileUtils {
      * @return if any files were deleted.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static boolean deleteOlderFiles(File dir, int minCount, long minAgeMs) {
         if (minCount < 0 || minAgeMs < 0) {
             throw new IllegalArgumentException("Constraints must be positive or 0");
@@ -909,7 +934,7 @@ public final class FileUtils {
     }
 
     /** {@hide} */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static boolean deleteContents(File dir) {
         File[] files = dir.listFiles();
         boolean success = true;
@@ -1235,9 +1260,9 @@ public final class FileUtils {
     }
 
     /**
-     * Creates a directory with name {@code name} under an existing directory {@code baseDir}.
-     * Returns a {@code File} object representing the directory on success, {@code null} on
-     * failure.
+     * Creates a directory with name {@code name} under an existing directory {@code baseDir} if it
+     * doesn't exist already. Returns a {@code File} object representing the directory if it exists
+     * and {@code null} if not.
      *
      * @hide
      */
@@ -1247,13 +1272,23 @@ public final class FileUtils {
         return createDir(dir) ? dir : null;
     }
 
-    /** @hide */
+    /**
+     * Ensure the given directory exists, creating it if needed. This method is threadsafe.
+     *
+     * @return false if the directory doesn't exist and couldn't be created
+     *
+     * @hide
+     */
     public static boolean createDir(File dir) {
+        if (dir.mkdir()) {
+            return true;
+        }
+
         if (dir.exists()) {
             return dir.isDirectory();
         }
 
-        return dir.mkdir();
+        return false;
     }
 
     /**
@@ -1274,6 +1309,85 @@ public final class FileUtils {
             }
         }
         return val * pow;
+    }
+
+    private static long toBytes(long value, String unit) {
+        unit = unit.toUpperCase();
+
+        if (List.of("B").contains(unit)) {
+            return value;
+        }
+
+        if (List.of("K", "KB").contains(unit)) {
+            return DataUnit.KILOBYTES.toBytes(value);
+        }
+
+        if (List.of("M", "MB").contains(unit)) {
+            return DataUnit.MEGABYTES.toBytes(value);
+        }
+
+        if (List.of("G", "GB").contains(unit)) {
+            return DataUnit.GIGABYTES.toBytes(value);
+        }
+
+        if (List.of("KI", "KIB").contains(unit)) {
+            return DataUnit.KIBIBYTES.toBytes(value);
+        }
+
+        if (List.of("MI", "MIB").contains(unit)) {
+            return DataUnit.MEBIBYTES.toBytes(value);
+        }
+
+        if (List.of("GI", "GIB").contains(unit)) {
+            return DataUnit.GIBIBYTES.toBytes(value);
+        }
+
+        return Long.MIN_VALUE;
+    }
+
+    /**
+     * @param fmtSize The string that contains the size to be parsed. The
+     *   expected format is:
+     *
+     *   <p>"^((\\s*[-+]?[0-9]+)\\s*(B|K|KB|M|MB|G|GB|Ki|KiB|Mi|MiB|Gi|GiB)\\s*)$"
+     *
+     *   <p>For example: 10Kb, 500GiB, 100mb. The unit is not case sensitive.
+     *
+     * @return the size in bytes. If {@code fmtSize} has invalid format, it
+     *   returns {@link Long#MIN_VALUE}.
+     * @hide
+     */
+    public static long parseSize(@Nullable String fmtSize) {
+        if (fmtSize == null || fmtSize.isBlank()) {
+            return Long.MIN_VALUE;
+        }
+
+        int sign = 1;
+        fmtSize = fmtSize.trim();
+        char first = fmtSize.charAt(0);
+        if (first == '-' ||  first == '+') {
+            if (first == '-') {
+                sign = -1;
+            }
+
+            fmtSize = fmtSize.replace(first + "", "");
+        }
+
+        int index = 0;
+        // Find the last index of the value in fmtSize.
+        while (index < fmtSize.length() && Character.isDigit(fmtSize.charAt(index))) {
+            index++;
+        }
+
+        // Check if number and units are present.
+        if (index == 0 || index == fmtSize.length()) {
+            return Long.MIN_VALUE;
+        }
+
+        long value = sign * Long.valueOf(fmtSize.substring(0, index));
+        String unit = fmtSize.substring(index).trim();
+
+        return toBytes(value, unit);
     }
 
     /**
@@ -1422,6 +1536,42 @@ public final class FileUtils {
         } else {
             throw new IllegalArgumentException("Bad mode: " + mode);
         }
+    }
+
+    /** {@hide} */
+    @VisibleForTesting
+    public static ParcelFileDescriptor convertToModernFd(FileDescriptor fd) {
+        Context context = AppGlobals.getInitialApplication();
+        if (UserHandle.getAppId(Process.myUid()) == getMediaProviderAppId(context)) {
+            // Never convert modern fd for MediaProvider, because this requires
+            // MediaStore#scanFile and can cause infinite loops when MediaProvider scans
+            return null;
+        }
+
+        try (ParcelFileDescriptor dupFd = ParcelFileDescriptor.dup(fd)) {
+            return MediaStore.getOriginalMediaFormatFileDescriptor(context, dupFd);
+        } catch (Exception e) {
+            // Ignore error
+            return null;
+        }
+    }
+
+    private static int getMediaProviderAppId(Context context) {
+        if (sMediaProviderAppId != -1) {
+            return sMediaProviderAppId;
+        }
+
+        PackageManager pm = context.getPackageManager();
+        ProviderInfo provider = context.getPackageManager().resolveContentProvider(
+                MediaStore.AUTHORITY, PackageManager.MATCH_DIRECT_BOOT_AWARE
+                | PackageManager.MATCH_DIRECT_BOOT_UNAWARE
+                | PackageManager.MATCH_SYSTEM_ONLY);
+        if (provider == null) {
+            return -1;
+        }
+
+        sMediaProviderAppId = UserHandle.getAppId(provider.applicationInfo.uid);
+        return sMediaProviderAppId;
     }
 
     /** {@hide} */

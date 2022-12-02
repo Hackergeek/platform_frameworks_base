@@ -32,6 +32,7 @@ import android.widget.RemoteViews;
 import com.android.internal.util.Preconditions;
 
 import java.util.ArrayList;
+import java.util.Objects;
 
 /**
  * Defines a custom description for the autofill save UI.
@@ -157,7 +158,7 @@ public final class CustomDescription implements Parcelable {
          * {@link android.os.Build.VERSION_CODES#P} or higher).
          */
         public Builder(@NonNull RemoteViews parentPresentation) {
-            mPresentation = Preconditions.checkNotNull(parentPresentation);
+            mPresentation = Objects.requireNonNull(parentPresentation);
         }
 
         /**
@@ -180,7 +181,7 @@ public final class CustomDescription implements Parcelable {
         public Builder addChild(int id, @NonNull Transformation transformation) {
             throwIfDestroyed();
             Preconditions.checkArgument((transformation instanceof InternalTransformation),
-                    "not provided by Android System: " + transformation);
+                    "not provided by Android System: %s", transformation);
             if (mTransformations == null) {
                 mTransformations = new ArrayList<>();
             }
@@ -275,8 +276,8 @@ public final class CustomDescription implements Parcelable {
         public Builder batchUpdate(@NonNull Validator condition, @NonNull BatchUpdates updates) {
             throwIfDestroyed();
             Preconditions.checkArgument((condition instanceof InternalValidator),
-                    "not provided by Android System: " + condition);
-            Preconditions.checkNotNull(updates);
+                    "not provided by Android System: %s", condition);
+            Objects.requireNonNull(updates);
             if (mUpdates == null) {
                 mUpdates = new ArrayList<>();
             }
@@ -329,7 +330,7 @@ public final class CustomDescription implements Parcelable {
         public Builder addOnClickAction(int id, @NonNull OnClickAction action) {
             throwIfDestroyed();
             Preconditions.checkArgument((action instanceof InternalOnClickAction),
-                    "not provided by Android System: " + action);
+                    "not provided by Android System: %s", action);
             if (mActions == null) {
                 mActions = new SparseArray<InternalOnClickAction>();
             }
@@ -436,7 +437,7 @@ public final class CustomDescription implements Parcelable {
             // Always go through the builder to ensure the data ingested by
             // the system obeys the contract of the builder to avoid attacks
             // using specially crafted parcels.
-            final RemoteViews parentPresentation = parcel.readParcelable(null);
+            final RemoteViews parentPresentation = parcel.readParcelable(null, android.widget.RemoteViews.class);
             if (parentPresentation == null) return null;
 
             final Builder builder = new Builder(parentPresentation);

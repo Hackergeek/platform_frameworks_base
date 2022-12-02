@@ -72,6 +72,17 @@ import java.lang.annotation.RetentionPolicy;
  * <p>Credentials provisioned to the direct access store should <strong>always</strong> use reader
  * authentication to protect data elements. The reason for this is user authentication or user
  * approval of data release is not possible when the device is off.
+ *
+ * <p>The Identity Credential API is designed to be able to evolve and change over time
+ * but still provide 100% backwards compatibility. This is complicated by the fact that
+ * there may be a version skew between the API used by the application and the version
+ * implemented in secure hardware. To solve this problem, the API provides for a way
+ * for the application to query which feature version the hardware implements (if any
+ * at all) using
+ * {@link android.content.pm#FEATURE_IDENTITY_CREDENTIAL_HARDWARE} and
+ * {@link android.content.pm#FEATURE_IDENTITY_CREDENTIAL_HARDWARE_DIRECT_ACCESS}.
+ * Methods which only work on certain feature versions are clearly documented as
+ * such.
  */
 public abstract class IdentityCredentialStore {
     IdentityCredentialStore() {}
@@ -193,13 +204,33 @@ public abstract class IdentityCredentialStore {
      * @param credentialName the name of the credential to delete.
      * @return {@code null} if the credential was not found, the COSE_Sign1 data structure above
      *     if the credential was found and deleted.
+     * @deprecated Use {@link IdentityCredential#delete(byte[])} instead.
      */
+    @Deprecated
     public abstract @Nullable byte[] deleteCredentialByName(@NonNull String credentialName);
+
+    /**
+     * Creates a new presentation session.
+     *
+     * <p>This method gets an object to be used for interaction with a remote verifier for
+     * presentation of one or more credentials.
+     *
+     * <p>This is only implemented in feature version 202201 or later. If not implemented, the call
+     * fails with {@link UnsupportedOperationException}. See
+     * {@link android.content.pm.PackageManager#FEATURE_IDENTITY_CREDENTIAL_HARDWARE} for known
+     * feature versions.
+     *
+     * @param cipherSuite    the cipher suite to use for communicating with the verifier.
+     * @return The presentation session.
+     */
+    public @NonNull PresentationSession createPresentationSession(@Ciphersuite int cipherSuite)
+            throws CipherSuiteNotSupportedException {
+        throw new UnsupportedOperationException();
+    }
 
     /** @hide */
     @IntDef(value = {CIPHERSUITE_ECDHE_HKDF_ECDSA_WITH_AES_256_GCM_SHA256})
     @Retention(RetentionPolicy.SOURCE)
     public @interface Ciphersuite {
     }
-
 }

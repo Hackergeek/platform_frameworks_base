@@ -18,12 +18,16 @@ package android.media;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.annotation.SystemApi;
 import android.os.Parcel;
 import android.os.Parcelable;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -65,11 +69,27 @@ public final class AudioDeviceAttributes implements Parcelable {
      * The unique address of the device. Some devices don't have addresses, only an empty string.
      */
     private final @NonNull String mAddress;
-
+    /**
+     * The non-unique name of the device. Some devices don't have names, only an empty string.
+     * Should not be used as a unique identifier for a device.
+     */
+    private final @NonNull String mName;
     /**
      * Is input or output device
      */
     private final @Role int mRole;
+    /**
+     * The internal audio device type
+     */
+    private final int mNativeType;
+    /**
+     * List of AudioProfiles supported by the device
+     */
+    private final @NonNull List<AudioProfile> mAudioProfiles;
+    /**
+     * List of AudioDescriptors supported by the device
+     */
+    private final @NonNull List<AudioDescriptor> mAudioDescriptors;
 
     /**
      * @hide
@@ -83,6 +103,10 @@ public final class AudioDeviceAttributes implements Parcelable {
         mRole = deviceInfo.isSink() ? ROLE_OUTPUT : ROLE_INPUT;
         mType = deviceInfo.getType();
         mAddress = deviceInfo.getAddress();
+        mName = String.valueOf(deviceInfo.getProductName());
+        mNativeType = deviceInfo.getInternalType();
+        mAudioProfiles = deviceInfo.getAudioProfiles();
+        mAudioDescriptors = deviceInfo.getAudioDescriptors();
     }
 
     /**
@@ -94,27 +118,72 @@ public final class AudioDeviceAttributes implements Parcelable {
      */
     @SystemApi
     public AudioDeviceAttributes(@Role int role, @AudioDeviceInfo.AudioDeviceType int type,
-                              @NonNull String address) {
+            @NonNull String address) {
+        this(role, type, address, "", new ArrayList<>(), new ArrayList<>());
+    }
+
+    /**
+     * @hide
+     * Constructor with specification of all attributes
+     * @param role indicates input or output role
+     * @param type the device type, as defined in {@link AudioDeviceInfo}
+     * @param address the address of the device, or an empty string for devices without one
+     * @param name the name of the device, or an empty string for devices without one
+     * @param profiles the list of AudioProfiles supported by the device
+     * @param descriptors the list of AudioDescriptors supported by the device
+     */
+    @SystemApi
+    public AudioDeviceAttributes(@Role int role, @AudioDeviceInfo.AudioDeviceType int type,
+            @NonNull String address, @NonNull String name, @NonNull List<AudioProfile> profiles,
+            @NonNull List<AudioDescriptor> descriptors) {
         Objects.requireNonNull(address);
         if (role != ROLE_OUTPUT && role != ROLE_INPUT) {
             throw new IllegalArgumentException("Invalid role " + role);
         }
         if (role == ROLE_OUTPUT) {
             AudioDeviceInfo.enforceValidAudioDeviceTypeOut(type);
-        }
-        if (role == ROLE_INPUT) {
+            mNativeType = AudioDeviceInfo.convertDeviceTypeToInternalDevice(type);
+        } else if (role == ROLE_INPUT) {
             AudioDeviceInfo.enforceValidAudioDeviceTypeIn(type);
+            mNativeType = AudioDeviceInfo.convertDeviceTypeToInternalInputDevice(type, address);
+        } else {
+            mNativeType = AudioSystem.DEVICE_NONE;
         }
 
         mRole = role;
         mType = type;
         mAddress = address;
+        mName = name;
+        mAudioProfiles = profiles;
+        mAudioDescriptors = descriptors;
     }
 
-    /*package*/ AudioDeviceAttributes(int nativeType, @NonNull String address) {
+    /**
+     * @hide
+     * Constructor called from AudioSystem JNI when creating an AudioDeviceAttributes from a native
+     * AudioDeviceTypeAddr instance.
+     * @param nativeType the internal device type, as defined in {@link AudioSystem}
+     * @param address the address of the device, or an empty string for devices without one
+     */
+    public AudioDeviceAttributes(int nativeType, @NonNull String address) {
+        this(nativeType, address, "");
+    }
+
+    /**
+     * @hide
+     * Constructor called from BtHelper to connect or disconnect a Bluetooth device.
+     * @param nativeType the internal device type, as defined in {@link AudioSystem}
+     * @param address the address of the device, or an empty string for devices without one
+     * @param name the name of the device, or an empty string for devices without one
+     */
+    public AudioDeviceAttributes(int nativeType, @NonNull String address, @NonNull String name) {
         mRole = (nativeType & AudioSystem.DEVICE_BIT_IN) != 0 ? ROLE_INPUT : ROLE_OUTPUT;
         mType = AudioDeviceInfo.convertInternalDeviceToDeviceType(nativeType);
         mAddress = address;
+        mName = name;
+        mNativeType = nativeType;
+        mAudioProfiles = new ArrayList<>();
+        mAudioDescriptors = new ArrayList<>();
     }
 
     /**
@@ -147,13 +216,71 @@ public final class AudioDeviceAttributes implements Parcelable {
         return mAddress;
     }
 
+    /**
+     * @hide
+     * Returns the name of the audio device, or an empty string for devices without one
+     * @return the device name
+     */
+    @SystemApi
+    public @NonNull String getName() {
+        return mName;
+    }
+
+    /**
+     * @hide
+     * Returns the internal device type of a device
+     * @return the internal device type
+     */
+    public int getInternalType() {
+        return mNativeType;
+    }
+
+    /**
+     * @hide
+     * Returns the list of AudioProfiles supported by the device
+     * @return the list of AudioProfiles
+     */
+    @SystemApi
+    public @NonNull List<AudioProfile> getAudioProfiles() {
+        return mAudioProfiles;
+    }
+
+    /**
+     * @hide
+     * Returns the list of AudioDescriptors supported by the device
+     * @return the list of AudioDescriptors
+     */
+    @SystemApi
+    public @NonNull List<AudioDescriptor> getAudioDescriptors() {
+        return mAudioDescriptors;
+    }
+
     @Override
     public int hashCode() {
-        return Objects.hash(mRole, mType, mAddress);
+        return Objects.hash(mRole, mType, mAddress, mName, mAudioProfiles, mAudioDescriptors);
     }
 
     @Override
     public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+
+        AudioDeviceAttributes that = (AudioDeviceAttributes) o;
+        return ((mRole == that.mRole)
+                && (mType == that.mType)
+                && mAddress.equals(that.mAddress)
+                && mName.equals(that.mName)
+                && mAudioProfiles.equals(that.mAudioProfiles)
+                && mAudioDescriptors.equals(that.mAudioDescriptors));
+    }
+
+    /**
+     * Returns true if the role, type and address are equal. Called to compare with an
+     * AudioDeviceAttributes that was created from a native AudioDeviceTypeAddr instance.
+     * @param o object to compare with
+     * @return whether role, type and address are equal
+     */
+    public boolean equalTypeAddress(@Nullable Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
 
@@ -172,11 +299,12 @@ public final class AudioDeviceAttributes implements Parcelable {
     public String toString() {
         return new String("AudioDeviceAttributes:"
                 + " role:" + roleToString(mRole)
-                + " type:" + (mRole == ROLE_OUTPUT ? AudioSystem.getOutputDeviceName(
-                        AudioDeviceInfo.convertDeviceTypeToInternalDevice(mType))
-                        : AudioSystem.getInputDeviceName(
-                                AudioDeviceInfo.convertDeviceTypeToInternalDevice(mType)))
-                + " addr:" + mAddress);
+                + " type:" + (mRole == ROLE_OUTPUT ? AudioSystem.getOutputDeviceName(mNativeType)
+                        : AudioSystem.getInputDeviceName(mNativeType))
+                + " addr:" + mAddress
+                + " name:" + mName
+                + " profiles:" + mAudioProfiles.toString()
+                + " descriptors:" + mAudioDescriptors.toString());
     }
 
     @Override
@@ -189,12 +317,26 @@ public final class AudioDeviceAttributes implements Parcelable {
         dest.writeInt(mRole);
         dest.writeInt(mType);
         dest.writeString(mAddress);
+        dest.writeString(mName);
+        dest.writeInt(mNativeType);
+        dest.writeParcelableArray(
+                mAudioProfiles.toArray(new AudioProfile[mAudioProfiles.size()]), flags);
+        dest.writeParcelableArray(
+                mAudioDescriptors.toArray(new AudioDescriptor[mAudioDescriptors.size()]), flags);
     }
 
     private AudioDeviceAttributes(@NonNull Parcel in) {
         mRole = in.readInt();
         mType = in.readInt();
         mAddress = in.readString();
+        mName = in.readString();
+        mNativeType = in.readInt();
+        AudioProfile[] audioProfilesArray =
+                in.readParcelableArray(AudioProfile.class.getClassLoader(), AudioProfile.class);
+        mAudioProfiles = new ArrayList<AudioProfile>(Arrays.asList(audioProfilesArray));
+        AudioDescriptor[] audioDescriptorsArray = in.readParcelableArray(
+                AudioDescriptor.class.getClassLoader(), AudioDescriptor.class);
+        mAudioDescriptors = new ArrayList<AudioDescriptor>(Arrays.asList(audioDescriptorsArray));
     }
 
     public static final @NonNull Parcelable.Creator<AudioDeviceAttributes> CREATOR =

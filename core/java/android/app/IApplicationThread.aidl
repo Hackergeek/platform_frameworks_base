@@ -16,6 +16,7 @@
 
 package android.app;
 
+import android.app.ContentProviderHolder;
 import android.app.IInstrumentationWatcher;
 import android.app.IUiAutomationConnection;
 import android.app.ProfilerInfo;
@@ -42,6 +43,10 @@ import android.os.IInterface;
 import android.os.ParcelFileDescriptor;
 import android.os.PersistableBundle;
 import android.os.RemoteCallback;
+import android.os.SharedMemory;
+import android.view.autofill.AutofillId;
+import android.view.translation.TranslationSpec;
+import android.view.translation.UiTranslationSpec;
 
 import com.android.internal.app.IVoiceInteractor;
 import com.android.internal.content.ReferrerIntent;
@@ -67,6 +72,7 @@ oneway interface IApplicationThread {
     @UnsupportedAppUsage
     void scheduleStopService(IBinder token);
     void bindApplication(in String packageName, in ApplicationInfo info,
+            in String sdkSandboxClientAppVolumeUuid, in String sdkSandboxClientAppPackage,
             in ProviderInfoList providerList, in ComponentName testName,
             in ProfilerInfo profilerInfo, in Bundle testArguments,
             IInstrumentationWatcher testWatcher, IUiAutomationConnection uiAutomationConnection,
@@ -74,7 +80,9 @@ oneway interface IApplicationThread {
             boolean restrictedBackupMode, boolean persistent, in Configuration config,
             in CompatibilityInfo compatInfo, in Map services,
             in Bundle coreSettings, in String buildSerial, in AutofillOptions autofillOptions,
-            in ContentCaptureOptions contentCaptureOptions, in long[] disabledCompatChanges);
+            in ContentCaptureOptions contentCaptureOptions, in long[] disabledCompatChanges,
+            in SharedMemory serializedSystemFontMap,
+            long startRequestedElapsedTime, long startRequestedUptime);
     void runIsolatedEntryPoint(in String entryPoint, in String[] entryPointArgs);
     void scheduleExit();
     void scheduleServiceArgs(IBinder token, in ParceledListSlice args);
@@ -95,17 +103,18 @@ oneway interface IApplicationThread {
     void profilerControl(boolean start, in ProfilerInfo profilerInfo, int profileType);
     void setSchedulingGroup(int group);
     void scheduleCreateBackupAgent(in ApplicationInfo app, in CompatibilityInfo compatInfo,
-            int backupMode, int userId);
+            int backupMode, int userId, int operationType);
     void scheduleDestroyBackupAgent(in ApplicationInfo app,
             in CompatibilityInfo compatInfo, int userId);
     void scheduleOnNewActivityOptions(IBinder token, in Bundle options);
     void scheduleSuicide();
     void dispatchPackageBroadcast(int cmd, in String[] packages);
-    void scheduleCrash(in String msg);
+    void scheduleCrash(in String msg, int typeId, in Bundle extras);
     void dumpHeap(boolean managed, boolean mallocInfo, boolean runGc, in String path,
             in ParcelFileDescriptor fd, in RemoteCallback finishCallback);
     void dumpActivity(in ParcelFileDescriptor fd, IBinder servicetoken, in String prefix,
             in String[] args);
+    void dumpResources(in ParcelFileDescriptor fd, in RemoteCallback finishCallback);
     void clearDnsCache();
     void updateHttpProxy();
     void setCoreSettings(in Bundle coreSettings);
@@ -147,4 +156,14 @@ oneway interface IApplicationThread {
     void performDirectAction(IBinder activityToken, String actionId,
             in Bundle arguments, in RemoteCallback cancellationCallback,
             in RemoteCallback resultCallback);
+    void notifyContentProviderPublishStatus(in ContentProviderHolder holder, String authorities,
+            int userId, boolean published);
+    void instrumentWithoutRestart(in ComponentName instrumentationName,
+            in Bundle instrumentationArgs,
+            IInstrumentationWatcher instrumentationWatcher,
+            IUiAutomationConnection instrumentationUiConnection,
+            in ApplicationInfo targetInfo);
+    void updateUiTranslationState(IBinder activityToken, int state, in TranslationSpec sourceSpec,
+            in TranslationSpec targetSpec, in List<AutofillId> viewIds,
+            in UiTranslationSpec uiTranslationSpec);
 }

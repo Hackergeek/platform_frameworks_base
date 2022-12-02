@@ -16,15 +16,17 @@ package com.android.systemui.utils.leaks;
 
 import android.os.Bundle;
 import android.testing.LeakCheck;
+import android.view.View;
 
 import com.android.systemui.statusbar.policy.BatteryController;
 import com.android.systemui.statusbar.policy.BatteryController.BatteryStateChangeCallback;
 
-import java.io.FileDescriptor;
 import java.io.PrintWriter;
 
 public class FakeBatteryController extends BaseLeakChecker<BatteryStateChangeCallback>
         implements BatteryController {
+    private boolean mWirelessCharging;
+
     public FakeBatteryController(LeakCheck test) {
         super(test, "battery");
     }
@@ -35,12 +37,17 @@ public class FakeBatteryController extends BaseLeakChecker<BatteryStateChangeCal
     }
 
     @Override
-    public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+    public void dump(PrintWriter pw, String[] args) {
 
     }
 
     @Override
     public void setPowerSaveMode(boolean powerSave) {
+
+    }
+
+    @Override
+    public void setPowerSaveMode(boolean powerSave, View view) {
 
     }
 
@@ -57,5 +64,14 @@ public class FakeBatteryController extends BaseLeakChecker<BatteryStateChangeCal
     @Override
     public boolean isAodPowerSave() {
         return false;
+    }
+
+    @Override
+    public boolean isWirelessCharging() {
+        return mWirelessCharging;
+    }
+
+    public void setWirelessCharging(boolean wirelessCharging) {
+        mWirelessCharging = wirelessCharging;
     }
 }

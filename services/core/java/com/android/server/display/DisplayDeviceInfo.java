@@ -22,7 +22,11 @@ import android.util.DisplayMetrics;
 import android.view.Display;
 import android.view.DisplayAddress;
 import android.view.DisplayCutout;
+import android.view.DisplayEventReceiver;
+import android.view.RoundedCorners;
 import android.view.Surface;
+
+import com.android.internal.display.BrightnessSynchronizer;
 
 import java.util.Arrays;
 import java.util.Objects;
@@ -35,7 +39,7 @@ final class DisplayDeviceInfo {
      * Flag: Indicates that this display device should be considered the default display
      * device of the system.
      */
-    public static final int FLAG_DEFAULT_DISPLAY = 1 << 0;
+    public static final int FLAG_ALLOWED_TO_BE_DEFAULT_DISPLAY = 1 << 0;
 
     /**
      * Flag: Indicates that the orientation of this display device is coupled to the
@@ -128,6 +132,30 @@ final class DisplayDeviceInfo {
      * @see #FLAG_SHOULD_SHOW_SYSTEM_DECORATIONS
      */
     public static final int FLAG_TRUSTED = 1 << 13;
+
+    /**
+     * Flag: Indicates that the display should not be a part of the default {@link DisplayGroup} and
+     * instead be part of a new {@link DisplayGroup}.
+     *
+     * @hide
+     */
+    public static final int FLAG_OWN_DISPLAY_GROUP = 1 << 14;
+
+    /**
+     * Flag: Indicates that the display should always be unlocked. Only valid on virtual displays
+     * that aren't in the default display group.
+     * @see #FLAG_OWN_DISPLAY_GROUP
+     * @hide
+     */
+    public static final int FLAG_ALWAYS_UNLOCKED = 1 << 15;
+
+    /**
+     * Flag: Indicates that the display should not play sound effects or perform haptic feedback
+     * when the user touches the screen.
+     *
+     * @hide
+     */
+    public static final int FLAG_TOUCH_FEEDBACK_DISABLED = 1 << 16;
 
     /**
      * Touch attachment: Display does not receive touch.
@@ -270,6 +298,11 @@ final class DisplayDeviceInfo {
     public DisplayCutout displayCutout;
 
     /**
+     * The {@link RoundedCorners} if present or {@code null} otherwise.
+     */
+    public RoundedCorners roundedCorners;
+
+    /**
      * The touch attachment, per {@link DisplayViewport#touch}.
      */
     public int touch;
@@ -325,6 +358,19 @@ final class DisplayDeviceInfo {
      */
     public String ownerPackageName;
 
+    public DisplayEventReceiver.FrameRateOverride[] frameRateOverrides =
+            new DisplayEventReceiver.FrameRateOverride[0];
+
+    public float brightnessMinimum;
+    public float brightnessMaximum;
+    public float brightnessDefault;
+
+    /**
+     * Install orientation of display panel relative to its natural orientation.
+     */
+    @Surface.Rotation
+    public int installOrientation = Surface.ROTATION_0;
+
     public void setAssumedDensityForExternalDisplay(int width, int height) {
         densityDpi = Math.min(width, height) * DisplayMetrics.DENSITY_XHIGH / 1080;
         // Technically, these values should be smaller than the apparent density
@@ -378,7 +424,14 @@ final class DisplayDeviceInfo {
                 || !Objects.equals(address, other.address)
                 || !Objects.equals(deviceProductInfo, other.deviceProductInfo)
                 || ownerUid != other.ownerUid
-                || !Objects.equals(ownerPackageName, other.ownerPackageName)) {
+                || !Objects.equals(ownerPackageName, other.ownerPackageName)
+                || !Arrays.equals(frameRateOverrides, other.frameRateOverrides)
+                || !BrightnessSynchronizer.floatEquals(brightnessMinimum, other.brightnessMinimum)
+                || !BrightnessSynchronizer.floatEquals(brightnessMaximum, other.brightnessMaximum)
+                || !BrightnessSynchronizer.floatEquals(brightnessDefault,
+                other.brightnessDefault)
+                || !Objects.equals(roundedCorners, other.roundedCorners)
+                || installOrientation != other.installOrientation) {
             diff |= DIFF_OTHER;
         }
         return diff;
@@ -417,6 +470,12 @@ final class DisplayDeviceInfo {
         state = other.state;
         ownerUid = other.ownerUid;
         ownerPackageName = other.ownerPackageName;
+        frameRateOverrides = other.frameRateOverrides;
+        brightnessMinimum = other.brightnessMinimum;
+        brightnessMaximum = other.brightnessMaximum;
+        brightnessDefault = other.brightnessDefault;
+        roundedCorners = other.roundedCorners;
+        installOrientation = other.installOrientation;
     }
 
     // For debugging purposes
@@ -431,7 +490,7 @@ final class DisplayDeviceInfo {
         sb.append(", supportedModes ").append(Arrays.toString(supportedModes));
         sb.append(", colorMode ").append(colorMode);
         sb.append(", supportedColorModes ").append(Arrays.toString(supportedColorModes));
-        sb.append(", HdrCapabilities ").append(hdrCapabilities);
+        sb.append(", hdrCapabilities ").append(hdrCapabilities);
         sb.append(", allmSupported ").append(allmSupported);
         sb.append(", gameContentTypeSupported ").append(gameContentTypeSupported);
         sb.append(", density ").append(densityDpi);
@@ -453,7 +512,18 @@ final class DisplayDeviceInfo {
             sb.append(", owner ").append(ownerPackageName);
             sb.append(" (uid ").append(ownerUid).append(")");
         }
+        sb.append(", frameRateOverride ");
+        for (DisplayEventReceiver.FrameRateOverride frameRateOverride : frameRateOverrides) {
+            sb.append(frameRateOverride).append(" ");
+        }
+        sb.append(", brightnessMinimum ").append(brightnessMinimum);
+        sb.append(", brightnessMaximum ").append(brightnessMaximum);
+        sb.append(", brightnessDefault ").append(brightnessDefault);
+        if (roundedCorners != null) {
+            sb.append(", roundedCorners ").append(roundedCorners);
+        }
         sb.append(flagsToString(flags));
+        sb.append(", installOrientation ").append(installOrientation);
         sb.append("}");
         return sb.toString();
     }
@@ -475,8 +545,8 @@ final class DisplayDeviceInfo {
 
     private static String flagsToString(int flags) {
         StringBuilder msg = new StringBuilder();
-        if ((flags & FLAG_DEFAULT_DISPLAY) != 0) {
-            msg.append(", FLAG_DEFAULT_DISPLAY");
+        if ((flags & FLAG_ALLOWED_TO_BE_DEFAULT_DISPLAY) != 0) {
+            msg.append(", FLAG_ALLOWED_TO_BE_DEFAULT_DISPLAY");
         }
         if ((flags & FLAG_ROTATES_WITH_CONTENT) != 0) {
             msg.append(", FLAG_ROTATES_WITH_CONTENT");

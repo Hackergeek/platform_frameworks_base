@@ -18,10 +18,12 @@ package com.android.server.hdmi;
 import static com.android.server.hdmi.Constants.ADDR_AUDIO_SYSTEM;
 import static com.android.server.hdmi.Constants.ADDR_PLAYBACK_1;
 import static com.android.server.hdmi.Constants.ADDR_TV;
+import static com.android.server.hdmi.HdmiUtils.buildMessage;
 
 import static com.google.common.truth.Truth.assertThat;
 
 import android.hardware.hdmi.HdmiDeviceInfo;
+import android.platform.test.annotations.Presubmit;
 
 import androidx.test.filters.SmallTest;
 
@@ -30,6 +32,7 @@ import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
 @SmallTest
+@Presubmit
 @RunWith(JUnit4.class)
 /** Tests for {@link HdmiCecMessageBuilder}.. */
 public class HdmiCecMessageBuilderTest {
@@ -60,20 +63,36 @@ public class HdmiCecMessageBuilderTest {
         assertThat(message).isEqualTo(buildMessage("5F:81:21:00"));
     }
 
-    /**
-     * Build a CEC message from a hex byte string with bytes separated by {@code :}.
-     *
-     * <p>This format is used by both cec-client and www.cec-o-matic.com
-     */
-    private static HdmiCecMessage buildMessage(String message) {
-        String[] parts = message.split(":");
-        int src = Integer.parseInt(parts[0].substring(0, 1), 16);
-        int dest = Integer.parseInt(parts[0].substring(1, 2), 16);
-        int opcode = Integer.parseInt(parts[1], 16);
-        byte[] params = new byte[parts.length - 2];
-        for (int i = 0; i < params.length; i++) {
-            params[i] = Byte.parseByte(parts[i + 2], 16);
-        }
-        return new HdmiCecMessage(src, dest, opcode, params);
+    @Test
+    public void buildSetOsdName_short() {
+        String deviceName = "abc";
+        HdmiCecMessage message = HdmiCecMessageBuilder.buildSetOsdNameCommand(ADDR_PLAYBACK_1,
+                ADDR_TV, deviceName);
+        assertThat(message).isEqualTo(buildMessage("40:47:61:62:63"));
+    }
+
+    @Test
+    public void buildSetOsdName_maximumLength() {
+        String deviceName = "abcdefghijklmn";
+        HdmiCecMessage message = HdmiCecMessageBuilder.buildSetOsdNameCommand(ADDR_PLAYBACK_1,
+                ADDR_TV, deviceName);
+        assertThat(message).isEqualTo(
+                buildMessage("40:47:61:62:63:64:65:66:67:68:69:6A:6B:6C:6D:6E"));
+    }
+
+    @Test
+    public void buildSetOsdName_tooLong() {
+        String deviceName = "abcdefghijklmnop";
+        HdmiCecMessage message = HdmiCecMessageBuilder.buildSetOsdNameCommand(ADDR_PLAYBACK_1,
+                ADDR_TV, deviceName);
+        assertThat(message).isEqualTo(
+                buildMessage("40:47:61:62:63:64:65:66:67:68:69:6A:6B:6C:6D:6E"));
+    }
+
+    @Test
+    public void buildGiveFeatures() {
+        HdmiCecMessage message = HdmiCecMessageBuilder.buildGiveFeatures(ADDR_PLAYBACK_1, ADDR_TV);
+
+        assertThat(message).isEqualTo(buildMessage("40:A5"));
     }
 }

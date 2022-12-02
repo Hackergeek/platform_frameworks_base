@@ -72,6 +72,7 @@ import com.android.internal.util.Preconditions;
 import com.android.internal.util.dump.DualDumpOutputStream;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
+import com.android.server.SystemService.TargetUser;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -101,13 +102,13 @@ public final class PrintManagerService extends SystemService {
     }
 
     @Override
-    public void onUnlockUser(int userHandle) {
-        mPrintManagerImpl.handleUserUnlocked(userHandle);
+    public void onUserUnlocking(@NonNull TargetUser user) {
+        mPrintManagerImpl.handleUserUnlocked(user.getUserIdentifier());
     }
 
     @Override
-    public void onStopUser(int userHandle) {
-        mPrintManagerImpl.handleUserStopped(userHandle);
+    public void onUserStopping(@NonNull TargetUser user) {
+        mPrintManagerImpl.handleUserStopped(user.getUserIdentifier());
     }
 
     class PrintManagerImpl extends IPrintManager.Stub {
@@ -366,6 +367,33 @@ public final class PrintManagerService extends SystemService {
             } finally {
                 Binder.restoreCallingIdentity(identity);
             }
+        }
+
+        @Override
+        public boolean isPrintServiceEnabled(ComponentName service, int userId) {
+            final String[] packages = mContext.getPackageManager().getPackagesForUid(
+                    Binder.getCallingUid());
+            boolean matchCalling = false;
+            for (int i = 0; i < packages.length; i++) {
+                if (packages[i].equals(service.getPackageName())) {
+                    matchCalling = true;
+                    break;
+                }
+            }
+            if (!matchCalling) {
+                // Do not reveal any information about other package services.
+                throw new SecurityException("PrintService does not share UID with caller.");
+            }
+            final int resolvedUserId = resolveCallingUserEnforcingPermissions(userId);
+            final UserState userState;
+            synchronized (mLock) {
+                // Only the current group members can check print services.
+                if (resolveCallingProfileParentLocked(resolvedUserId) != getCurrentUserId()) {
+                    return false;
+                }
+                userState = getOrCreateUserStateLocked(resolvedUserId, false);
+            }
+            return userState.isPrintServiceEnabled(service);
         }
 
         @Override

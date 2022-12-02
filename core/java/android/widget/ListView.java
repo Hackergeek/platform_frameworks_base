@@ -73,7 +73,7 @@ import java.util.function.Predicate;
 /**
  * <p>Displays a vertically-scrollable collection of views, where each view is positioned
  * immediatelybelow the previous view in the list.  For a more modern, flexible, and performant
- * approach to displaying lists, use {@link android.support.v7.widget.RecyclerView}.</p>
+ * approach to displaying lists, use {@link androidx.recyclerview.widget.RecyclerView}.</p>
  *
  * <p>To display a list, you can include a list view in your layout XML file:</p>
  *
@@ -116,9 +116,7 @@ import java.util.function.Predicate;
  * <p class="note">ListView attempts to reuse view objects in order to improve performance and
  * avoid a lag in response to user scrolls.  To take advantage of this feature, check if the
  * {@code convertView} provided to {@code getView(...)} is null before creating or inflating a new
- * view object.  See
- * <a href="{@docRoot}training/improving-layouts/smooth-scrolling.html">
- * Making ListView Scrolling Smooth</a> for more ways to ensure a smooth user experience.</p>
+ * view object.</p>
  *
  * <p>To specify an action when a user clicks or taps on a single list item, see
  * <a href="{@docRoot}guide/topics/ui/declaring-layout.html#HandlingUserSelections">
@@ -1979,7 +1977,7 @@ public class ListView extends AbsListView {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     boolean trackMotionScroll(int deltaY, int incrementalDeltaY) {
         final boolean result = super.trackMotionScroll(deltaY, incrementalDeltaY);
         removeUnusedFixedViews(mHeaderViewInfos);
@@ -4028,7 +4026,7 @@ public class ListView extends AbsListView {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     int getHeightForPosition(int position) {
         final int height = super.getHeightForPosition(position);
         if (shouldAdjustHeightForDivider(position)) {

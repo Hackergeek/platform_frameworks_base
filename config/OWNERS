@@ -1,5 +1,8 @@
-# compat-team@ for changes to hiddenapi files
-per-file hiddenapi-* = andreionea@google.com, mathewi@google.com, satayev@google.com
+include /ZYGOTE_OWNERS
 
-# Escalations:
-per-file hiddenapi-* = bdc@google.com, narayan@google.com
+# art-team@ manages the boot image profiles
+per-file boot-* = ngeoffray@google.com, vmarko@google.com
+per-file dirty-image-objects = ngeoffray@google.com, vmarko@google.com
+per-file generate-preloaded-classes.sh = ngeoffray@google.com, vmarko@google.com
+per-file preloaded-classes* = ngeoffray@google.com, vmarko@google.com
+

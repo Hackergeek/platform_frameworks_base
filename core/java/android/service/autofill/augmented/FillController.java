@@ -19,7 +19,6 @@ import static android.service.autofill.augmented.AugmentedAutofillService.sDebug
 
 import android.annotation.NonNull;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.os.RemoteException;
 import android.service.autofill.augmented.AugmentedAutofillService.AutofillProxy;
 import android.util.Log;
@@ -27,9 +26,8 @@ import android.util.Pair;
 import android.view.autofill.AutofillId;
 import android.view.autofill.AutofillValue;
 
-import com.android.internal.util.Preconditions;
-
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Object used to interact with the autofill system.
@@ -37,7 +35,6 @@ import java.util.List;
  * @hide
  */
 @SystemApi
-@TestApi
 public final class FillController {
     private static final String TAG = FillController.class.getSimpleName();
 
@@ -54,7 +51,7 @@ public final class FillController {
      * automatically {@link FillWindow#destroy() destroyed}.
      */
     public void autofill(@NonNull List<Pair<AutofillId, AutofillValue>> values) {
-        Preconditions.checkNotNull(values);
+        Objects.requireNonNull(values);
 
         if (sDebug) {
             Log.d(TAG, "autofill() with " + values.size() + " values");

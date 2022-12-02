@@ -37,6 +37,7 @@ import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.LinkedList;
 import java.util.Map;
@@ -57,14 +58,17 @@ class CredstoreIdentityCredential extends IdentityCredential {
     private @IdentityCredentialStore.Ciphersuite int mCipherSuite;
     private Context mContext;
     private ICredential mBinder;
+    private CredstorePresentationSession mSession;
 
     CredstoreIdentityCredential(Context context, String credentialName,
             @IdentityCredentialStore.Ciphersuite int cipherSuite,
-            ICredential binder) {
+            ICredential binder,
+            @Nullable CredstorePresentationSession session) {
         mContext = context;
         mCredentialName = credentialName;
         mCipherSuite = cipherSuite;
         mBinder = binder;
+        mSession = session;
     }
 
     private KeyPair mEphemeralKeyPair = null;
@@ -237,10 +241,22 @@ class CredstoreIdentityCredential extends IdentityCredential {
     }
 
     private boolean mAllowUsingExhaustedKeys = true;
+    private boolean mAllowUsingExpiredKeys = false;
+    private boolean mIncrementKeyUsageCount = true;
 
     @Override
     public void setAllowUsingExhaustedKeys(boolean allowUsingExhaustedKeys) {
         mAllowUsingExhaustedKeys = allowUsingExhaustedKeys;
+    }
+
+    @Override
+    public void setAllowUsingExpiredKeys(boolean allowUsingExpiredKeys) {
+        mAllowUsingExpiredKeys = allowUsingExpiredKeys;
+    }
+
+    @Override
+    public void setIncrementKeyUsageCount(boolean incrementKeyUsageCount) {
+        mIncrementKeyUsageCount = incrementKeyUsageCount;
     }
 
     private boolean mOperationHandleSet = false;
@@ -256,7 +272,9 @@ class CredstoreIdentityCredential extends IdentityCredential {
     public long getCredstoreOperationHandle() {
         if (!mOperationHandleSet) {
             try {
-                mOperationHandle = mBinder.selectAuthKey(mAllowUsingExhaustedKeys);
+                mOperationHandle = mBinder.selectAuthKey(mAllowUsingExhaustedKeys,
+                                                         mAllowUsingExpiredKeys,
+                                                         mIncrementKeyUsageCount);
                 mOperationHandleSet = true;
             } catch (android.os.RemoteException e) {
                 throw new RuntimeException("Unexpected RemoteException ", e);
@@ -306,7 +324,9 @@ class CredstoreIdentityCredential extends IdentityCredential {
                 rnsParcels,
                 sessionTranscript != null ? sessionTranscript : new byte[0],
                 readerSignature != null ? readerSignature : new byte[0],
-                mAllowUsingExhaustedKeys);
+                mAllowUsingExhaustedKeys,
+                mAllowUsingExpiredKeys,
+                mIncrementKeyUsageCount);
         } catch (android.os.RemoteException e) {
             throw new RuntimeException("Unexpected RemoteException ", e);
         } catch (android.os.ServiceSpecificException e) {
@@ -410,10 +430,83 @@ class CredstoreIdentityCredential extends IdentityCredential {
     }
 
     @Override
+    public void storeStaticAuthenticationData(X509Certificate authenticationKey,
+            Instant expirationDate,
+            byte[] staticAuthData)
+            throws UnknownAuthenticationKeyException {
+        try {
+            AuthKeyParcel authKeyParcel = new AuthKeyParcel();
+            authKeyParcel.x509cert = authenticationKey.getEncoded();
+            long millisSinceEpoch = (expirationDate.getEpochSecond() * 1000)
+                                    + (expirationDate.getNano() / 1000000);
+            mBinder.storeStaticAuthenticationDataWithExpiration(authKeyParcel,
+                    millisSinceEpoch, staticAuthData);
+        } catch (CertificateEncodingException e) {
+            throw new RuntimeException("Error encoding authenticationKey", e);
+        } catch (android.os.RemoteException e) {
+            throw new RuntimeException("Unexpected RemoteException ", e);
+        } catch (android.os.ServiceSpecificException e) {
+            if (e.errorCode == ICredentialStore.ERROR_NOT_SUPPORTED) {
+                throw new UnsupportedOperationException("Not supported", e);
+            } else if (e.errorCode == ICredentialStore.ERROR_AUTHENTICATION_KEY_NOT_FOUND) {
+                throw new UnknownAuthenticationKeyException(e.getMessage(), e);
+            } else {
+                throw new RuntimeException("Unexpected ServiceSpecificException with code "
+                        + e.errorCode, e);
+            }
+        }
+    }
+
+    @Override
     public @NonNull int[] getAuthenticationDataUsageCount() {
         try {
             int[] usageCount = mBinder.getAuthenticationDataUsageCount();
             return usageCount;
+        } catch (android.os.RemoteException e) {
+            throw new RuntimeException("Unexpected RemoteException ", e);
+        } catch (android.os.ServiceSpecificException e) {
+            throw new RuntimeException("Unexpected ServiceSpecificException with code "
+                    + e.errorCode, e);
+        }
+    }
+
+    @Override
+    public @NonNull byte[] proveOwnership(@NonNull byte[] challenge) {
+        try {
+            byte[] proofOfOwnership = mBinder.proveOwnership(challenge);
+            return proofOfOwnership;
+        } catch (android.os.RemoteException e) {
+            throw new RuntimeException("Unexpected RemoteException ", e);
+        } catch (android.os.ServiceSpecificException e) {
+            if (e.errorCode == ICredentialStore.ERROR_NOT_SUPPORTED) {
+                throw new UnsupportedOperationException("Not supported", e);
+            } else {
+                throw new RuntimeException("Unexpected ServiceSpecificException with code "
+                        + e.errorCode, e);
+            }
+        }
+    }
+
+    @Override
+    public @NonNull byte[] delete(@NonNull byte[] challenge) {
+        try {
+            byte[] proofOfDeletion = mBinder.deleteWithChallenge(challenge);
+            return proofOfDeletion;
+        } catch (android.os.RemoteException e) {
+            throw new RuntimeException("Unexpected RemoteException ", e);
+        } catch (android.os.ServiceSpecificException e) {
+            throw new RuntimeException("Unexpected ServiceSpecificException with code "
+                    + e.errorCode, e);
+        }
+    }
+
+    @Override
+    public @NonNull byte[] update(@NonNull PersonalizationData personalizationData) {
+        try {
+            IWritableCredential binder = mBinder.update();
+            byte[] proofOfProvision =
+                    CredstoreWritableIdentityCredential.personalize(binder, personalizationData);
+            return proofOfProvision;
         } catch (android.os.RemoteException e) {
             throw new RuntimeException("Unexpected RemoteException ", e);
         } catch (android.os.ServiceSpecificException e) {

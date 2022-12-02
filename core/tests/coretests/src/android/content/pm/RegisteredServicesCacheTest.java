@@ -21,15 +21,16 @@ import android.os.FileUtils;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.UserHandle;
+import android.platform.test.annotations.Presubmit;
 import android.test.AndroidTestCase;
 import android.util.AttributeSet;
 import android.util.SparseArray;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 
 import androidx.test.filters.LargeTest;
 
-import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
@@ -45,6 +46,7 @@ import java.util.Set;
 /**
  * Tests for {@link android.content.pm.RegisteredServicesCache}
  */
+@Presubmit
 @LargeTest
 public class RegisteredServicesCacheTest extends AndroidTestCase {
     private static final int U0 = 0;
@@ -308,12 +310,12 @@ public class RegisteredServicesCacheTest extends AndroidTestCase {
 
     static class TestSerializer implements XmlSerializerAndParser<TestServiceType> {
 
-        public void writeAsXml(TestServiceType item, XmlSerializer out) throws IOException {
+        public void writeAsXml(TestServiceType item, TypedXmlSerializer out) throws IOException {
             out.attribute(null, "type", item.type);
             out.attribute(null, "value", item.value);
         }
 
-        public TestServiceType createFromXml(XmlPullParser parser)
+        public TestServiceType createFromXml(TypedXmlPullParser parser)
                 throws IOException, XmlPullParserException {
             final String type = parser.getAttributeValue(null, "type");
             final String value = parser.getAttributeValue(null, "value");

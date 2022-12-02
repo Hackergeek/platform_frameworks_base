@@ -189,7 +189,7 @@ public class Handler {
      *
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public Handler(boolean async) {
         this(null, async);
     }
@@ -297,7 +297,7 @@ public class Handler {
     }
 
     /** @hide */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     @NonNull
     public static Handler getMain() {
         if (MAIN_THREAD_HANDLER == null) {
@@ -799,6 +799,10 @@ public class Handler {
      * Remove any pending posts of messages with code 'what' and whose obj is
      * 'object' that are in the message queue.  If <var>object</var> is null,
      * all messages will be removed.
+     * <p>
+     * Similar to {@link #removeMessages(int, Object)} but uses object equality
+     * ({@link Object#equals(Object)}) instead of reference equality (==) in
+     * determining whether object is the message's obj'.
      *
      *@hide
      */

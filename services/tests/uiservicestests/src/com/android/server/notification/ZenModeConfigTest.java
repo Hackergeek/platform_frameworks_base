@@ -16,8 +16,11 @@
 
 package com.android.server.notification;
 
+import static android.service.notification.ZenPolicy.CONVERSATION_SENDERS_IMPORTANT;
+
 import static junit.framework.TestCase.assertEquals;
 import static junit.framework.TestCase.assertFalse;
+import static junit.framework.TestCase.assertNotNull;
 import static junit.framework.TestCase.assertNull;
 import static junit.framework.TestCase.assertTrue;
 
@@ -30,17 +33,16 @@ import android.service.notification.ZenModeConfig;
 import android.service.notification.ZenModeConfig.EventInfo;
 import android.service.notification.ZenPolicy;
 import android.test.suitebuilder.annotation.SmallTest;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 import android.util.Xml;
 
 import androidx.test.runner.AndroidJUnit4;
 
-import com.android.internal.util.FastXmlSerializer;
 import com.android.server.UiServiceTestCase;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.xmlpull.v1.XmlPullParser;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -79,10 +81,12 @@ public class ZenModeConfigTest extends UiServiceTestCase {
         ZenModeConfig config = getMutedAllConfig();
         config.suppressedVisualEffects |= Policy.SUPPRESSED_EFFECT_BADGE;
 
+        // Explicitly allow conversations from priority senders to make sure that goes through
         ZenPolicy zenPolicy = new ZenPolicy.Builder()
                 .allowAlarms(true)
                 .allowReminders(true)
                 .allowEvents(true)
+                .allowConversations(CONVERSATION_SENDERS_IMPORTANT)
                 .showLights(false)
                 .showInAmbientDisplay(false)
                 .build();
@@ -91,11 +95,12 @@ public class ZenModeConfigTest extends UiServiceTestCase {
         int priorityCategories = originalPolicy.priorityCategories;
         int priorityCallSenders = originalPolicy.priorityCallSenders;
         int priorityMessageSenders = originalPolicy.priorityMessageSenders;
-        int priorityConversationsSenders = originalPolicy.priorityConversationSenders;
+        int priorityConversationsSenders = CONVERSATION_SENDERS_IMPORTANT;
         int suppressedVisualEffects = originalPolicy.suppressedVisualEffects;
         priorityCategories |= Policy.PRIORITY_CATEGORY_ALARMS;
         priorityCategories |= Policy.PRIORITY_CATEGORY_REMINDERS;
         priorityCategories |= Policy.PRIORITY_CATEGORY_EVENTS;
+        priorityCategories |= Policy.PRIORITY_CATEGORY_CONVERSATIONS;
         suppressedVisualEffects |= Policy.SUPPRESSED_EFFECT_LIGHTS;
         suppressedVisualEffects |= Policy.SUPPRESSED_EFFECT_AMBIENT;
 
@@ -188,7 +193,7 @@ public class ZenModeConfigTest extends UiServiceTestCase {
 
         ZenModeConfig.ZenRule rule = new ZenModeConfig.ZenRule();
         rule.configurationActivity = new ComponentName("a", "a");
-        rule.component = new ComponentName("a", "b");
+        rule.component = new ComponentName("b", "b");
         rule.conditionId = new Uri.Builder().scheme("hello").build();
         rule.condition = new Condition(rule.conditionId, "", Condition.STATE_TRUE);
         rule.enabled = true;
@@ -198,8 +203,9 @@ public class ZenModeConfigTest extends UiServiceTestCase {
         rule.modified = true;
         rule.name = "name";
         rule.snoozing = true;
+        rule.pkg = "b";
 
-        XmlSerializer out = new FastXmlSerializer();
+        TypedXmlSerializer out = Xml.newFastSerializer();
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         out.setOutput(new BufferedOutputStream(baos), "utf-8");
         out.startDocument(null, true);
@@ -208,13 +214,12 @@ public class ZenModeConfigTest extends UiServiceTestCase {
         out.endTag(null, tag);
         out.endDocument();
 
-        XmlPullParser parser = Xml.newPullParser();
+        TypedXmlPullParser parser = Xml.newFastPullParser();
         parser.setInput(new BufferedInputStream(
                 new ByteArrayInputStream(baos.toByteArray())), null);
         parser.nextTag();
         ZenModeConfig.ZenRule fromXml = ZenModeConfig.readRuleXml(parser);
-        // read from backing component
-        assertEquals("a", fromXml.pkg);
+        assertEquals("b", fromXml.pkg);
         // always resets on reboot
         assertFalse(fromXml.snoozing);
         //should all match original
@@ -228,6 +233,169 @@ public class ZenModeConfigTest extends UiServiceTestCase {
         assertEquals(rule.conditionId, fromXml.conditionId);
         assertEquals(rule.name, fromXml.name);
         assertEquals(rule.zenMode, fromXml.zenMode);
+    }
+
+    @Test
+    public void testRuleXml_pkg_component() throws Exception {
+        String tag = "tag";
+
+        ZenModeConfig.ZenRule rule = new ZenModeConfig.ZenRule();
+        rule.configurationActivity = new ComponentName("a", "a");
+        rule.component = new ComponentName("b", "b");
+
+        TypedXmlSerializer out = Xml.newFastSerializer();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        out.setOutput(new BufferedOutputStream(baos), "utf-8");
+        out.startDocument(null, true);
+        out.startTag(null, tag);
+        ZenModeConfig.writeRuleXml(rule, out);
+        out.endTag(null, tag);
+        out.endDocument();
+
+        TypedXmlPullParser parser = Xml.newFastPullParser();
+        parser.setInput(new BufferedInputStream(
+                new ByteArrayInputStream(baos.toByteArray())), null);
+        parser.nextTag();
+        ZenModeConfig.ZenRule fromXml = ZenModeConfig.readRuleXml(parser);
+        assertEquals("b", fromXml.pkg);
+    }
+
+    @Test
+    public void testRuleXml_pkg_configActivity() throws Exception {
+        String tag = "tag";
+
+        ZenModeConfig.ZenRule rule = new ZenModeConfig.ZenRule();
+        rule.configurationActivity = new ComponentName("a", "a");
+
+        TypedXmlSerializer out = Xml.newFastSerializer();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        out.setOutput(new BufferedOutputStream(baos), "utf-8");
+        out.startDocument(null, true);
+        out.startTag(null, tag);
+        ZenModeConfig.writeRuleXml(rule, out);
+        out.endTag(null, tag);
+        out.endDocument();
+
+        TypedXmlPullParser parser = Xml.newFastPullParser();
+        parser.setInput(new BufferedInputStream(
+                new ByteArrayInputStream(baos.toByteArray())), null);
+        parser.nextTag();
+        ZenModeConfig.ZenRule fromXml = ZenModeConfig.readRuleXml(parser);
+        assertNull(fromXml.pkg);
+    }
+
+    @Test
+    public void testRuleXml_getPkg_nullPkg() throws Exception {
+        String tag = "tag";
+
+        ZenModeConfig.ZenRule rule = new ZenModeConfig.ZenRule();
+        rule.enabled = true;
+        rule.configurationActivity = new ComponentName("a", "a");
+
+        TypedXmlSerializer out = Xml.newFastSerializer();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        out.setOutput(new BufferedOutputStream(baos), "utf-8");
+        out.startDocument(null, true);
+        out.startTag(null, tag);
+        ZenModeConfig.writeRuleXml(rule, out);
+        out.endTag(null, tag);
+        out.endDocument();
+
+        TypedXmlPullParser parser = Xml.newFastPullParser();
+        parser.setInput(new BufferedInputStream(
+                new ByteArrayInputStream(baos.toByteArray())), null);
+        parser.nextTag();
+        ZenModeConfig.ZenRule fromXml = ZenModeConfig.readRuleXml(parser);
+        assertEquals("a", fromXml.getPkg());
+
+        fromXml.condition = new Condition(Uri.EMPTY, "", Condition.STATE_TRUE);
+        assertTrue(fromXml.isAutomaticActive());
+    }
+
+    @Test
+    public void testZenPolicyXml_allUnset() throws Exception {
+        String tag = "tag";
+
+        ZenPolicy policy = new ZenPolicy.Builder().build();
+
+        TypedXmlSerializer out = Xml.newFastSerializer();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        out.setOutput(new BufferedOutputStream(baos), "utf-8");
+        out.startDocument(null, true);
+        out.startTag(null, tag);
+        ZenModeConfig.writeZenPolicyXml(policy, out);
+        out.endTag(null, tag);
+        out.endDocument();
+
+        TypedXmlPullParser parser = Xml.newFastPullParser();
+        parser.setInput(new BufferedInputStream(
+                new ByteArrayInputStream(baos.toByteArray())), null);
+        parser.nextTag();
+        ZenPolicy fromXml = ZenModeConfig.readZenPolicyXml(parser);
+
+        // nothing was set, so we should have nothing from the parser
+        assertNull(fromXml);
+    }
+
+    @Test
+    public void testZenPolicyXml() throws Exception {
+        String tag = "tag";
+
+        ZenPolicy policy = new ZenPolicy.Builder()
+                .allowCalls(ZenPolicy.PEOPLE_TYPE_CONTACTS)
+                .allowMessages(ZenPolicy.PEOPLE_TYPE_NONE)
+                .allowConversations(ZenPolicy.CONVERSATION_SENDERS_IMPORTANT)
+                .allowRepeatCallers(true)
+                .allowAlarms(true)
+                .allowMedia(false)
+                .allowSystem(true)
+                .allowReminders(false)
+                .allowEvents(true)
+                .hideAllVisualEffects()
+                .showVisualEffect(ZenPolicy.VISUAL_EFFECT_AMBIENT, true)
+                .build();
+
+        TypedXmlSerializer out = Xml.newFastSerializer();
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        out.setOutput(new BufferedOutputStream(baos), "utf-8");
+        out.startDocument(null, true);
+        out.startTag(null, tag);
+        ZenModeConfig.writeZenPolicyXml(policy, out);
+        out.endTag(null, tag);
+        out.endDocument();
+
+        TypedXmlPullParser parser = Xml.newFastPullParser();
+        parser.setInput(new BufferedInputStream(
+                new ByteArrayInputStream(baos.toByteArray())), null);
+        parser.nextTag();
+        ZenPolicy fromXml = ZenModeConfig.readZenPolicyXml(parser);
+
+        assertNotNull(fromXml);
+        assertEquals(policy.getPriorityCategoryCalls(), fromXml.getPriorityCategoryCalls());
+        assertEquals(policy.getPriorityCallSenders(), fromXml.getPriorityCallSenders());
+        assertEquals(policy.getPriorityCategoryMessages(), fromXml.getPriorityCategoryMessages());
+        assertEquals(policy.getPriorityMessageSenders(), fromXml.getPriorityMessageSenders());
+        assertEquals(policy.getPriorityCategoryConversations(),
+                fromXml.getPriorityCategoryConversations());
+        assertEquals(policy.getPriorityConversationSenders(),
+                fromXml.getPriorityConversationSenders());
+        assertEquals(policy.getPriorityCategoryRepeatCallers(),
+                fromXml.getPriorityCategoryRepeatCallers());
+        assertEquals(policy.getPriorityCategoryAlarms(), fromXml.getPriorityCategoryAlarms());
+        assertEquals(policy.getPriorityCategoryMedia(), fromXml.getPriorityCategoryMedia());
+        assertEquals(policy.getPriorityCategorySystem(), fromXml.getPriorityCategorySystem());
+        assertEquals(policy.getPriorityCategoryReminders(), fromXml.getPriorityCategoryReminders());
+        assertEquals(policy.getPriorityCategoryEvents(), fromXml.getPriorityCategoryEvents());
+
+        assertEquals(policy.getVisualEffectFullScreenIntent(),
+                fromXml.getVisualEffectFullScreenIntent());
+        assertEquals(policy.getVisualEffectLights(), fromXml.getVisualEffectLights());
+        assertEquals(policy.getVisualEffectPeek(), fromXml.getVisualEffectPeek());
+        assertEquals(policy.getVisualEffectStatusBar(), fromXml.getVisualEffectStatusBar());
+        assertEquals(policy.getVisualEffectBadge(), fromXml.getVisualEffectBadge());
+        assertEquals(policy.getVisualEffectAmbient(), fromXml.getVisualEffectAmbient());
+        assertEquals(policy.getVisualEffectNotificationList(),
+                fromXml.getVisualEffectNotificationList());
     }
 
     private ZenModeConfig getMutedRingerConfig() {
@@ -265,7 +433,7 @@ public class ZenModeConfigTest extends UiServiceTestCase {
         config.allowCallsFrom = ZenModeConfig.SOURCE_ANYONE;
         config.allowMessagesFrom = ZenModeConfig.SOURCE_ANYONE;
         config.allowConversations = true;
-        config.allowConversationsFrom = ZenPolicy.CONVERSATION_SENDERS_IMPORTANT;
+        config.allowConversationsFrom = CONVERSATION_SENDERS_IMPORTANT;
 
         config.suppressedVisualEffects = 0;
         return config;

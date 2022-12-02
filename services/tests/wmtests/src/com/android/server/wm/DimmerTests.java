@@ -64,6 +64,11 @@ public class DimmerTests extends WindowTestsBase {
         }
 
         @Override
+        public SurfaceControl.Transaction getSyncTransaction() {
+            return mTransaction;
+        }
+
+        @Override
         public SurfaceControl.Transaction getPendingTransaction() {
             return mTransaction;
         }
@@ -99,6 +104,11 @@ public class DimmerTests extends WindowTestsBase {
         @Override
         public SurfaceControl getSurfaceControl() {
             return mHostControl;
+        }
+
+        @Override
+        public SurfaceControl.Transaction getSyncTransaction() {
+            return mHostTransaction;
         }
 
         @Override
@@ -199,7 +209,7 @@ public class DimmerTests extends WindowTestsBase {
         mHost.addChild(child, 0);
 
         final float alpha = 0.8f;
-        mDimmer.dimBelow(mTransaction, child, alpha);
+        mDimmer.dimBelow(mTransaction, child, alpha, 0);
         SurfaceControl dimLayer = getDimLayer();
 
         assertNotNull("Dimmer should have created a surface", dimLayer);

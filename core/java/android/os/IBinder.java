@@ -150,7 +150,7 @@ public interface IBinder {
     int LIKE_TRANSACTION   = ('_'<<24)|('L'<<16)|('I'<<8)|'K';
 
     /** @hide */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     int SYSPROPS_TRANSACTION = ('_'<<24)|('S'<<16)|('P'<<8)|'R';
 
     /**
@@ -168,6 +168,15 @@ public interface IBinder {
      * oneway and non-oneway calls on the same IBinder object.</p>
      */
     int FLAG_ONEWAY             = 0x00000001;
+
+    /**
+     * Flag to {@link #transact}: request binder driver to clear transaction data.
+     *
+     * Be very careful when using this flag in Java, since Java objects read from a Java
+     * Parcel may be non-trivial to clear.
+     * @hide
+     */
+    int FLAG_CLEAR_BUF          = 0x00000020;
 
     /**
      * @hide
@@ -284,7 +293,10 @@ public interface IBinder {
      *
      * @return Returns the result from {@link Binder#onTransact}.  A successful call
      * generally returns true; false generally means the transaction code was not
-     * understood.
+     * understood.  For a oneway call to a different process false should never be
+     * returned.  If a oneway call is made to code in the same process (usually to
+     * a C++ or Rust implementation), then there are no oneway semantics, and
+     * false can still be returned.
      */
     public boolean transact(int code, @NonNull Parcel data, @Nullable Parcel reply, int flags)
         throws RemoteException;
@@ -299,9 +311,11 @@ public interface IBinder {
         public void binderDied();
 
         /**
-         * @hide
+         * Interface for receiving a callback when the process hosting an IBinder
+         * has gone away.
+         * @param who The IBinder that has become invalid
          */
-        default void binderDied(IBinder who) {
+        default void binderDied(@NonNull IBinder who) {
             binderDied();
         }
     }

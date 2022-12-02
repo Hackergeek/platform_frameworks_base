@@ -22,13 +22,12 @@
 #include <vector>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 #include "androidfw/StringPiece.h"
 #include "build/version.h"
-
 #include "text/Unicode.h"
 #include "text/Utf8Iterator.h"
 #include "util/BigBuffer.h"
-#include "util/Maybe.h"
 #include "utils/Unicode.h"
 
 using ::aapt::text::Utf8Iterator;
@@ -37,6 +36,11 @@ using ::android::StringPiece16;
 
 namespace aapt {
 namespace util {
+
+// Package name and shared user id would be used as a part of the file name.
+// Limits size to 223 and reserves 32 for the OS.
+// See frameworks/base/core/java/android/content/pm/parsing/ParsingPackageUtils.java
+constexpr static const size_t kMaxPackageNameSize = 223;
 
 static std::vector<std::string> SplitAndTransform(
     const StringPiece& str, char sep, const std::function<char(char)>& f) {
@@ -169,15 +173,27 @@ static int IsAndroidNameImpl(const StringPiece& str) {
 }
 
 bool IsAndroidPackageName(const StringPiece& str) {
+  if (str.size() > kMaxPackageNameSize) {
+    return false;
+  }
   return IsAndroidNameImpl(str) > 1 || str == "android";
+}
+
+bool IsAndroidSharedUserId(const android::StringPiece& package_name,
+                           const android::StringPiece& shared_user_id) {
+  if (shared_user_id.size() > kMaxPackageNameSize) {
+    return false;
+  }
+  return shared_user_id.empty() || IsAndroidNameImpl(shared_user_id) > 1 ||
+         package_name == "android";
 }
 
 bool IsAndroidSplitName(const StringPiece& str) {
   return IsAndroidNameImpl(str) > 0;
 }
 
-Maybe<std::string> GetFullyQualifiedClassName(const StringPiece& package,
-                                              const StringPiece& classname) {
+std::optional<std::string> GetFullyQualifiedClassName(const StringPiece& package,
+                                                      const StringPiece& classname) {
   if (classname.empty()) {
     return {};
   }
@@ -215,7 +231,14 @@ std::string GetToolFingerprint() {
   static const char* const sMinorVersion = "19";
 
   // The build id of aapt2 binary.
-  static const std::string sBuildId = android::build::GetBuildNumber();
+  static std::string sBuildId = android::build::GetBuildNumber();
+
+  if (android::base::StartsWith(sBuildId, "eng.")) {
+    time_t now = time(0);
+    tm* ltm = localtime(&now);
+
+    sBuildId = android::base::StringPrintf("eng.%d%d", 1900 + ltm->tm_year, 1 + ltm->tm_mon);
+  }
 
   return android::base::StringPrintf("%s.%s-%s", sMajorVersion, sMinorVersion, sBuildId.c_str());
 }
@@ -531,19 +554,15 @@ bool ExtractResFilePathParts(const StringPiece& path, StringPiece* out_prefix,
 }
 
 StringPiece16 GetString16(const android::ResStringPool& pool, size_t idx) {
-  size_t len;
-  const char16_t* str = pool.stringAt(idx, &len);
-  if (str != nullptr) {
-    return StringPiece16(str, len);
+  if (auto str = pool.stringAt(idx); str.ok()) {
+    return *str;
   }
   return StringPiece16();
 }
 
 std::string GetString(const android::ResStringPool& pool, size_t idx) {
-  size_t len;
-  const char* str = pool.string8At(idx, &len);
-  if (str != nullptr) {
-    return ModifiedUtf8ToUtf8(std::string(str, len));
+  if (auto str = pool.string8At(idx); str.ok()) {
+    return ModifiedUtf8ToUtf8(str->to_string());
   }
   return Utf16ToUtf8(GetString16(pool, idx));
 }

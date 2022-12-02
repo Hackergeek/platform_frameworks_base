@@ -21,9 +21,9 @@
 
 #include <cutils/compiler.h>
 
-#include <SkDrawLooper.h>
 #include <SkFont.h>
 #include <SkPaint.h>
+#include <SkSamplingOptions.h>
 #include <string>
 
 #include <minikin/FontFamily.h>
@@ -32,7 +32,9 @@
 
 namespace android {
 
-class ANDROID_API Paint : public SkPaint {
+class BlurDrawLooper;
+
+class Paint : public SkPaint {
 public:
     // Default values for underlined and strikethrough text,
     // as defined by Skia in SkTextFormatParams.h.
@@ -59,8 +61,8 @@ public:
     SkFont& getSkFont() { return mFont; }
     const SkFont& getSkFont() const { return mFont; }
 
-    SkDrawLooper* getLooper() const { return mLooper.get(); }
-    void setLooper(sk_sp<SkDrawLooper> looper) { mLooper = std::move(looper); }
+    BlurDrawLooper* getLooper() const { return mLooper.get(); }
+    void setLooper(sk_sp<BlurDrawLooper> looper);
 
     // These shadow the methods on SkPaint, but we need to so we can keep related
     // attributes in-sync.
@@ -137,6 +139,17 @@ public:
     bool isDevKern() const { return mDevKern; }
     void setDevKern(bool d) { mDevKern = d; }
 
+    // Deprecated -- bitmapshaders will be taking this flag explicitly
+    bool isFilterBitmap() const { return mFilterBitmap; }
+    void setFilterBitmap(bool filter) { mFilterBitmap = filter; }
+
+    SkFilterMode filterMode() const {
+        return mFilterBitmap ? SkFilterMode::kLinear : SkFilterMode::kNearest;
+    }
+    SkSamplingOptions sampling() const {
+        return SkSamplingOptions(this->filterMode());
+    }
+
     // The Java flags (Paint.java) no longer fit into the native apis directly.
     // These methods handle converting to and from them and the native representations
     // in android::Paint.
@@ -149,10 +162,10 @@ public:
     // The only respected flags are : [ antialias, dither, filterBitmap ]
     static uint32_t GetSkPaintJavaFlags(const SkPaint&);
     static void SetSkPaintJavaFlags(SkPaint*, uint32_t flags);
- 
+
 private:
     SkFont mFont;
-    sk_sp<SkDrawLooper> mLooper;
+    sk_sp<BlurDrawLooper> mLooper;
 
     float mLetterSpacing = 0;
     float mWordSpacing = 0;
@@ -166,6 +179,7 @@ private:
     // nullptr is valid: it means the default typeface.
     const Typeface* mTypeface = nullptr;
     Align mAlign = kLeft_Align;
+    bool mFilterBitmap = false;
     bool mStrikeThru = false;
     bool mUnderline = false;
     bool mDevKern = false;

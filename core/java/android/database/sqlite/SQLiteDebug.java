@@ -70,7 +70,8 @@ public final class SQLiteDebug {
         /**
          * True to enable database performance testing instrumentation.
          */
-        public static final boolean DEBUG_LOG_SLOW_QUERIES = Build.IS_DEBUGGABLE;
+        public static final boolean DEBUG_LOG_SLOW_QUERIES =
+                Log.isLoggable("SQLiteSlowQueries", Log.VERBOSE);
 
         private static final String SLOW_QUERY_THRESHOLD_PROP = "db.log.slow_query_threshold";
 
@@ -135,7 +136,7 @@ public final class SQLiteDebug {
          * that overflowed because no space was left in the page cache.
          * documented at http://www.sqlite.org/c3ref/c_status_malloc_size.html
          */
-        @UnsupportedAppUsage
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         public int pageCacheOverflow;
 
         /** records the largest memory allocation request handed to sqlite3.

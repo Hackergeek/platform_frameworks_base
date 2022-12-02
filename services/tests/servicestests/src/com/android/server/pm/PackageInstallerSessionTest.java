@@ -20,19 +20,25 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 import static org.xmlpull.v1.XmlPullParser.END_DOCUMENT;
 import static org.xmlpull.v1.XmlPullParser.START_TAG;
 
 import android.content.pm.PackageInstaller;
+import android.content.pm.PackageManager;
 import android.platform.test.annotations.Presubmit;
 import android.util.AtomicFile;
 import android.util.Slog;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 import android.util.Xml;
 
 import androidx.test.runner.AndroidJUnit4;
 
 import com.android.internal.os.BackgroundThread;
-import com.android.internal.util.FastXmlSerializer;
 
 import libcore.io.IoUtils;
 
@@ -43,16 +49,13 @@ import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -70,12 +73,17 @@ public class PackageInstallerSessionTest {
     @Mock
     PackageManagerService mMockPackageManagerInternal;
 
+    @Mock
+    Computer mSnapshot;
+
     @Before
     public void setUp() throws Exception {
         mTmpDir = mTemporaryFolder.newFolder("PackageInstallerSessionTest");
         mSessionsFile = new AtomicFile(
                 new File(mTmpDir.getAbsolutePath() + "/sessions.xml"), "package-session");
         MockitoAnnotations.initMocks(this);
+        when(mSnapshot.getPackageUid(anyString(), anyLong(), anyInt())).thenReturn(0);
+        when(mMockPackageManagerInternal.snapshotComputer()).thenReturn(mSnapshot);
     }
 
     @Test
@@ -159,12 +167,14 @@ public class PackageInstallerSessionTest {
             params.isMultiPackage = true;
         }
         InstallSource installSource = InstallSource.create("testInstallInitiator",
-                "testInstallOriginator", "testInstaller");
+                "testInstallOriginator", "testInstaller", "testAttributionTag",
+                PackageInstaller.PACKAGE_SOURCE_UNSPECIFIED);
         return new PackageInstallerSession(
                 /* callback */ null,
                 /* context */null,
                 /* pm */ mMockPackageManagerInternal,
                 /* sessionProvider */ null,
+                /* silentUpdatePolicy */ null,
                 /* looper */ BackgroundThread.getHandler().getLooper(),
                 /* stagingManager */ null,
                 /* sessionId */ sessionId,
@@ -173,9 +183,11 @@ public class PackageInstallerSessionTest {
                 /* installSource */ installSource,
                 /* sessionParams */ params,
                 /* createdMillis */ 0L,
+                /* committedMillis */ 0L,
                 /* stageDir */ mTmpDir,
                 /* stageCid */ null,
                 /* files */ null,
+                /* checksums */ null,
                 /* prepared */ true,
                 /* committed */ true,
                 /* destroyed */ staged ? true : false,
@@ -186,7 +198,7 @@ public class PackageInstallerSessionTest {
                 /* isFailed */ false,
                 /* isApplied */false,
                 /* stagedSessionErrorCode */
-                PackageInstaller.SessionInfo.STAGED_SESSION_VERIFICATION_FAILED,
+                PackageManager.INSTALL_FAILED_VERIFICATION_FAILURE,
                 /* stagedSessionErrorMessage */ "some error");
     }
 
@@ -199,8 +211,7 @@ public class PackageInstallerSessionTest {
         try {
             fos = mSessionsFile.startWrite();
 
-            XmlSerializer out = new FastXmlSerializer();
-            out.setOutput(fos, StandardCharsets.UTF_8.name());
+            TypedXmlSerializer out = Xml.resolveSerializer(fos);
             out.startDocument(null, true);
             out.startTag(null, TAG_SESSIONS);
             for (PackageInstallerSession session : sessions) {
@@ -226,8 +237,7 @@ public class PackageInstallerSessionTest {
         FileInputStream fis = null;
         try {
             fis = mSessionsFile.openRead();
-            final XmlPullParser in = Xml.newPullParser();
-            in.setInput(fis, StandardCharsets.UTF_8.name());
+            TypedXmlPullParser in = Xml.resolvePullParser(fis);
 
             int type;
             while ((type = in.next()) != END_DOCUMENT) {
@@ -239,7 +249,7 @@ public class PackageInstallerSessionTest {
                             session = PackageInstallerSession.readFromXml(in, null,
                                     null, mMockPackageManagerInternal,
                                     BackgroundThread.getHandler().getLooper(), null,
-                                    mTmpDir, null);
+                                    mTmpDir, null, null);
                             ret.add(session);
                         } catch (Exception e) {
                             Slog.e("PackageInstallerSessionTest", "Exception ", e);
@@ -307,12 +317,12 @@ public class PackageInstallerSessionTest {
         assertEquals(expected.stageCid, actual.stageCid);
         assertEquals(expected.isPrepared(), actual.isPrepared());
         assertEquals(expected.isStaged(), actual.isStaged());
-        assertEquals(expected.isStagedSessionApplied(), actual.isStagedSessionApplied());
-        assertEquals(expected.isStagedSessionFailed(), actual.isStagedSessionFailed());
-        assertEquals(expected.isStagedSessionReady(), actual.isStagedSessionReady());
-        assertEquals(expected.getStagedSessionErrorCode(), actual.getStagedSessionErrorCode());
-        assertEquals(expected.getStagedSessionErrorMessage(),
-                actual.getStagedSessionErrorMessage());
+        assertEquals(expected.isSessionApplied(), actual.isSessionApplied());
+        assertEquals(expected.isSessionFailed(), actual.isSessionFailed());
+        assertEquals(expected.isSessionReady(), actual.isSessionReady());
+        assertEquals(expected.getSessionErrorCode(), actual.getSessionErrorCode());
+        assertEquals(expected.getSessionErrorMessage(),
+                actual.getSessionErrorMessage());
         assertEquals(expected.isPrepared(), actual.isPrepared());
         assertEquals(expected.isCommitted(), actual.isCommitted());
         assertEquals(expected.createdMillis, actual.createdMillis);

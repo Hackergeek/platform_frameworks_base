@@ -24,9 +24,19 @@ import static com.android.server.pm.shortcutmanagertest.ShortcutManagerTestUtils
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.PersistableBundle;
-import android.test.suitebuilder.annotation.SmallTest;
+import android.platform.test.annotations.Presubmit;
+import android.util.Xml;
 
+import androidx.test.filters.SmallTest;
+import androidx.test.runner.AndroidJUnit4;
+
+import org.junit.Assume;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+
+@Presubmit
 @SmallTest
+@RunWith(AndroidJUnit4.class)
 public class ShortcutManagerTest4 extends BaseShortcutManagerTest {
 
     private static Bundle sIntentExtras = makeBundle(
@@ -99,7 +109,10 @@ public class ShortcutManagerTest4 extends BaseShortcutManagerTest {
             "x2", "value{?}"
     );
 
+    @Test
     public void testPersistingWeirdCharacters() {
+        Assume.assumeFalse(Xml.ENABLE_BINARY_DEFAULT);
+
         final Intent intent = new Intent(Intent.ACTION_MAIN)
                 .putExtras(sIntentExtras);
 

@@ -22,15 +22,17 @@ import android.system.ErrnoException;
 import android.system.Os;
 import android.util.Log;
 
+import com.android.internal.util.ArrayUtils;
+
 import libcore.io.IoBridge;
 import libcore.io.IoUtils;
 import libcore.io.Memory;
 import libcore.io.Streams;
-import libcore.util.ArrayUtils;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
@@ -94,9 +96,11 @@ public class FileBridge extends Thread {
 
     @Override
     public void run() {
-        final byte[] temp = new byte[8192];
+        final ByteBuffer tempBuffer = ByteBuffer.allocateDirect(8192);
+        final byte[] temp = tempBuffer.hasArray() ? tempBuffer.array() : new byte[8192];
         try {
-            while (IoBridge.read(mServer.getFileDescriptor(), temp, 0, MSG_LENGTH) == MSG_LENGTH) {
+            while (IoBridge.read(mServer.getFileDescriptor(), temp,
+                                 0, MSG_LENGTH) == MSG_LENGTH) {
                 final int cmd = Memory.peekInt(temp, 0, ByteOrder.BIG_ENDIAN);
                 if (cmd == CMD_WRITE) {
                     // Shuttle data into local file
@@ -137,7 +141,10 @@ public class FileBridge extends Thread {
     public static class FileBridgeOutputStream extends OutputStream {
         private final ParcelFileDescriptor mClientPfd;
         private final FileDescriptor mClient;
-        private final byte[] mTemp = new byte[MSG_LENGTH];
+        private final ByteBuffer mTempBuffer = ByteBuffer.allocateDirect(MSG_LENGTH);
+        private final byte[] mTemp = mTempBuffer.hasArray()
+                                     ? mTempBuffer.array()
+                                     : new byte[MSG_LENGTH];
 
         public FileBridgeOutputStream(ParcelFileDescriptor clientPfd) {
             mClientPfd = clientPfd;

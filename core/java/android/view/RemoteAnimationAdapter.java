@@ -17,7 +17,9 @@
 package android.view;
 
 import android.app.ActivityOptions;
+import android.app.IApplicationThread;
 import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
 import android.os.Parcel;
 import android.os.Parcelable;
 
@@ -57,6 +59,9 @@ public class RemoteAnimationAdapter implements Parcelable {
     private int mCallingPid;
     private int mCallingUid;
 
+    /** @see #getCallingApplication */
+    private IApplicationThread mCallingApplication;
+
     /**
      * @param runner The interface that gets notified when we actually need to start the animation.
      * @param duration The duration of the animation.
@@ -65,7 +70,7 @@ public class RemoteAnimationAdapter implements Parcelable {
      * @param statusBarTransitionDelay The desired delay for all visual animations in the
      *        status bar caused by this app animation in millis.
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public RemoteAnimationAdapter(IRemoteAnimationRunner runner, long duration,
             long statusBarTransitionDelay, boolean changeNeedsSnapshot) {
         mRunner = runner;
@@ -80,11 +85,19 @@ public class RemoteAnimationAdapter implements Parcelable {
         this(runner, duration, statusBarTransitionDelay, false /* changeNeedsSnapshot */);
     }
 
+    @UnsupportedAppUsage
+    public RemoteAnimationAdapter(IRemoteAnimationRunner runner, long duration,
+            long statusBarTransitionDelay, IApplicationThread callingApplication) {
+        this(runner, duration, statusBarTransitionDelay, false /* changeNeedsSnapshot */);
+        mCallingApplication = callingApplication;
+    }
+
     public RemoteAnimationAdapter(Parcel in) {
         mRunner = IRemoteAnimationRunner.Stub.asInterface(in.readStrongBinder());
         mDuration = in.readLong();
         mStatusBarTransitionDelay = in.readLong();
         mChangeNeedsSnapshot = in.readBoolean();
+        mCallingApplication = IApplicationThread.Stub.asInterface(in.readStrongBinder());
     }
 
     public IRemoteAnimationRunner getRunner() {
@@ -125,6 +138,15 @@ public class RemoteAnimationAdapter implements Parcelable {
         return mCallingUid;
     }
 
+    /**
+     * Gets the ApplicationThread that will run the animation. Instead it is intended to pass the
+     * calling information among client processes (eg. shell + launcher) through one-way binder
+     * calls (where binder itself doesn't track calling information).
+     */
+    public IApplicationThread getCallingApplication() {
+        return mCallingApplication;
+    }
+
     @Override
     public int describeContents() {
         return 0;
@@ -136,6 +158,7 @@ public class RemoteAnimationAdapter implements Parcelable {
         dest.writeLong(mDuration);
         dest.writeLong(mStatusBarTransitionDelay);
         dest.writeBoolean(mChangeNeedsSnapshot);
+        dest.writeStrongInterface(mCallingApplication);
     }
 
     public static final @android.annotation.NonNull Creator<RemoteAnimationAdapter> CREATOR

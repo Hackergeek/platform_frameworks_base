@@ -20,9 +20,11 @@
 
 // TODO: Use public SurfaceTexture APIs once available and include public NDK header file instead.
 #include <surfacetexture/surface_texture_platform.h>
+
 #include "AutoBackendTextureRelease.h"
 #include "Matrix.h"
 #include "Properties.h"
+#include "android/hdr_metadata.h"
 #include "renderstate/RenderState.h"
 #include "renderthread/EglManager.h"
 #include "renderthread/RenderThread.h"
@@ -76,6 +78,9 @@ void DeferredLayerUpdater::destroyLayer() {
 
     mLayer = nullptr;
 
+    for (auto& [index, slot] : mImageSlots) {
+        slot.clear(mRenderState.getRenderThread().getGrContext());
+    }
     mImageSlots.clear();
 }
 
@@ -89,31 +94,39 @@ void DeferredLayerUpdater::setPaint(const SkPaint* paint) {
     }
 }
 
-static status_t createReleaseFence(bool useFenceSync, EGLSyncKHR* eglFence, EGLDisplay* display,
-                                   int* releaseFence, void* handle) {
+status_t DeferredLayerUpdater::createReleaseFence(bool useFenceSync, EGLSyncKHR* eglFence,
+                                                  EGLDisplay* display, int* releaseFence,
+                                                  void* handle) {
     *display = EGL_NO_DISPLAY;
-    RenderState* renderState = (RenderState*)handle;
+    DeferredLayerUpdater* dlu = (DeferredLayerUpdater*)handle;
+    RenderState& renderState = dlu->mRenderState;
     status_t err;
     if (Properties::getRenderPipelineType() == RenderPipelineType::SkiaGL) {
-        EglManager& eglManager = renderState->getRenderThread().eglManager();
+        EglManager& eglManager = renderState.getRenderThread().eglManager();
         *display = eglManager.eglDisplay();
         err = eglManager.createReleaseFence(useFenceSync, eglFence, releaseFence);
     } else {
-        err = renderState->getRenderThread().vulkanManager().createReleaseFence(
-                releaseFence, renderState->getRenderThread().getGrContext());
+        int previousSlot = dlu->mCurrentSlot;
+        if (previousSlot != -1) {
+            dlu->mImageSlots[previousSlot].releaseQueueOwnership(
+                    renderState.getRenderThread().getGrContext());
+        }
+        err = renderState.getRenderThread().vulkanManager().createReleaseFence(
+                releaseFence, renderState.getRenderThread().getGrContext());
     }
     return err;
 }
 
-static status_t fenceWait(int fence, void* handle) {
+status_t DeferredLayerUpdater::fenceWait(int fence, void* handle) {
     // Wait on the producer fence for the buffer to be ready.
     status_t err;
-    RenderState* renderState = (RenderState*)handle;
+    DeferredLayerUpdater* dlu = (DeferredLayerUpdater*)handle;
+    RenderState& renderState = dlu->mRenderState;
     if (Properties::getRenderPipelineType() == RenderPipelineType::SkiaGL) {
-        err = renderState->getRenderThread().eglManager().fenceWait(fence);
+        err = renderState.getRenderThread().eglManager().fenceWait(fence);
     } else {
-        err = renderState->getRenderThread().vulkanManager().fenceWait(
-                fence, renderState->getRenderThread().getGrContext());
+        err = renderState.getRenderThread().vulkanManager().fenceWait(
+                fence, renderState.getRenderThread().getGrContext());
     }
     return err;
 }
@@ -136,29 +149,51 @@ void DeferredLayerUpdater::apply() {
             mUpdateTexImage = false;
             float transformMatrix[16];
             android_dataspace dataspace;
+            AHdrMetadataType hdrMetadataType;
+            android_cta861_3_metadata cta861_3;
+            android_smpte2086_metadata smpte2086;
             int slot;
             bool newContent = false;
+            ARect currentCrop;
+            uint32_t outTransform;
             // Note: ASurfaceTexture_dequeueBuffer discards all but the last frame. This
             // is necessary if the SurfaceTexture queue is in synchronous mode, and we
             // cannot tell which mode it is in.
             AHardwareBuffer* hardwareBuffer = ASurfaceTexture_dequeueBuffer(
-                    mSurfaceTexture.get(), &slot, &dataspace, transformMatrix, &newContent,
-                    createReleaseFence, fenceWait, &mRenderState);
+                    mSurfaceTexture.get(), &slot, &dataspace, &hdrMetadataType, &cta861_3,
+                    &smpte2086, transformMatrix, &outTransform, &newContent, createReleaseFence,
+                    fenceWait, this, &currentCrop);
 
             if (hardwareBuffer) {
+                mCurrentSlot = slot;
                 sk_sp<SkImage> layerImage = mImageSlots[slot].createIfNeeded(
                         hardwareBuffer, dataspace, newContent,
                         mRenderState.getRenderThread().getGrContext());
+                AHardwareBuffer_Desc bufferDesc;
+                AHardwareBuffer_describe(hardwareBuffer, &bufferDesc);
                 // unref to match the ref added by ASurfaceTexture_dequeueBuffer. eglCreateImageKHR
                 // (invoked by createIfNeeded) will add a ref to the AHardwareBuffer.
                 AHardwareBuffer_release(hardwareBuffer);
                 if (layerImage.get()) {
-                    SkMatrix textureTransform;
-                    mat4(transformMatrix).copyTo(textureTransform);
                     // force filtration if buffer size != layer size
                     bool forceFilter =
                             mWidth != layerImage->width() || mHeight != layerImage->height();
-                    updateLayer(forceFilter, textureTransform, layerImage);
+                    SkRect currentCropRect =
+                            SkRect::MakeLTRB(currentCrop.left, currentCrop.top, currentCrop.right,
+                                             currentCrop.bottom);
+
+                    float maxLuminanceNits = -1.f;
+                    if (hdrMetadataType & HDR10_SMPTE2086) {
+                        maxLuminanceNits = std::max(smpte2086.maxLuminance, maxLuminanceNits);
+                    }
+
+                    if (hdrMetadataType & HDR10_CTA861_3) {
+                        maxLuminanceNits =
+                                std::max(cta861_3.maxContentLightLevel, maxLuminanceNits);
+                    }
+                    mLayer->setBufferFormat(bufferDesc.format);
+                    updateLayer(forceFilter, layerImage, outTransform, currentCropRect,
+                                maxLuminanceNits);
                 }
             }
         }
@@ -170,13 +205,16 @@ void DeferredLayerUpdater::apply() {
     }
 }
 
-void DeferredLayerUpdater::updateLayer(bool forceFilter, const SkMatrix& textureTransform,
-                                       const sk_sp<SkImage>& layerImage) {
+void DeferredLayerUpdater::updateLayer(bool forceFilter, const sk_sp<SkImage>& layerImage,
+                                       const uint32_t transform, SkRect currentCrop,
+                                       float maxLuminanceNits) {
     mLayer->setBlend(mBlend);
     mLayer->setForceFilter(forceFilter);
     mLayer->setSize(mWidth, mHeight);
-    mLayer->getTexTransform() = textureTransform;
+    mLayer->setCurrentCropRect(currentCrop);
+    mLayer->setWindowTransform(transform);
     mLayer->setImage(layerImage);
+    mLayer->setMaxLuminanceNits(maxLuminanceNits);
 }
 
 void DeferredLayerUpdater::detachSurfaceTexture() {
@@ -189,11 +227,11 @@ void DeferredLayerUpdater::detachSurfaceTexture() {
 sk_sp<SkImage> DeferredLayerUpdater::ImageSlot::createIfNeeded(AHardwareBuffer* buffer,
                                                                android_dataspace dataspace,
                                                                bool forceCreate,
-                                                               GrContext* context) {
+                                                               GrDirectContext* context) {
     if (!mTextureRelease || !mTextureRelease->getImage().get() || dataspace != mDataspace ||
         forceCreate || mBuffer != buffer) {
         if (buffer != mBuffer) {
-            clear();
+            clear(context);
         }
 
         if (!buffer) {
@@ -213,14 +251,24 @@ sk_sp<SkImage> DeferredLayerUpdater::ImageSlot::createIfNeeded(AHardwareBuffer* 
     return mTextureRelease ? mTextureRelease->getImage() : nullptr;
 }
 
-void DeferredLayerUpdater::ImageSlot::clear() {
+void DeferredLayerUpdater::ImageSlot::clear(GrDirectContext* context) {
     if (mTextureRelease) {
+        if (Properties::getRenderPipelineType() == RenderPipelineType::SkiaVulkan) {
+            this->releaseQueueOwnership(context);
+        }
         // The following unref counteracts the initial mUsageCount of 1, set by default initializer.
         mTextureRelease->unref(true);
         mTextureRelease = nullptr;
     }
 
     mBuffer = nullptr;
+}
+
+void DeferredLayerUpdater::ImageSlot::releaseQueueOwnership(GrDirectContext* context) {
+    LOG_ALWAYS_FATAL_IF(Properties::getRenderPipelineType() != RenderPipelineType::SkiaVulkan);
+    if (mTextureRelease) {
+        mTextureRelease->releaseQueueOwnership(context);
+    }
 }
 
 } /* namespace uirenderer */

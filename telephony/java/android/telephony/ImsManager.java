@@ -17,19 +17,26 @@
 package android.telephony.ims;
 
 import android.annotation.NonNull;
+import android.annotation.RequiresFeature;
 import android.annotation.SdkConstant;
 import android.annotation.SuppressLint;
+import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.content.Context;
+import android.content.pm.PackageManager;
+import android.telephony.BinderCacheManager;
 import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyFrameworkInitializer;
+import android.telephony.ims.aidl.IImsRcsController;
+
+import com.android.internal.telephony.ITelephony;
 
 /**
  * Provides access to information about Telephony IMS services on the device.
  */
 @SystemService(Context.TELEPHONY_IMS_SERVICE)
+@RequiresFeature(PackageManager.FEATURE_TELEPHONY_IMS)
 public class ImsManager {
-
-    private Context mContext;
 
     /**
      * <p>Broadcast Action: Indicates that a previously allowed IMS operation was rejected by the
@@ -86,6 +93,14 @@ public class ImsManager {
     public static final String EXTRA_WFC_REGISTRATION_FAILURE_MESSAGE =
             "android.telephony.ims.extra.WFC_REGISTRATION_FAILURE_MESSAGE";
 
+    // Cache Telephony Binder interfaces, one cache per process.
+    private static final BinderCacheManager<ITelephony> sTelephonyCache =
+            new BinderCacheManager<>(ImsManager::getITelephonyInterface);
+    private static final BinderCacheManager<IImsRcsController> sRcsCache =
+            new BinderCacheManager<>(ImsManager::getIImsRcsControllerInterface);
+
+    private final Context mContext;
+
     /**
      * Use {@link Context#getSystemService(String)} to get an instance of this class.
      * @hide
@@ -107,7 +122,7 @@ public class ImsManager {
             throw new IllegalArgumentException("Invalid subscription ID: " + subscriptionId);
         }
 
-        return new ImsRcsManager(mContext, subscriptionId);
+        return new ImsRcsManager(mContext, subscriptionId, sRcsCache, sTelephonyCache);
     }
 
     /**
@@ -123,6 +138,64 @@ public class ImsManager {
             throw new IllegalArgumentException("Invalid subscription ID: " + subscriptionId);
         }
 
-        return new ImsMmTelManager(subscriptionId);
+        return new ImsMmTelManager(mContext, subscriptionId, sTelephonyCache);
+    }
+
+    /**
+     * Create an instance of {@link SipDelegateManager} for the subscription id specified.
+     * <p>
+     * Allows an IMS application to forward SIP traffic through the device's IMS service,
+     * which is used for cellular carriers that require the device to share a single IMS
+     * registration for both MMTEL and RCS features.
+     * @param subscriptionId The ID of the subscription that this {@link SipDelegateManager} will
+     *                       be bound to.
+     * @throws IllegalArgumentException if the subscription is invalid.
+     * @return a {@link SipDelegateManager} instance for the specified subscription ID.
+     * @hide
+     */
+    @SystemApi
+    @NonNull
+    public SipDelegateManager getSipDelegateManager(int subscriptionId) {
+        if (!SubscriptionManager.isValidSubscriptionId(subscriptionId)) {
+            throw new IllegalArgumentException("Invalid subscription ID: " + subscriptionId);
+        }
+
+        return new SipDelegateManager(mContext, subscriptionId, sRcsCache, sTelephonyCache);
+    }
+
+
+    /**
+     * Create an instance of {@link ProvisioningManager} for the subscription id specified.
+     * <p>
+     * Provides a ProvisioningManager instance to carrier apps to update carrier provisioning
+     * information, as well as provides a callback so that apps can listen for changes
+     * in MMTEL/RCS provisioning
+     * @param subscriptionId The ID of the subscription that this ProvisioningManager will use.
+     * @throws IllegalArgumentException if the subscription is invalid.
+     * @return a ProvisioningManager instance with the specific subscription ID.
+     */
+    @NonNull
+    public ProvisioningManager getProvisioningManager(int subscriptionId) {
+        if (!SubscriptionManager.isValidSubscriptionId(subscriptionId)) {
+            throw new IllegalArgumentException("Invalid subscription ID: " + subscriptionId);
+        }
+
+        return new ProvisioningManager(subscriptionId);
+    }
+
+    private static IImsRcsController getIImsRcsControllerInterface() {
+        return IImsRcsController.Stub.asInterface(
+                TelephonyFrameworkInitializer
+                        .getTelephonyServiceManager()
+                        .getTelephonyImsServiceRegisterer()
+                        .get());
+    }
+
+    private static ITelephony getITelephonyInterface() {
+        return ITelephony.Stub.asInterface(
+                TelephonyFrameworkInitializer
+                        .getTelephonyServiceManager()
+                        .getTelephonyServiceRegisterer()
+                        .get());
     }
 }

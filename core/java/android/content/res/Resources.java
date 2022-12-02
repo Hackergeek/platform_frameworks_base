@@ -27,6 +27,7 @@ import android.annotation.BoolRes;
 import android.annotation.ColorInt;
 import android.annotation.ColorRes;
 import android.annotation.DimenRes;
+import android.annotation.Discouraged;
 import android.annotation.DrawableRes;
 import android.annotation.FontRes;
 import android.annotation.FractionRes;
@@ -52,6 +53,7 @@ import android.graphics.drawable.Drawable.ConstantState;
 import android.graphics.drawable.DrawableInflater;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
@@ -77,11 +79,15 @@ import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.PrintWriter;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.function.Consumer;
+import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
 
 /**
  * Class for accessing an application's resources.  This sits on top of the
@@ -141,9 +147,6 @@ public class Resources {
     @UnsupportedAppUsage
     private DrawableInflater mDrawableInflater;
 
-    /** Used to override the returned adjustments of {@link #getDisplayAdjustments}. */
-    private DisplayAdjustments mOverrideDisplayAdjustments;
-
     /** Lock object used to protect access to {@link #mTmpValue}. */
     private final Object mTmpValueLock = new Object();
 
@@ -173,6 +176,11 @@ public class Resources {
     private int mThemeRefsNextFlushSize = MIN_THEME_REFS_FLUSH_SIZE;
 
     private int mBaseApkAssetsSize;
+
+    /** @hide */
+    private static Set<Resources> sResourcesHistory = Collections.synchronizedSet(
+            Collections.newSetFromMap(
+                    new WeakHashMap<>()));
 
     /**
      * Returns the most appropriate default theme for the specified target SDK version.
@@ -317,9 +325,10 @@ public class Resources {
      *                    class loader
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public Resources(@Nullable ClassLoader classLoader) {
         mClassLoader = classLoader == null ? ClassLoader.getSystemClassLoader() : classLoader;
+        sResourcesHistory.add(this);
     }
 
     /**
@@ -341,7 +350,7 @@ public class Resources {
 
     /**
      * Set the underlying implementation (containing all the resources and caches)
-     * and updates all Theme references to new implementations as well.
+     * and updates all Theme implementations as well.
      * @hide
      */
     @UnsupportedAppUsage
@@ -353,14 +362,14 @@ public class Resources {
         mBaseApkAssetsSize = ArrayUtils.size(impl.getAssets().getApkAssets());
         mResourcesImpl = impl;
 
-        // Create new ThemeImpls that are identical to the ones we have.
+        // Rebase the ThemeImpls using the new ResourcesImpl.
         synchronized (mThemeRefs) {
             final int count = mThemeRefs.size();
             for (int i = 0; i < count; i++) {
                 WeakReference<Theme> weakThemeRef = mThemeRefs.get(i);
                 Theme theme = weakThemeRef != null ? weakThemeRef.get() : null;
                 if (theme != null) {
-                    theme.setImpl(mResourcesImpl.newThemeImpl(theme.getKey()));
+                    theme.rebase(mResourcesImpl);
                 }
             }
         }
@@ -394,7 +403,7 @@ public class Resources {
      * @return the inflater used to create drawable objects
      * @hide Pending API finalization.
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public final DrawableInflater getDrawableInflater() {
         if (mDrawableInflater == null) {
             mDrawableInflater = new DrawableInflater(this, mClassLoader);
@@ -987,7 +996,7 @@ public class Resources {
     }
 
     @NonNull
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     Drawable loadDrawable(@NonNull TypedValue value, int id, int density, @Nullable Theme theme)
             throws NotFoundException {
         return mResourcesImpl.loadDrawable(this, value, id, density, theme);
@@ -1466,6 +1475,12 @@ public class Resources {
      * @throws NotFoundException Throws NotFoundException if the given ID does not exist.
      *
      */
+    @Discouraged(message = "Use of this function is discouraged because it makes internal calls to "
+                         + "`getIdentifier()`, which uses resource reflection. Reflection makes it "
+                         + "harder to perform build optimizations and compile-time verification of "
+                         + "code. It is much more efficient to retrieve resource values by "
+                         + "identifier (e.g. `getValue(R.foo.bar, outValue, true)`) than by name "
+                         + "(e.g. `getValue(\"foo\", outvalue, true)`).")
     public void getValue(String name, TypedValue outValue, boolean resolveRefs)
             throws NotFoundException {
         mResourcesImpl.getValue(name, outValue, resolveRefs);
@@ -1500,6 +1515,15 @@ public class Resources {
      * retrieve XML attributes with style and theme information applied.
      */
     public final class Theme {
+        /**
+         * To trace parent themes needs to prevent a cycle situation.
+         * e.x. A's parent is B, B's parent is C, and C's parent is A.
+         */
+        private static final int MAX_NUMBER_OF_TRACING_PARENT_THEME = 100;
+
+        private final Object mLock = new Object();
+
+        @GuardedBy("mLock")
         @UnsupportedAppUsage
         private ResourcesImpl.ThemeImpl mThemeImpl;
 
@@ -1507,7 +1531,9 @@ public class Resources {
         }
 
         void setImpl(ResourcesImpl.ThemeImpl impl) {
-            mThemeImpl = impl;
+            synchronized (mLock) {
+                mThemeImpl = impl;
+            }
         }
 
         /**
@@ -1528,7 +1554,9 @@ public class Resources {
          *              if not already defined in the theme.
          */
         public void applyStyle(int resId, boolean force) {
-            mThemeImpl.applyStyle(resId, force);
+            synchronized (mLock) {
+                mThemeImpl.applyStyle(resId, force);
+            }
         }
 
         /**
@@ -1541,7 +1569,11 @@ public class Resources {
          * @param other The existing Theme to copy from.
          */
         public void setTo(Theme other) {
-            mThemeImpl.setTo(other.mThemeImpl);
+            synchronized (mLock) {
+                synchronized (other.mLock) {
+                    mThemeImpl.setTo(other.mThemeImpl);
+                }
+            }
         }
 
         /**
@@ -1566,7 +1598,9 @@ public class Resources {
          */
         @NonNull
         public TypedArray obtainStyledAttributes(@NonNull @StyleableRes int[] attrs) {
-            return mThemeImpl.obtainStyledAttributes(this, null, attrs, 0, 0);
+            synchronized (mLock) {
+                return mThemeImpl.obtainStyledAttributes(this, null, attrs, 0, 0);
+            }
         }
 
         /**
@@ -1594,7 +1628,9 @@ public class Resources {
         public TypedArray obtainStyledAttributes(@StyleRes int resId,
                 @NonNull @StyleableRes int[] attrs)
                 throws NotFoundException {
-            return mThemeImpl.obtainStyledAttributes(this, null, attrs, 0, resId);
+            synchronized (mLock) {
+                return mThemeImpl.obtainStyledAttributes(this, null, attrs, 0, resId);
+            }
         }
 
         /**
@@ -1650,7 +1686,10 @@ public class Resources {
         public TypedArray obtainStyledAttributes(@Nullable AttributeSet set,
                 @NonNull @StyleableRes int[] attrs, @AttrRes int defStyleAttr,
                 @StyleRes int defStyleRes) {
-            return mThemeImpl.obtainStyledAttributes(this, set, attrs, defStyleAttr, defStyleRes);
+            synchronized (mLock) {
+                return mThemeImpl.obtainStyledAttributes(this, set, attrs, defStyleAttr,
+                        defStyleRes);
+            }
         }
 
         /**
@@ -1671,7 +1710,9 @@ public class Resources {
         @NonNull
         @UnsupportedAppUsage
         public TypedArray resolveAttributes(@NonNull int[] values, @NonNull int[] attrs) {
-            return mThemeImpl.resolveAttributes(this, values, attrs);
+            synchronized (mLock) {
+                return mThemeImpl.resolveAttributes(this, values, attrs);
+            }
         }
 
         /**
@@ -1692,7 +1733,9 @@ public class Resources {
          *         <var>outValue</var> is valid, else false.
          */
         public boolean resolveAttribute(int resid, TypedValue outValue, boolean resolveRefs) {
-            return mThemeImpl.resolveAttribute(resid, outValue, resolveRefs);
+            synchronized (mLock) {
+                return mThemeImpl.resolveAttribute(resid, outValue, resolveRefs);
+            }
         }
 
         /**
@@ -1702,7 +1745,9 @@ public class Resources {
          * @hide
          */
         public int[] getAllAttributes() {
-            return mThemeImpl.getAllAttributes();
+            synchronized (mLock) {
+                return mThemeImpl.getAllAttributes();
+            }
         }
 
         /**
@@ -1738,7 +1783,9 @@ public class Resources {
          * @see ActivityInfo
          */
         public @Config int getChangingConfigurations() {
-            return mThemeImpl.getChangingConfigurations();
+            synchronized (mLock) {
+                return mThemeImpl.getChangingConfigurations();
+            }
         }
 
         /**
@@ -1749,23 +1796,38 @@ public class Resources {
          * @param prefix Text to prefix each line printed.
          */
         public void dump(int priority, String tag, String prefix) {
-            mThemeImpl.dump(priority, tag, prefix);
+            synchronized (mLock) {
+                mThemeImpl.dump(priority, tag, prefix);
+            }
         }
 
         // Needed by layoutlib.
         /*package*/ long getNativeTheme() {
-            return mThemeImpl.getNativeTheme();
+            synchronized (mLock) {
+                return mThemeImpl.getNativeTheme();
+            }
         }
 
         /*package*/ int getAppliedStyleResId() {
-            return mThemeImpl.getAppliedStyleResId();
+            synchronized (mLock) {
+                return mThemeImpl.getAppliedStyleResId();
+            }
+        }
+
+        @StyleRes
+        /*package*/ int getParentThemeIdentifier(@StyleRes int resId) {
+            synchronized (mLock) {
+                return mThemeImpl.getParentThemeIdentifier(resId);
+            }
         }
 
         /**
          * @hide
          */
         public ThemeKey getKey() {
-            return mThemeImpl.getKey();
+            synchronized (mLock) {
+                return mThemeImpl.getKey();
+            }
         }
 
         private String getResourceNameFromHexString(String hexString) {
@@ -1781,7 +1843,9 @@ public class Resources {
          */
         @ViewDebug.ExportedProperty(category = "theme", hasAdjacentMapping = true)
         public String[] getTheme() {
-            return mThemeImpl.getTheme();
+            synchronized (mLock) {
+                return mThemeImpl.getTheme();
+            }
         }
 
         /** @hide */
@@ -1800,7 +1864,15 @@ public class Resources {
          * {@link #applyStyle(int, boolean)}.
          */
         public void rebase() {
-            mThemeImpl.rebase();
+            synchronized (mLock) {
+                mThemeImpl.rebase();
+            }
+        }
+
+        void rebase(ResourcesImpl resImpl) {
+            synchronized (mLock) {
+                mThemeImpl.rebase(resImpl.mAssets);
+            }
         }
 
         /**
@@ -1862,13 +1934,63 @@ public class Resources {
         @NonNull
         public int[] getAttributeResolutionStack(@AttrRes int defStyleAttr,
                 @StyleRes int defStyleRes, @StyleRes int explicitStyleRes) {
-            int[] stack = mThemeImpl.getAttributeResolutionStack(
-                    defStyleAttr, defStyleRes, explicitStyleRes);
-            if (stack == null) {
-                return new int[0];
-            } else {
-                return stack;
+            synchronized (mLock) {
+                int[] stack = mThemeImpl.getAttributeResolutionStack(
+                        defStyleAttr, defStyleRes, explicitStyleRes);
+                if (stack == null) {
+                    return new int[0];
+                } else {
+                    return stack;
+                }
             }
+        }
+
+        @Override
+        public int hashCode() {
+            return getKey().hashCode();
+        }
+
+        @Override
+        public boolean equals(@Nullable Object o) {
+            if (this == o) {
+                return true;
+            }
+
+            if (o == null || getClass() != o.getClass() || hashCode() != o.hashCode()) {
+                return false;
+            }
+
+            final Theme other = (Theme) o;
+            return getKey().equals(other.getKey());
+        }
+
+        @Override
+        public String toString() {
+            final StringBuilder sb = new StringBuilder();
+            sb.append('{');
+            int themeResId = getAppliedStyleResId();
+            int i = 0;
+            sb.append("InheritanceMap=[");
+            while (themeResId > 0) {
+                if (i > MAX_NUMBER_OF_TRACING_PARENT_THEME) {
+                    sb.append(",...");
+                    break;
+                }
+
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append("id=0x").append(Integer.toHexString(themeResId));
+                sb.append(getResourcePackageName(themeResId))
+                        .append(":").append(getResourceTypeName(themeResId))
+                        .append("/").append(getResourceEntryName(themeResId));
+
+                i++;
+                themeResId = getParentThemeIdentifier(themeResId);
+            }
+            sb.append("], Themes=").append(Arrays.deepToString(getTheme()));
+            sb.append('}');
+            return sb.toString();
         }
     }
 
@@ -1913,7 +2035,7 @@ public class Resources {
         }
 
         @Override
-        public boolean equals(Object o) {
+        public boolean equals(@Nullable Object o) {
             if (this == o) {
                 return true;
             }
@@ -1965,7 +2087,7 @@ public class Resources {
 
             // Clean up references to garbage collected themes
             if (mThemeRefs.size() > mThemeRefsNextFlushSize) {
-                mThemeRefs.removeIf(ref -> ref.get() == null);
+                mThemeRefs.removeIf(ref -> ref.refersTo(null));
                 mThemeRefsNextFlushSize = Math.max(MIN_THEME_REFS_FLUSH_SIZE,
                         2 * mThemeRefs.size());
             }
@@ -2057,32 +2179,9 @@ public class Resources {
     }
 
     /** @hide */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(trackingBug = 176190631)
     public DisplayAdjustments getDisplayAdjustments() {
-        final DisplayAdjustments overrideDisplayAdjustments = mOverrideDisplayAdjustments;
-        if (overrideDisplayAdjustments != null) {
-            return overrideDisplayAdjustments;
-        }
         return mResourcesImpl.getDisplayAdjustments();
-    }
-
-    /**
-     * Customize the display adjustments based on the current one in {@link #mResourcesImpl}, in
-     * order to isolate the effect with other instances of {@link Resource} that may share the same
-     * instance of {@link ResourcesImpl}.
-     *
-     * @param override The operation to override the existing display adjustments. If it is null,
-     *                 the override adjustments will be cleared.
-     * @hide
-     */
-    public void overrideDisplayAdjustments(@Nullable Consumer<DisplayAdjustments> override) {
-        if (override != null) {
-            mOverrideDisplayAdjustments = new DisplayAdjustments(
-                    mResourcesImpl.getDisplayAdjustments());
-            override.accept(mOverrideDisplayAdjustments);
-        } else {
-            mOverrideDisplayAdjustments = null;
-        }
     }
 
     /**
@@ -2090,7 +2189,7 @@ public class Resources {
      * @hide
      */
     public boolean hasOverrideDisplayAdjustments() {
-        return mOverrideDisplayAdjustments != null;
+        return false;
     }
 
     /**
@@ -2152,6 +2251,11 @@ public class Resources {
      * @return int The associated resource identifier.  Returns 0 if no such
      *         resource was found.  (0 is not a valid resource ID.)
      */
+    @Discouraged(message = "Use of this function is discouraged because resource reflection makes "
+                         + "it harder to perform build optimizations and compile-time "
+                         + "verification of code. It is much more efficient to retrieve "
+                         + "resources by identifier (e.g. `R.foo.bar`) than by name (e.g. "
+                         + "`getIdentifier(\"bar\", \"foo\", null)`).")
     public int getIdentifier(String name, String defType, String defPackage) {
         return mResourcesImpl.getIdentifier(name, defType, defPackage);
     }
@@ -2553,6 +2657,30 @@ public class Resources {
             mCallbacks.onLoadersChanged(this, newLoaders);
             for (ResourcesLoader loader : oldLoaders) {
                 loader.unregisterOnProvidersChangedCallback(this);
+            }
+        }
+    }
+
+    /** @hide */
+    public void dump(PrintWriter pw, String prefix) {
+        pw.println(prefix + "class=" + getClass());
+        pw.println(prefix + "resourcesImpl");
+        mResourcesImpl.dump(pw, prefix + "  ");
+    }
+
+    /** @hide */
+    public static void dumpHistory(PrintWriter pw, String prefix) {
+        pw.println(prefix + "history");
+        // Putting into a map keyed on the apk assets to deduplicate resources that are different
+        // objects but ultimately represent the same assets
+        Map<List<ApkAssets>, Resources> history = new ArrayMap<>();
+        sResourcesHistory.forEach(
+                r -> history.put(Arrays.asList(r.mResourcesImpl.mAssets.getApkAssets()), r));
+        int i = 0;
+        for (Resources r : history.values()) {
+            if (r != null) {
+                pw.println(prefix + i++);
+                r.dump(pw, prefix + "  ");
             }
         }
     }

@@ -16,12 +16,19 @@
 
 package com.android.server;
 
+import static com.android.server.Watchdog.HandlerCheckerAndTimeout.withCustomTimeout;
+import static com.android.server.Watchdog.HandlerCheckerAndTimeout.withDefaultTimeout;
+
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.app.IActivityController;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.database.ContentObserver;
 import android.hidl.manager.V1_0.IServiceManager;
+import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Debug;
@@ -31,19 +38,26 @@ import android.os.IPowerManager;
 import android.os.Looper;
 import android.os.Process;
 import android.os.RemoteException;
+import android.os.ServiceDebugInfo;
 import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.os.UserHandle;
+import android.provider.Settings;
+import android.sysprop.WatchdogProperties;
+import android.util.Dumpable;
 import android.util.EventLog;
 import android.util.Log;
 import android.util.Slog;
 import android.util.SparseArray;
-import android.sysprop.WatchdogProperties;
 
+import com.android.internal.os.BackgroundThread;
 import com.android.internal.os.ProcessCpuTracker;
 import com.android.internal.os.ZygoteConnectionConstants;
 import com.android.internal.util.FrameworkStatsLog;
 import com.android.server.am.ActivityManagerService;
+import com.android.server.am.TraceErrorLogger;
+import com.android.server.criticalevents.CriticalEventLog;
 import com.android.server.wm.SurfaceAnimationThread;
 
 import java.io.BufferedReader;
@@ -52,15 +66,21 @@ import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.concurrent.TimeUnit;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
-/** This class calls its monitor every minute. Killing this process if they don't return **/
-public class Watchdog extends Thread {
+/**
+ * This class calls its monitor every minute. Killing this process if they don't return
+ **/
+public class Watchdog implements Dumpable {
     static final String TAG = "Watchdog";
 
     /** Debug flag. */
@@ -75,8 +95,6 @@ public class Watchdog extends Thread {
     // Note 2: The debug value is already below the wait time in ZygoteConnection. Wrapped
     //         applications may not work with a debug build. CTS will fail.
     private static final long DEFAULT_TIMEOUT = DB ? 10 * 1000 : 60 * 1000;
-    // 心跳周期
-    private static final long CHECK_INTERVAL = DEFAULT_TIMEOUT / 2;
 
     // These are temporally ordered: larger values as lateness increases
     private static final int COMPLETED = 0;
@@ -95,6 +113,7 @@ public class Watchdog extends Thread {
         "/system/bin/audioserver",
         "/system/bin/cameraserver",
         "/system/bin/drmserver",
+        "/system/bin/keystore2",
         "/system/bin/mediadrmserver",
         "/system/bin/mediaserver",
         "/system/bin/netd",
@@ -105,15 +124,16 @@ public class Watchdog extends Thread {
         "media.metrics", // system/bin/mediametrics
         "media.codec", // vendor/bin/hw/android.hardware.media.omx@1.0-service
         "media.swcodec", // /apex/com.android.media.swcodec/bin/mediaswcodec
+        "media.transcoding", // Media transcoding service
         "com.android.bluetooth",  // Bluetooth service
         "/apex/com.android.os.statsd/bin/statsd",  // Stats daemon
     };
 
     public static final List<String> HAL_INTERFACES_OF_INTEREST = Arrays.asList(
-            "android.hardware.audio@2.0::IDevicesFactory",
             "android.hardware.audio@4.0::IDevicesFactory",
             "android.hardware.audio@5.0::IDevicesFactory",
             "android.hardware.audio@6.0::IDevicesFactory",
+            "android.hardware.audio@7.0::IDevicesFactory",
             "android.hardware.biometrics.face@1.0::IBiometricsFace",
             "android.hardware.biometrics.fingerprint@2.1::IBiometricsFingerprint",
             "android.hardware.bluetooth@1.0::IBluetoothHci",
@@ -127,24 +147,80 @@ public class Watchdog extends Thread {
             "android.hardware.media.omx@1.0::IOmx",
             "android.hardware.media.omx@1.0::IOmxStore",
             "android.hardware.neuralnetworks@1.0::IDevice",
+            "android.hardware.power@1.0::IPower",
             "android.hardware.power.stats@1.0::IPowerStats",
             "android.hardware.sensors@1.0::ISensors",
             "android.hardware.sensors@2.0::ISensors",
             "android.hardware.sensors@2.1::ISensors",
+            "android.hardware.vibrator@1.0::IVibrator",
             "android.hardware.vr@1.0::IVr",
             "android.system.suspend@1.0::ISystemSuspend"
     );
 
+    public static final String[] AIDL_INTERFACE_PREFIXES_OF_INTEREST = new String[] {
+            "android.hardware.biometrics.face.IFace/",
+            "android.hardware.biometrics.fingerprint.IFingerprint/",
+            "android.hardware.light.ILights/",
+            "android.hardware.power.IPower/",
+            "android.hardware.power.stats.IPowerStats/",
+            "android.hardware.vibrator.IVibrator/",
+            "android.hardware.vibrator.IVibratorManager/"
+    };
+
     private static Watchdog sWatchdog;
 
+    private final Thread mThread;
+
+    private final Object mLock = new Object();
+
     /* This handler will be used to post message back onto the main thread */
-    private final ArrayList<HandlerChecker> mHandlerCheckers = new ArrayList<>();
+    private final ArrayList<HandlerCheckerAndTimeout> mHandlerCheckers = new ArrayList<>();
     private final HandlerChecker mMonitorChecker;
     private ActivityManagerService mActivity;
-
     private IActivityController mController;
     private boolean mAllowRestart = true;
+    // We start with DEFAULT_TIMEOUT. This will then be update with the timeout values from Settings
+    // once the settings provider is initialized.
+    private volatile long mWatchdogTimeoutMillis = DEFAULT_TIMEOUT;
     private final List<Integer> mInterestingJavaPids = new ArrayList<>();
+    private final TraceErrorLogger mTraceErrorLogger;
+
+    /** Holds a checker and its timeout. */
+    static final class HandlerCheckerAndTimeout {
+        private final HandlerChecker mHandler;
+        private final Optional<Long> mCustomTimeoutMillis;
+
+        private HandlerCheckerAndTimeout(HandlerChecker checker, Optional<Long> timeoutMillis) {
+            this.mHandler = checker;
+            this.mCustomTimeoutMillis = timeoutMillis;
+        }
+
+        HandlerChecker checker() {
+            return mHandler;
+        }
+
+        /** Returns the timeout. */
+        Optional<Long> customTimeoutMillis() {
+            return mCustomTimeoutMillis;
+        }
+
+        /**
+         * Creates a checker with the default timeout. The timeout will use the default value which
+         * is configurable server-side.
+         */
+        static HandlerCheckerAndTimeout withDefaultTimeout(HandlerChecker checker) {
+            return new HandlerCheckerAndTimeout(checker, Optional.empty());
+        }
+
+        /**
+         * Creates a checker with a custom timeout. The timeout overrides the default value and will
+         * always be used.
+         */
+        static HandlerCheckerAndTimeout withCustomTimeout(
+                HandlerChecker checker, long timeoutMillis) {
+            return new HandlerCheckerAndTimeout(checker, Optional.of(timeoutMillis));
+        }
+    }
 
     /**
      * Used for checking status of handle threads and scheduling monitor callbacks.
@@ -152,18 +228,17 @@ public class Watchdog extends Thread {
     public final class HandlerChecker implements Runnable {
         private final Handler mHandler;
         private final String mName;
-        private final long mWaitMax;
         private final ArrayList<Monitor> mMonitors = new ArrayList<Monitor>();
         private final ArrayList<Monitor> mMonitorQueue = new ArrayList<Monitor>();
+        private long mWaitMax;
         private boolean mCompleted;
         private Monitor mCurrentMonitor;
         private long mStartTime;
         private int mPauseCount;
 
-        HandlerChecker(Handler handler, String name, long waitMaxMillis) {
+        HandlerChecker(Handler handler, String name) {
             mHandler = handler;
             mName = name;
-            mWaitMax = waitMaxMillis;
             mCompleted = true;
         }
 
@@ -173,7 +248,13 @@ public class Watchdog extends Thread {
             mMonitorQueue.add(monitor);
         }
 
-        public void scheduleCheckLocked() {
+        /**
+         * Schedules a run on the handler thread.
+         *
+         * @param handlerCheckerTimeoutMillis the timeout to use for this run
+         */
+        public void scheduleCheckLocked(long handlerCheckerTimeoutMillis) {
+            mWaitMax = handlerCheckerTimeoutMillis;
             if (mCompleted) {
                 // Safe to update monitors in queue, Handler is not in the middle of work
                 mMonitors.addAll(mMonitorQueue);
@@ -200,10 +281,6 @@ public class Watchdog extends Thread {
             mCurrentMonitor = null;
             mStartTime = SystemClock.uptimeMillis();
             mHandler.postAtFrontOfQueue(this);
-        }
-
-        boolean isOverdueLocked() {
-            return (!mCompleted) && (SystemClock.uptimeMillis() > mStartTime + mWaitMax);
         }
 
         public int getCompletionStateLocked() {
@@ -245,14 +322,14 @@ public class Watchdog extends Thread {
             // point we have completed execution of this method.
             final int size = mMonitors.size();
             for (int i = 0 ; i < size ; i++) {
-                synchronized (Watchdog.this) {
+                synchronized (mLock) {
                     mCurrentMonitor = mMonitors.get(i);
                 }
                 // 在monitor方法申请锁，如果能在规定的时间内申请到锁，则说明没有死锁
                 mCurrentMonitor.monitor();
             }
 
-            synchronized (Watchdog.this) {
+            synchronized (mLock) {
                 mCompleted = true;
                 mCurrentMonitor = null;
             }
@@ -321,37 +398,38 @@ public class Watchdog extends Thread {
     }
 
     private Watchdog() {
-        super("watchdog");
+        mThread = new Thread(this::run, "watchdog");
+
         // Initialize handler checkers for each common thread we want to check.  Note
         // that we are not currently checking the background thread, since it can
         // potentially hold longer running operations with no guarantees about the timeliness
         // of operations there.
-
+        //
         // The shared foreground thread is the main checker.  It is where we
         // will also dispatch monitor checks and do other work.
         mMonitorChecker = new HandlerChecker(FgThread.getHandler(),
-                "foreground thread", DEFAULT_TIMEOUT);
-        mHandlerCheckers.add(mMonitorChecker);
+                "foreground thread");
+        mHandlerCheckers.add(withDefaultTimeout(mMonitorChecker));
         // Add checker for main thread.  We only do a quick check since there
         // can be UI running on the thread.
-        mHandlerCheckers.add(new HandlerChecker(new Handler(Looper.getMainLooper()),
-                "main thread", DEFAULT_TIMEOUT));
+        mHandlerCheckers.add(withDefaultTimeout(
+                new HandlerChecker(new Handler(Looper.getMainLooper()), "main thread")));
         // Add checker for shared UI thread.
-        mHandlerCheckers.add(new HandlerChecker(UiThread.getHandler(),
-                "ui thread", DEFAULT_TIMEOUT));
+        mHandlerCheckers.add(withDefaultTimeout(
+                new HandlerChecker(UiThread.getHandler(), "ui thread")));
         // And also check IO thread.
-        mHandlerCheckers.add(new HandlerChecker(IoThread.getHandler(),
-                "i/o thread", DEFAULT_TIMEOUT));
+        mHandlerCheckers.add(withDefaultTimeout(
+                new HandlerChecker(IoThread.getHandler(), "i/o thread")));
         // And the display thread.
-        mHandlerCheckers.add(new HandlerChecker(DisplayThread.getHandler(),
-                "display thread", DEFAULT_TIMEOUT));
+        mHandlerCheckers.add(withDefaultTimeout(
+                new HandlerChecker(DisplayThread.getHandler(), "display thread")));
         // And the animation thread.
-        mHandlerCheckers.add(new HandlerChecker(AnimationThread.getHandler(),
-                "animation thread", DEFAULT_TIMEOUT));
+        mHandlerCheckers.add(withDefaultTimeout(
+                 new HandlerChecker(AnimationThread.getHandler(), "animation thread")));
         // And the surface animation thread.
-        mHandlerCheckers.add(new HandlerChecker(SurfaceAnimationThread.getHandler(),
-                "surface animation thread", DEFAULT_TIMEOUT));
-
+        mHandlerCheckers.add(withDefaultTimeout(
+                new HandlerChecker(SurfaceAnimationThread.getHandler(),
+                    "surface animation thread")));
         // Initialize monitor for Binder threads.
         addMonitor(new BinderThreadMonitor());
 
@@ -360,6 +438,15 @@ public class Watchdog extends Thread {
         // See the notes on DEFAULT_TIMEOUT.
         assert DB ||
                 DEFAULT_TIMEOUT > ZygoteConnectionConstants.WRAPPED_PID_TIMEOUT_MILLIS;
+
+        mTraceErrorLogger = new TraceErrorLogger();
+    }
+
+    /**
+     * Called by SystemServer to cause the internal thread to begin execution.
+     */
+    public void start() {
+        mThread.start();
     }
 
     /**
@@ -374,6 +461,62 @@ public class Watchdog extends Thread {
                 android.Manifest.permission.REBOOT, null);
     }
 
+    private static class SettingsObserver extends ContentObserver {
+        private final Uri mUri = Settings.Global.getUriFor(Settings.Global.WATCHDOG_TIMEOUT_MILLIS);
+        private final Context mContext;
+        private final Watchdog mWatchdog;
+
+        SettingsObserver(Context context, Watchdog watchdog) {
+            super(BackgroundThread.getHandler());
+            mContext = context;
+            mWatchdog = watchdog;
+            // Always kick once to ensure that we match current state
+            onChange();
+        }
+
+        @Override
+        public void onChange(boolean selfChange, Uri uri, int userId) {
+            if (mUri.equals(uri)) {
+                onChange();
+            }
+        }
+
+        public void onChange() {
+            try {
+                mWatchdog.updateWatchdogTimeout(Settings.Global.getLong(
+                        mContext.getContentResolver(),
+                        Settings.Global.WATCHDOG_TIMEOUT_MILLIS, DEFAULT_TIMEOUT));
+            } catch (RuntimeException e) {
+                Slog.e(TAG, "Exception while reading settings " + e.getMessage(), e);
+            }
+        }
+    }
+
+    /**
+     * Register an observer to listen to settings.
+     *
+     * It needs to be called after the settings service is initialized.
+     */
+    public void registerSettingsObserver(Context context) {
+        context.getContentResolver().registerContentObserver(
+                Settings.Global.getUriFor(Settings.Global.WATCHDOG_TIMEOUT_MILLIS),
+                false,
+                new SettingsObserver(context, this),
+                UserHandle.USER_SYSTEM);
+    }
+
+    /**
+     * Updates watchdog timeout values.
+     */
+    void updateWatchdogTimeout(long timeoutMillis) {
+        // See the notes on DEFAULT_TIMEOUT.
+        if (!DB && timeoutMillis <= ZygoteConnectionConstants.WRAPPED_PID_TIMEOUT_MILLIS) {
+            timeoutMillis = ZygoteConnectionConstants.WRAPPED_PID_TIMEOUT_MILLIS + 1;
+        }
+        mWatchdogTimeoutMillis = timeoutMillis;
+        Slog.i(TAG, "Watchdog timeout updated to " + mWatchdogTimeoutMillis + " millis");
+    }
+
     private static boolean isInterestingJavaProcess(String processName) {
         return processName.equals(StorageManagerService.sMediaStoreAuthorityProcessName)
                 || processName.equals("com.android.phone");
@@ -386,7 +529,7 @@ public class Watchdog extends Thread {
     public void processStarted(String processName, int pid) {
         if (isInterestingJavaProcess(processName)) {
             Slog.i(TAG, "Interesting Java process " + processName + " started. Pid " + pid);
-            synchronized (this) {
+            synchronized (mLock) {
                 mInterestingJavaPids.add(pid);
             }
         }
@@ -398,38 +541,42 @@ public class Watchdog extends Thread {
     public void processDied(String processName, int pid) {
         if (isInterestingJavaProcess(processName)) {
             Slog.i(TAG, "Interesting Java process " + processName + " died. Pid " + pid);
-            synchronized (this) {
+            synchronized (mLock) {
                 mInterestingJavaPids.remove(Integer.valueOf(pid));
             }
         }
     }
 
     public void setActivityController(IActivityController controller) {
-        synchronized (this) {
+        synchronized (mLock) {
             mController = controller;
         }
     }
 
     public void setAllowRestart(boolean allowRestart) {
-        synchronized (this) {
+        synchronized (mLock) {
             mAllowRestart = allowRestart;
         }
     }
 
     public void addMonitor(Monitor monitor) {
-        synchronized (this) {
+        synchronized (mLock) {
             mMonitorChecker.addMonitorLocked(monitor);
         }
     }
 
     public void addThread(Handler thread) {
-        addThread(thread, DEFAULT_TIMEOUT);
+        synchronized (mLock) {
+            final String name = thread.getLooper().getThread().getName();
+            mHandlerCheckers.add(withDefaultTimeout(new HandlerChecker(thread, name)));
+        }
     }
 
     public void addThread(Handler thread, long timeoutMillis) {
-        synchronized (this) {
+        synchronized (mLock) {
             final String name = thread.getLooper().getThread().getName();
-            mHandlerCheckers.add(new HandlerChecker(thread, name, timeoutMillis));
+            mHandlerCheckers.add(
+                    withCustomTimeout(new HandlerChecker(thread, name), timeoutMillis));
         }
     }
 
@@ -447,10 +594,11 @@ public class Watchdog extends Thread {
      * pauses have been resumed.
      */
     public void pauseWatchingCurrentThread(String reason) {
-        synchronized (this) {
-            for (HandlerChecker hc : mHandlerCheckers) {
-                if (Thread.currentThread().equals(hc.getThread())) {
-                    hc.pauseLocked(reason);
+        synchronized (mLock) {
+            for (HandlerCheckerAndTimeout hc : mHandlerCheckers) {
+                HandlerChecker checker = hc.checker();
+                if (Thread.currentThread().equals(checker.getThread())) {
+                    checker.pauseLocked(reason);
                 }
             }
         }
@@ -469,10 +617,11 @@ public class Watchdog extends Thread {
      * as many times as the calls to pause.
      */
     public void resumeWatchingCurrentThread(String reason) {
-        synchronized (this) {
-            for (HandlerChecker hc : mHandlerCheckers) {
-                if (Thread.currentThread().equals(hc.getThread())) {
-                    hc.resumeLocked(reason);
+        synchronized (mLock) {
+            for (HandlerCheckerAndTimeout hc : mHandlerCheckers) {
+                HandlerChecker checker = hc.checker();
+                if (Thread.currentThread().equals(checker.getThread())) {
+                    checker.resumeLocked(reason);
                 }
             }
         }
@@ -493,17 +642,17 @@ public class Watchdog extends Thread {
     private int evaluateCheckerCompletionLocked() {
         int state = COMPLETED;
         for (int i=0; i<mHandlerCheckers.size(); i++) {
-            HandlerChecker hc = mHandlerCheckers.get(i);
+            HandlerChecker hc = mHandlerCheckers.get(i).checker();
             state = Math.max(state, hc.getCompletionStateLocked());
         }
         return state;
     }
 
-    private ArrayList<HandlerChecker> getBlockedCheckersLocked() {
+    private ArrayList<HandlerChecker> getCheckersWithStateLocked(int completionState) {
         ArrayList<HandlerChecker> checkers = new ArrayList<HandlerChecker>();
         for (int i=0; i<mHandlerCheckers.size(); i++) {
-            HandlerChecker hc = mHandlerCheckers.get(i);
-            if (hc.isOverdueLocked()) {
+            HandlerChecker hc = mHandlerCheckers.get(i).checker();
+            if (hc.getCompletionStateLocked() == completionState) {
                 checkers.add(hc);
             }
         }
@@ -521,12 +670,11 @@ public class Watchdog extends Thread {
         return builder.toString();
     }
 
-    private static ArrayList<Integer> getInterestingHalPids() {
+    private static void addInterestingHidlPids(HashSet<Integer> pids) {
         try {
             IServiceManager serviceManager = IServiceManager.getService();
             ArrayList<IServiceManager.InstanceDebugInfo> dump =
                     serviceManager.debugDump();
-            HashSet<Integer> pids = new HashSet<>();
             for (IServiceManager.InstanceDebugInfo info : dump) {
                 if (info.pid == IServiceManager.PidConstant.NO_PID) {
                     continue;
@@ -538,41 +686,63 @@ public class Watchdog extends Thread {
 
                 pids.add(info.pid);
             }
-            return new ArrayList<Integer>(pids);
         } catch (RemoteException e) {
-            return new ArrayList<Integer>();
+            Log.w(TAG, e);
+        }
+    }
+
+    private static void addInterestingAidlPids(HashSet<Integer> pids) {
+        ServiceDebugInfo[] infos = ServiceManager.getServiceDebugInfo();
+        if (infos == null) return;
+
+        for (ServiceDebugInfo info : infos) {
+            for (String prefix : AIDL_INTERFACE_PREFIXES_OF_INTEREST) {
+                if (info.name.startsWith(prefix)) {
+                    pids.add(info.debugPid);
+                }
+            }
         }
     }
 
     static ArrayList<Integer> getInterestingNativePids() {
-        ArrayList<Integer> pids = getInterestingHalPids();
+        HashSet<Integer> pids = new HashSet<>();
+        addInterestingAidlPids(pids);
+        addInterestingHidlPids(pids);
 
         int[] nativePids = Process.getPidsForCommands(NATIVE_STACKS_OF_INTEREST);
         if (nativePids != null) {
-            pids.ensureCapacity(pids.size() + nativePids.length);
             for (int i : nativePids) {
                 pids.add(i);
             }
         }
 
-        return pids;
+        return new ArrayList<Integer>(pids);
     }
 
-    @Override
-    public void run() {
+    private void run() {
         boolean waitedHalf = false;
+
         while (true) {
-            final List<HandlerChecker> blockedCheckers;
-            final String subject;
-            final boolean allowRestart;
+            List<HandlerChecker> blockedCheckers = Collections.emptyList();
+            String subject = "";
+            boolean allowRestart = true;
             int debuggerWasConnected = 0;
-            synchronized (this) {
-                long timeout = CHECK_INTERVAL;
+            boolean doWaitedHalfDump = false;
+            // The value of mWatchdogTimeoutMillis might change while we are executing the loop.
+            // We store the current value to use a consistent value for all handlers.
+            final long watchdogTimeoutMillis = mWatchdogTimeoutMillis;
+            final long checkIntervalMillis = watchdogTimeoutMillis / 2;
+            final ArrayList<Integer> pids;
+            synchronized (mLock) {
+                long timeout = checkIntervalMillis;
                 // Make sure we (re)spin the checkers that have become idle within
                 // this wait-and-check interval
                 for (int i=0; i<mHandlerCheckers.size(); i++) {
-                    HandlerChecker hc = mHandlerCheckers.get(i);
-                    hc.scheduleCheckLocked();
+                    HandlerCheckerAndTimeout hc = mHandlerCheckers.get(i);
+                    // We pick the watchdog to apply every time we reschedule the checkers. The
+                    // default timeout might have changed since the last run.
+                    hc.checker().scheduleCheckLocked(hc.customTimeoutMillis()
+                            .orElse(watchdogTimeoutMillis * Build.HW_TIMEOUT_MULTIPLIER));
                 }
 
                 if (debuggerWasConnected > 0) {
@@ -589,7 +759,7 @@ public class Watchdog extends Thread {
                         debuggerWasConnected = 2;
                     }
                     try {
-                        wait(timeout);
+                        mLock.wait(timeout);
                         // Note: mHandlerCheckers and mMonitorChecker may have changed after waiting
                     } catch (InterruptedException e) {
                         Log.wtf(TAG, e);
@@ -597,7 +767,7 @@ public class Watchdog extends Thread {
                     if (Debug.isDebuggerConnected()) {
                         debuggerWasConnected = 2;
                     }
-                    timeout = CHECK_INTERVAL - (SystemClock.uptimeMillis() - start);
+                    timeout = checkIntervalMillis - (SystemClock.uptimeMillis() - start);
                 }
 
                 final int waitState = evaluateCheckerCompletionLocked();
@@ -611,73 +781,40 @@ public class Watchdog extends Thread {
                 } else if (waitState == WAITED_HALF) {
                     if (!waitedHalf) {
                         Slog.i(TAG, "WAITED_HALF");
-                        // We've waited half the deadlock-detection interval.  Pull a stack
-                        // trace and wait another half.
-                        ArrayList<Integer> pids = new ArrayList<>(mInterestingJavaPids);
-                        ActivityManagerService.dumpStackTraces(pids, null, null,
-                                getInterestingNativePids(), null);
                         waitedHalf = true;
+                        // We've waited half, but we'd need to do the stack trace dump w/o the lock.
+                        blockedCheckers = getCheckersWithStateLocked(WAITED_HALF);
+                        subject = describeCheckersLocked(blockedCheckers);
+                        pids = new ArrayList<>(mInterestingJavaPids);
+                        doWaitedHalfDump = true;
+                    } else {
+                        continue;
                     }
-                    continue;
+                } else {
+                    // something is overdue!
+                    blockedCheckers = getCheckersWithStateLocked(OVERDUE);
+                    subject = describeCheckersLocked(blockedCheckers);
+                    allowRestart = mAllowRestart;
+                    pids = new ArrayList<>(mInterestingJavaPids);
                 }
-
-                // something is overdue!
-                blockedCheckers = getBlockedCheckersLocked();
-                subject = describeCheckersLocked(blockedCheckers);
-                allowRestart = mAllowRestart;
-            }
+            } // END synchronized (mLock)
 
             // If we got here, that means that the system is most likely hung.
+            //
             // First collect stack traces from all threads of the system process.
-            // Then kill this process so that the system will restart.
-            EventLog.writeEvent(EventLogTags.WATCHDOG, subject);
+            //
+            // Then, if we reached the full timeout, kill this process so that the system will
+            // restart. If we reached half of the timeout, just log some information and continue.
+            logWatchog(doWaitedHalfDump, subject, pids);
 
-            ArrayList<Integer> pids = new ArrayList<>(mInterestingJavaPids);
-
-            long anrTime = SystemClock.uptimeMillis();
-            StringBuilder report = new StringBuilder();
-            report.append(MemoryPressureUtil.currentPsiState());
-            ProcessCpuTracker processCpuTracker = new ProcessCpuTracker(false);
-            StringWriter tracesFileException = new StringWriter();
-            final File stack = ActivityManagerService.dumpStackTraces(
-                    pids, processCpuTracker, new SparseArray<>(), getInterestingNativePids(),
-                    tracesFileException);
-
-            // Give some extra time to make sure the stack traces get written.
-            // The system's been hanging for a minute, another second or two won't hurt much.
-            SystemClock.sleep(5000);
-
-            processCpuTracker.update();
-            report.append(processCpuTracker.printCurrentState(anrTime));
-            report.append(tracesFileException.getBuffer());
-
-            // Trigger the kernel to dump all blocked threads, and backtraces on all CPUs to the kernel log
-            doSysRq('w');
-            doSysRq('l');
-
-            // Try to add the error to the dropbox, but assuming that the ActivityManager
-            // itself may be deadlocked.  (which has happened, causing this statement to
-            // deadlock and the watchdog as a whole to be ineffective)
-            Thread dropboxThread = new Thread("watchdogWriteToDropbox") {
-                    public void run() {
-                        // If a watched thread hangs before init() is called, we don't have a
-                        // valid mActivity. So we can't log the error to dropbox.
-                        if (mActivity != null) {
-                            mActivity.addErrorToDropBox(
-                                    "watchdog", null, "system_server", null, null, null,
-                                    subject, report.toString(), stack, null);
-                        }
-                        FrameworkStatsLog.write(FrameworkStatsLog.SYSTEM_SERVER_WATCHDOG_OCCURRED,
-                                subject);
-                    }
-                };
-            dropboxThread.start();
-            try {
-                dropboxThread.join(2000);  // wait up to 2 seconds for it to return.
-            } catch (InterruptedException ignored) {}
+            if (doWaitedHalfDump) {
+                // We have waited for only half of the timeout, we continue to wait for the duration
+                // of the full timeout before killing the process.
+                continue;
+            }
 
             IActivityController controller;
-            synchronized (this) {
+            synchronized (mLock) {
                 controller = mController;
             }
             if (controller != null) {
@@ -710,7 +847,7 @@ public class Watchdog extends Thread {
                 WatchdogDiagnostics.diagnoseCheckers(blockedCheckers);
                 Slog.w(TAG, "*** GOODBYE!");
                 if (!Build.IS_USER && isCrashLoopFound()
-                        && !WatchdogProperties.is_fatal_ignore().orElse(false)) {
+                        && !WatchdogProperties.should_ignore_fatal_count().orElse(false)) {
                     breakCrashLoop();
                 }
                 Process.killProcess(Process.myPid());
@@ -719,6 +856,74 @@ public class Watchdog extends Thread {
 
             waitedHalf = false;
         }
+    }
+
+    private void logWatchog(boolean halfWatchdog, String subject, ArrayList<Integer> pids) {
+        // Get critical event log before logging the half watchdog so that it doesn't
+        // occur in the log.
+        String criticalEvents =
+                CriticalEventLog.getInstance().logLinesForSystemServerTraceFile();
+        final UUID errorId = mTraceErrorLogger.generateErrorId();
+        if (mTraceErrorLogger.isAddErrorIdEnabled()) {
+            mTraceErrorLogger.addErrorIdToTrace("system_server", errorId);
+            mTraceErrorLogger.addSubjectToTrace(subject, errorId);
+        }
+
+        final String dropboxTag;
+        if (halfWatchdog) {
+            dropboxTag = "pre_watchdog";
+            CriticalEventLog.getInstance().logHalfWatchdog(subject);
+        } else {
+            dropboxTag = "watchdog";
+            CriticalEventLog.getInstance().logWatchdog(subject, errorId);
+            EventLog.writeEvent(EventLogTags.WATCHDOG, subject);
+            // Log the atom as early as possible since it is used as a mechanism to trigger
+            // Perfetto. Ideally, the Perfetto trace capture should happen as close to the
+            // point in time when the Watchdog happens as possible.
+            FrameworkStatsLog.write(FrameworkStatsLog.SYSTEM_SERVER_WATCHDOG_OCCURRED, subject);
+        }
+
+        long anrTime = SystemClock.uptimeMillis();
+        StringBuilder report = new StringBuilder();
+        report.append(MemoryPressureUtil.currentPsiState());
+        ProcessCpuTracker processCpuTracker = new ProcessCpuTracker(false);
+        StringWriter tracesFileException = new StringWriter();
+        final File stack = ActivityManagerService.dumpStackTraces(
+                pids, processCpuTracker, new SparseArray<>(), getInterestingNativePids(),
+                tracesFileException, subject, criticalEvents);
+        // Give some extra time to make sure the stack traces get written.
+        // The system's been hanging for a whlie, another second or two won't hurt much.
+        SystemClock.sleep(5000);
+        processCpuTracker.update();
+        report.append(processCpuTracker.printCurrentState(anrTime));
+        report.append(tracesFileException.getBuffer());
+
+        if (!halfWatchdog) {
+            // Trigger the kernel to dump all blocked threads, and backtraces on all CPUs to the
+            // kernel log
+            doSysRq('w');
+            doSysRq('l');
+        }
+
+        // Try to add the error to the dropbox, but assuming that the ActivityManager
+        // itself may be deadlocked.  (which has happened, causing this statement to
+        // deadlock and the watchdog as a whole to be ineffective)
+        Thread dropboxThread = new Thread("watchdogWriteToDropbox") {
+                public void run() {
+                    // If a watched thread hangs before init() is called, we don't have a
+                    // valid mActivity. So we can't log the error to dropbox.
+                    if (mActivity != null) {
+                        mActivity.addErrorToDropBox(
+                                dropboxTag, null, "system_server", null, null, null,
+                                null, report.toString(), stack, null, null, null,
+                                errorId);
+                    }
+                }
+            };
+        dropboxThread.start();
+        try {
+            dropboxThread.join(2000);  // wait up to 2 seconds for it to return.
+        } catch (InterruptedException ignored) { }
     }
 
     private void doSysRq(char c) {
@@ -789,7 +994,7 @@ public class Watchdog extends Thread {
     private boolean isCrashLoopFound() {
         int fatalCount = WatchdogProperties.fatal_count().orElse(0);
         long fatalWindowMs = TimeUnit.SECONDS.toMillis(
-                WatchdogProperties.fatal_window_second().orElse(0));
+                WatchdogProperties.fatal_window_seconds().orElse(0));
         if (fatalCount == 0 || fatalWindowMs == 0) {
             if (fatalCount != fatalWindowMs) {
                 Slog.w(TAG, String.format("sysprops '%s' and '%s' should be set or unset together",
@@ -832,5 +1037,11 @@ public class Watchdog extends Thread {
             Slog.w(TAG, "Failed to append to kmsg", e);
         }
         doSysRq('c');
+    }
+
+    @Override
+    public void dump(@NonNull PrintWriter pw, @Nullable String[] args) {
+        pw.print("WatchdogTimeoutMillis=");
+        pw.println(mWatchdogTimeoutMillis);
     }
 }

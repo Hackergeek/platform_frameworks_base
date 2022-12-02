@@ -50,8 +50,13 @@ class Dimmer {
         }
 
         @Override
-        public SurfaceControl.Transaction getPendingTransaction() {
+        public SurfaceControl.Transaction getSyncTransaction() {
             return mHost.getSyncTransaction();
+        }
+
+        @Override
+        public SurfaceControl.Transaction getPendingTransaction() {
+            return mHost.getPendingTransaction();
         }
 
         @Override
@@ -105,7 +110,7 @@ class Dimmer {
 
         void removeSurface() {
             if (mDimLayer != null && mDimLayer.isValid()) {
-                getPendingTransaction().remove(mDimLayer);
+                getSyncTransaction().remove(mDimLayer);
             }
             mDimLayer = null;
         }
@@ -204,7 +209,7 @@ class Dimmer {
     }
 
     private void dim(SurfaceControl.Transaction t, WindowContainer container, int relativeLayer,
-            float alpha) {
+            float alpha, int blurRadius) {
         final DimState d = getDimState(container);
 
         if (d == null) {
@@ -220,6 +225,7 @@ class Dimmer {
             t.setLayer(d.mDimLayer, Integer.MAX_VALUE);
         }
         t.setAlpha(d.mDimLayer, alpha);
+        t.setBackgroundBlurRadius(d.mDimLayer, blurRadius);
 
         d.mDimming = true;
     }
@@ -247,7 +253,7 @@ class Dimmer {
      * @param alpha The alpha at which to Dim.
      */
     void dimAbove(SurfaceControl.Transaction t, float alpha) {
-        dim(t, null, 1, alpha);
+        dim(t, null, 1, alpha, 0);
     }
 
     /**
@@ -260,19 +266,21 @@ class Dimmer {
      * @param alpha     The alpha at which to Dim.
      */
     void dimAbove(SurfaceControl.Transaction t, WindowContainer container, float alpha) {
-        dim(t, container, 1, alpha);
+        dim(t, container, 1, alpha, 0);
     }
 
     /**
      * Like {@link #dimAbove} but places the dim below the given container.
      *
-     * @param t         A transaction in which to apply the Dim.
-     * @param container The container which to dim below. Should be a child of our host.
-     * @param alpha     The alpha at which to Dim.
+     * @param t          A transaction in which to apply the Dim.
+     * @param container  The container which to dim below. Should be a child of our host.
+     * @param alpha      The alpha at which to Dim.
+     * @param blurRadius The amount of blur added to the Dim.
      */
 
-    void dimBelow(SurfaceControl.Transaction t, WindowContainer container, float alpha) {
-        dim(t, container, -1, alpha);
+    void dimBelow(SurfaceControl.Transaction t, WindowContainer container, float alpha,
+                  int blurRadius) {
+        dim(t, container, -1, alpha, blurRadius);
     }
 
     /**

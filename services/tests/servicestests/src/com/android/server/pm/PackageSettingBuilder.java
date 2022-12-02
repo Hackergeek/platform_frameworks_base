@@ -16,21 +16,21 @@
 
 package com.android.server.pm;
 
-import android.content.pm.PackageParser;
-import android.content.pm.PackageUserState;
-import android.util.ArraySet;
+import android.content.pm.SigningDetails;
 import android.util.SparseArray;
 
 import com.android.server.pm.parsing.pkg.AndroidPackage;
+import com.android.server.pm.pkg.PackageUserStateImpl;
 
 import java.io.File;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 
 public class PackageSettingBuilder {
     private String mName;
     private String mRealName;
     private String mCodePath;
-    private String mResourcePath;
     private String mLegacyNativeLibraryPathString;
     private String mPrimaryCpuAbiString;
     private String mSecondaryCpuAbiString;
@@ -39,15 +39,14 @@ public class PackageSettingBuilder {
     private int mPkgFlags;
     private int mPrivateFlags;
     private int mSharedUserId;
-    private String[] mUsesStaticLibraries;
-    private long[] mUsesStaticLibrariesVersions;
-    private Map<String, ArraySet<String>> mMimeGroups;
     private String mVolumeUuid;
-    private SparseArray<PackageUserState> mUserStates = new SparseArray<>();
-    private AndroidPackage mPkg;
     private int mAppId;
+    private SparseArray<PackageUserStateImpl> mUserStates = new SparseArray<>();
+    private AndroidPackage mPkg;
     private InstallSource mInstallSource;
-    private PackageParser.SigningDetails mSigningDetails;
+    private Map<String, Set<String>> mMimeGroups;
+    private SigningDetails mSigningDetails;
+    private UUID mDomainSetId = UUID.randomUUID();
 
     public PackageSettingBuilder setPackage(AndroidPackage pkg) {
         this.mPkg = pkg;
@@ -71,11 +70,6 @@ public class PackageSettingBuilder {
 
     public PackageSettingBuilder setCodePath(String codePath) {
         this.mCodePath = codePath;
-        return this;
-    }
-
-    public PackageSettingBuilder setResourcePath(String resourcePath) {
-        this.mResourcePath = resourcePath;
         return this;
     }
 
@@ -120,18 +114,7 @@ public class PackageSettingBuilder {
         return this;
     }
 
-    public PackageSettingBuilder setUsesStaticLibraries(String[] usesStaticLibraries) {
-        this.mUsesStaticLibraries = usesStaticLibraries;
-        return this;
-    }
-
-    public PackageSettingBuilder setUsesStaticLibrariesVersions(
-            long[] usesStaticLibrariesVersions) {
-        this.mUsesStaticLibrariesVersions = usesStaticLibrariesVersions;
-        return this;
-    }
-
-    public PackageSettingBuilder setMimeGroups(Map<String, ArraySet<String>> mimeGroups) {
+    public PackageSettingBuilder setMimeGroups(Map<String, Set<String>> mimeGroups) {
         this.mMimeGroups = mimeGroups;
         return this;
     }
@@ -143,9 +126,17 @@ public class PackageSettingBuilder {
 
     public PackageSettingBuilder setInstantAppUserState(int userId, boolean isInstant) {
         if (mUserStates.indexOfKey(userId) < 0) {
-            mUserStates.put(userId, new PackageUserState());
+            mUserStates.put(userId, new PackageUserStateImpl());
         }
-        mUserStates.get(userId).instantApp = isInstant;
+        mUserStates.get(userId).setInstantApp(isInstant);
+        return this;
+    }
+
+    public PackageSettingBuilder setInstallState(int userId, boolean installed) {
+        if (mUserStates.indexOfKey(userId) < 0) {
+            mUserStates.put(userId, new PackageUserStateImpl());
+        }
+        mUserStates.get(userId).setInstalled(installed);
         return this;
     }
 
@@ -155,30 +146,35 @@ public class PackageSettingBuilder {
     }
 
     public PackageSettingBuilder setSigningDetails(
-            PackageParser.SigningDetails signingDetails) {
+            SigningDetails signingDetails) {
         mSigningDetails = signingDetails;
+        return this;
+    }
+
+    public PackageSettingBuilder setDomainSetId(UUID domainSetId) {
+        mDomainSetId = domainSetId;
         return this;
     }
 
     public PackageSetting build() {
         final PackageSetting packageSetting = new PackageSetting(mName, mRealName,
-                new File(mCodePath), new File(mResourcePath),
-                mLegacyNativeLibraryPathString, mPrimaryCpuAbiString, mSecondaryCpuAbiString,
-                mCpuAbiOverrideString, mPVersionCode, mPkgFlags, mPrivateFlags, mSharedUserId,
-                mUsesStaticLibraries, mUsesStaticLibrariesVersions, mMimeGroups);
-        packageSetting.signatures = mSigningDetails != null
+                new File(mCodePath), mLegacyNativeLibraryPathString, mPrimaryCpuAbiString,
+                mSecondaryCpuAbiString, mCpuAbiOverrideString, mPVersionCode, mPkgFlags,
+                mPrivateFlags, mSharedUserId, null /* usesSdkLibraries */,
+                null /* usesSdkLibrariesVersions */, null /* usesStaticLibraries */,
+                null  /* usesStaticLibrariesVersions */, mMimeGroups, mDomainSetId);
+        packageSetting.setSignatures(mSigningDetails != null
                 ? new PackageSignatures(mSigningDetails)
-                : new PackageSignatures();
-        packageSetting.pkg = mPkg;
-        packageSetting.appId = mAppId;
-        packageSetting.volumeUuid = this.mVolumeUuid;
+                : new PackageSignatures());
+        packageSetting.setPkg(mPkg);
+        packageSetting.setAppId(mAppId);
+        packageSetting.setVolumeUuid(this.mVolumeUuid);
         if (mInstallSource != null) {
-            packageSetting.installSource = mInstallSource;
+            packageSetting.setInstallSource(mInstallSource);
         }
         for (int i = 0; i < mUserStates.size(); i++) {
             packageSetting.setUserState(mUserStates.keyAt(i), mUserStates.valueAt(i));
         }
         return packageSetting;
-
     }
 }

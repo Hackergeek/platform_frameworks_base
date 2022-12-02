@@ -19,7 +19,6 @@ package android.service.contentcapture;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.app.assist.AssistContent;
 import android.app.assist.AssistStructure;
 import android.os.Bundle;
@@ -32,7 +31,6 @@ import android.os.Parcelable;
  * @hide
  */
 @SystemApi
-@TestApi
 public final class SnapshotData implements Parcelable {
 
     private final @NonNull Bundle mAssistData;
@@ -53,8 +51,8 @@ public final class SnapshotData implements Parcelable {
 
     SnapshotData(@NonNull Parcel parcel) {
         mAssistData = parcel.readBundle();
-        mAssistStructure = parcel.readParcelable(null);
-        mAssistContent = parcel.readParcelable(null);
+        mAssistStructure = parcel.readParcelable(null, android.app.assist.AssistStructure.class);
+        mAssistContent = parcel.readParcelable(null, android.app.assist.AssistContent.class);
     }
 
     /**

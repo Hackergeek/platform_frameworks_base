@@ -17,6 +17,7 @@
 <!-- Extends FrameLayout -->
 <com.android.systemui.statusbar.NotificationShelf
     xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/notificationShelf"
     android:layout_width="match_parent"
     android:layout_height="@dimen/notification_shelf_height"
     android:focusable="true"
@@ -25,10 +26,6 @@
 
     <com.android.systemui.statusbar.notification.row.NotificationBackgroundView
         android:id="@+id/backgroundNormal"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent" />
-    <com.android.systemui.statusbar.notification.row.NotificationBackgroundView
-        android:id="@+id/backgroundDimmed"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
     <com.android.systemui.statusbar.phone.NotificationIconContainer

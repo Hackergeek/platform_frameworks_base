@@ -18,36 +18,42 @@ package com.android.systemui.statusbar.notification.collection.coordinator;
 
 import static com.android.systemui.statusbar.notification.stack.NotificationChildrenContainer.NUMBER_OF_CHILDREN_WHEN_CHILDREN_EXPANDED;
 
+import static java.util.Objects.requireNonNull;
+
 import android.annotation.IntDef;
 import android.os.RemoteException;
 import android.service.notification.StatusBarNotification;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.statusbar.IStatusBarService;
 import com.android.systemui.statusbar.notification.collection.GroupEntry;
 import com.android.systemui.statusbar.notification.collection.ListEntry;
-import com.android.systemui.statusbar.notification.collection.NotifInflaterImpl;
 import com.android.systemui.statusbar.notification.collection.NotifPipeline;
-import com.android.systemui.statusbar.notification.collection.NotifViewBarn;
 import com.android.systemui.statusbar.notification.collection.NotificationEntry;
 import com.android.systemui.statusbar.notification.collection.ShadeListBuilder;
+import com.android.systemui.statusbar.notification.collection.coordinator.dagger.CoordinatorScope;
+import com.android.systemui.statusbar.notification.collection.inflation.BindEventManagerImpl;
 import com.android.systemui.statusbar.notification.collection.inflation.NotifInflater;
-import com.android.systemui.statusbar.notification.collection.listbuilder.OnBeforeFinalizeFilterListener;
+import com.android.systemui.statusbar.notification.collection.inflation.NotifUiAdjustment;
+import com.android.systemui.statusbar.notification.collection.inflation.NotifUiAdjustmentProvider;
 import com.android.systemui.statusbar.notification.collection.listbuilder.pluggable.NotifFilter;
 import com.android.systemui.statusbar.notification.collection.notifcollection.NotifCollectionListener;
+import com.android.systemui.statusbar.notification.collection.render.NotifViewBarn;
+import com.android.systemui.statusbar.notification.collection.render.NotifViewController;
 import com.android.systemui.statusbar.notification.row.NotifInflationErrorManager;
+import com.android.systemui.statusbar.notification.row.NotifInflationErrorManager.NotifInflationErrorListener;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
 
 import javax.inject.Inject;
-import javax.inject.Singleton;
 
 /**
  * Kicks off core notification inflation and view rebinding when a notification is added or updated.
@@ -56,7 +62,7 @@ import javax.inject.Singleton;
  * If a notification was uninflated, this coordinator will filter the notification out from the
  * {@link ShadeListBuilder} until it is inflated.
  */
-@Singleton
+@CoordinatorScope
 public class PreparationCoordinator implements Coordinator {
     private static final String TAG = "PreparationCoordinator";
 
@@ -64,14 +70,24 @@ public class PreparationCoordinator implements Coordinator {
     private final NotifInflater mNotifInflater;
     private final NotifInflationErrorManager mNotifErrorManager;
     private final NotifViewBarn mViewBarn;
-    private final Map<NotificationEntry, Integer> mInflationStates = new ArrayMap<>();
+    private final NotifUiAdjustmentProvider mAdjustmentProvider;
+    private final ArrayMap<NotificationEntry, Integer> mInflationStates = new ArrayMap<>();
+
+    /**
+     * The map of notifications to the NotifUiAdjustment (i.e. parameters) that were calculated
+     * when the inflation started.  If an update of any kind results in the adjustment changing,
+     * then the row must be reinflated.  If the row is being inflated, then the inflation must be
+     * aborted and restarted.
+     */
+    private final ArrayMap<NotificationEntry, NotifUiAdjustment> mInflationAdjustments =
+            new ArrayMap<>();
 
     /**
      * The set of notifications that are currently inflating something. Note that this is
      * separate from inflation state as a view could either be uninflated or inflated and still be
      * inflating something.
      */
-    private final Set<NotificationEntry> mInflatingNotifs = new ArraySet<>();
+    private final ArraySet<NotificationEntry> mInflatingNotifs = new ArraySet<>();
 
     private final IStatusBarService mStatusBarService;
 
@@ -81,38 +97,61 @@ public class PreparationCoordinator implements Coordinator {
      */
     private final int mChildBindCutoff;
 
+    /** How long we can delay a group while waiting for all children to inflate */
+    private final long mMaxGroupInflationDelay;
+    private final BindEventManagerImpl mBindEventManager;
+
     @Inject
     public PreparationCoordinator(
             PreparationCoordinatorLogger logger,
-            NotifInflaterImpl notifInflater,
+            NotifInflater notifInflater,
             NotifInflationErrorManager errorManager,
             NotifViewBarn viewBarn,
-            IStatusBarService service) {
-        this(logger, notifInflater, errorManager, viewBarn, service, CHILD_BIND_CUTOFF);
+            NotifUiAdjustmentProvider adjustmentProvider,
+            IStatusBarService service,
+            BindEventManagerImpl bindEventManager) {
+        this(
+                logger,
+                notifInflater,
+                errorManager,
+                viewBarn,
+                adjustmentProvider,
+                service,
+                bindEventManager,
+                CHILD_BIND_CUTOFF,
+                MAX_GROUP_INFLATION_DELAY);
     }
 
     @VisibleForTesting
     PreparationCoordinator(
             PreparationCoordinatorLogger logger,
-            NotifInflaterImpl notifInflater,
+            NotifInflater notifInflater,
             NotifInflationErrorManager errorManager,
             NotifViewBarn viewBarn,
+            NotifUiAdjustmentProvider adjustmentProvider,
             IStatusBarService service,
-            int childBindCutoff) {
+            BindEventManagerImpl bindEventManager,
+            int childBindCutoff,
+            long maxGroupInflationDelay) {
         mLogger = logger;
         mNotifInflater = notifInflater;
         mNotifErrorManager = errorManager;
-        mNotifErrorManager.addInflationErrorListener(mInflationErrorListener);
         mViewBarn = viewBarn;
+        mAdjustmentProvider = adjustmentProvider;
         mStatusBarService = service;
         mChildBindCutoff = childBindCutoff;
+        mMaxGroupInflationDelay = maxGroupInflationDelay;
+        mBindEventManager = bindEventManager;
     }
 
     @Override
     public void attach(NotifPipeline pipeline) {
+        mNotifErrorManager.addInflationErrorListener(mInflationErrorListener);
+        mAdjustmentProvider.addDirtyListener(mNotifInflatingFilter::invalidateList);
+
         pipeline.addCollectionListener(mNotifCollectionListener);
         // Inflate after grouping/sorting since that affects what views to inflate.
-        pipeline.addOnBeforeFinalizeFilterListener(mOnBeforeFinalizeFilterListener);
+        pipeline.addOnBeforeFinalizeFilterListener(this::inflateAllRequiredViews);
         pipeline.addFinalizeFilter(mNotifInflationErrorFilter);
         pipeline.addFinalizeFilter(mNotifInflatingFilter);
     }
@@ -127,7 +166,6 @@ public class PreparationCoordinator implements Coordinator {
         @Override
         public void onEntryUpdated(NotificationEntry entry) {
             abortInflation(entry, "entryUpdated");
-            mInflatingNotifs.remove(entry);
             @InflationState int state = getInflationState(entry);
             if (state == STATE_INFLATED) {
                 mInflationStates.put(entry, STATE_INFLATED_INVALID);
@@ -145,13 +183,10 @@ public class PreparationCoordinator implements Coordinator {
         @Override
         public void onEntryCleanUp(NotificationEntry entry) {
             mInflationStates.remove(entry);
-            mInflatingNotifs.remove(entry);
             mViewBarn.removeViewForEntry(entry);
+            mInflationAdjustments.remove(entry);
         }
     };
-
-    private final OnBeforeFinalizeFilterListener mOnBeforeFinalizeFilterListener =
-            entries -> inflateAllRequiredViews(entries);
 
     private final NotifFilter mNotifInflationErrorFilter = new NotifFilter(
             TAG + "InflationError") {
@@ -165,17 +200,32 @@ public class PreparationCoordinator implements Coordinator {
     };
 
     private final NotifFilter mNotifInflatingFilter = new NotifFilter(TAG + "Inflating") {
+        private final Map<GroupEntry, Boolean> mIsDelayedGroupCache = new ArrayMap<>();
+
         /**
-         * Filters out notifications that aren't inflated
+         * Filters out notifications that either (a) aren't inflated or (b) are part of a group
+         * that isn't completely inflated yet
          */
         @Override
         public boolean shouldFilterOut(NotificationEntry entry, long now) {
-            return !isInflated(entry);
+            final GroupEntry parent = requireNonNull(entry.getParent());
+            Boolean isMemberOfDelayedGroup = mIsDelayedGroupCache.get(parent);
+            if (isMemberOfDelayedGroup == null) {
+                isMemberOfDelayedGroup = shouldWaitForGroupToInflate(parent, now);
+                mIsDelayedGroupCache.put(parent, isMemberOfDelayedGroup);
+            }
+
+            return !isInflated(entry) || isMemberOfDelayedGroup;
+        }
+
+        @Override
+        public void onCleanup() {
+            mIsDelayedGroupCache.clear();
         }
     };
 
-    private final NotifInflationErrorManager.NotifInflationErrorListener mInflationErrorListener =
-            new NotifInflationErrorManager.NotifInflationErrorListener() {
+    private final NotifInflationErrorListener mInflationErrorListener =
+            new NotifInflationErrorListener() {
         @Override
         public void onNotifInflationError(NotificationEntry entry, Exception e) {
             mViewBarn.removeViewForEntry(entry);
@@ -191,8 +241,9 @@ public class PreparationCoordinator implements Coordinator {
                         sbn.getUid(),
                         sbn.getInitialPid(),
                         e.getMessage(),
-                        sbn.getUserId());
+                        sbn.getUser().getIdentifier());
             } catch (RemoteException ex) {
+                // System server is dead, nothing to do about that
             }
             mNotifInflationErrorFilter.invalidateList();
         }
@@ -208,7 +259,6 @@ public class PreparationCoordinator implements Coordinator {
             ListEntry entry = entries.get(i);
             if (entry instanceof GroupEntry) {
                 GroupEntry groupEntry = (GroupEntry) entry;
-                groupEntry.setUntruncatedChildCount(groupEntry.getChildren().size());
                 inflateRequiredGroupViews(groupEntry);
             } else {
                 NotificationEntry notifEntry = (NotificationEntry) entry;
@@ -240,53 +290,93 @@ public class PreparationCoordinator implements Coordinator {
     }
 
     private void inflateRequiredNotifViews(NotificationEntry entry) {
+        NotifUiAdjustment newAdjustment = mAdjustmentProvider.calculateAdjustment(entry);
         if (mInflatingNotifs.contains(entry)) {
             // Already inflating this entry
+            String errorIfNoOldAdjustment = "Inflating notification has no adjustments";
+            if (needToReinflate(entry, newAdjustment, errorIfNoOldAdjustment)) {
+                inflateEntry(entry, newAdjustment, "adjustment changed while inflating");
+            }
             return;
         }
         @InflationState int state = mInflationStates.get(entry);
         switch (state) {
             case STATE_UNINFLATED:
-                inflateEntry(entry, "entryAdded");
+                inflateEntry(entry, newAdjustment, "entryAdded");
                 break;
             case STATE_INFLATED_INVALID:
-                rebind(entry, "entryUpdated");
+                rebind(entry, newAdjustment, "entryUpdated");
                 break;
             case STATE_INFLATED:
+                String errorIfNoOldAdjustment = "Fully inflated notification has no adjustments";
+                if (needToReinflate(entry, newAdjustment, errorIfNoOldAdjustment)) {
+                    rebind(entry, newAdjustment, "adjustment changed after inflated");
+                }
+                break;
             case STATE_ERROR:
+                if (needToReinflate(entry, newAdjustment, null)) {
+                    inflateEntry(entry, newAdjustment, "adjustment changed after error");
+                }
+                break;
             default:
                 // Nothing to do.
         }
     }
 
-    private void inflateEntry(NotificationEntry entry, String reason) {
-        abortInflation(entry, reason);
-        mInflatingNotifs.add(entry);
-        mNotifInflater.inflateViews(entry, this::onInflationFinished);
+    private boolean needToReinflate(@NonNull NotificationEntry entry,
+            @NonNull NotifUiAdjustment newAdjustment, @Nullable String oldAdjustmentMissingError) {
+        NotifUiAdjustment oldAdjustment = mInflationAdjustments.get(entry);
+        if (oldAdjustment == null) {
+            if (oldAdjustmentMissingError == null) {
+                return true;
+            } else {
+                throw new IllegalStateException(oldAdjustmentMissingError);
+            }
+        }
+        return NotifUiAdjustment.needReinflate(oldAdjustment, newAdjustment);
     }
 
-    private void rebind(NotificationEntry entry, String reason) {
+    private void inflateEntry(NotificationEntry entry,
+            NotifUiAdjustment newAdjustment,
+            String reason) {
+        abortInflation(entry, reason);
+        mInflationAdjustments.put(entry, newAdjustment);
         mInflatingNotifs.add(entry);
-        mNotifInflater.rebindViews(entry, this::onInflationFinished);
+        NotifInflater.Params params = getInflaterParams(newAdjustment, reason);
+        mNotifInflater.inflateViews(entry, params, this::onInflationFinished);
+    }
+
+    private void rebind(NotificationEntry entry,
+            NotifUiAdjustment newAdjustment,
+            String reason) {
+        mInflationAdjustments.put(entry, newAdjustment);
+        mInflatingNotifs.add(entry);
+        NotifInflater.Params params = getInflaterParams(newAdjustment, reason);
+        mNotifInflater.rebindViews(entry, params, this::onInflationFinished);
+    }
+
+    NotifInflater.Params getInflaterParams(NotifUiAdjustment adjustment, String reason) {
+        return new NotifInflater.Params(adjustment.isMinimized(), reason);
     }
 
     private void abortInflation(NotificationEntry entry, String reason) {
         mLogger.logInflationAborted(entry.getKey(), reason);
-        entry.abortTask();
+        mNotifInflater.abortInflation(entry);
         mInflatingNotifs.remove(entry);
     }
 
-    private void onInflationFinished(NotificationEntry entry) {
+    private void onInflationFinished(NotificationEntry entry, NotifViewController controller) {
         mLogger.logNotifInflated(entry.getKey());
         mInflatingNotifs.remove(entry);
-        mViewBarn.registerViewForEntry(entry, entry.getRow());
+        mViewBarn.registerViewForEntry(entry, controller);
         mInflationStates.put(entry, STATE_INFLATED);
+        mBindEventManager.notifyViewBound(entry);
         mNotifInflatingFilter.invalidateList();
     }
 
     private void freeNotifViews(NotificationEntry entry) {
         mViewBarn.removeViewForEntry(entry);
-        entry.setRow(null);
+        // TODO: clear the entry's row here, or even better, stop setting the row on the entry!
         mInflationStates.put(entry, STATE_UNINFLATED);
     }
 
@@ -297,9 +387,35 @@ public class PreparationCoordinator implements Coordinator {
 
     private @InflationState int getInflationState(NotificationEntry entry) {
         Integer stateObj = mInflationStates.get(entry);
-        Objects.requireNonNull(stateObj,
+        requireNonNull(stateObj,
                 "Asking state of a notification preparation coordinator doesn't know about");
         return stateObj;
+    }
+
+    private boolean shouldWaitForGroupToInflate(GroupEntry group, long now) {
+        if (group == GroupEntry.ROOT_ENTRY || group.wasAttachedInPreviousPass()) {
+            return false;
+        }
+        if (isBeyondGroupInitializationWindow(group, now)) {
+            mLogger.logGroupInflationTookTooLong(group.getKey());
+            return false;
+        }
+        if (mInflatingNotifs.contains(group.getSummary())) {
+            mLogger.logDelayingGroupRelease(group.getKey(), group.getSummary().getKey());
+            return true;
+        }
+        for (NotificationEntry child : group.getChildren()) {
+            if (mInflatingNotifs.contains(child) && !child.wasAttachedInPreviousPass()) {
+                mLogger.logDelayingGroupRelease(group.getKey(), child.getKey());
+                return true;
+            }
+        }
+        mLogger.logDoneWaitingForGroupInflation(group.getKey());
+        return false;
+    }
+
+    private boolean isBeyondGroupInitializationWindow(GroupEntry entry, long now) {
+        return now - entry.getCreationTime() > mMaxGroupInflationDelay;
     }
 
     @Retention(RetentionPolicy.SOURCE)
@@ -327,6 +443,8 @@ public class PreparationCoordinator implements Coordinator {
      * dynamically inflate a row.
      */
     private static final int EXTRA_VIEW_BUFFER_COUNT = 1;
+
+    private static final long MAX_GROUP_INFLATION_DELAY = 500;
 
     private static final int CHILD_BIND_CUTOFF =
             NUMBER_OF_CHILDREN_WHEN_CHILDREN_EXPANDED + EXTRA_VIEW_BUFFER_COUNT;

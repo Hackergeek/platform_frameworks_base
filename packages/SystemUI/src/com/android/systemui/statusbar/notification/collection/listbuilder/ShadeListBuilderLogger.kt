@@ -25,7 +25,6 @@ import com.android.systemui.statusbar.notification.collection.GroupEntry
 import com.android.systemui.statusbar.notification.collection.ListEntry
 import com.android.systemui.statusbar.notification.collection.listbuilder.pluggable.NotifFilter
 import com.android.systemui.statusbar.notification.collection.listbuilder.pluggable.NotifPromoter
-import com.android.systemui.statusbar.notification.collection.listbuilder.pluggable.NotifSection
 import javax.inject.Inject
 
 class ShadeListBuilderLogger @Inject constructor(
@@ -38,13 +37,22 @@ class ShadeListBuilderLogger @Inject constructor(
         })
     }
 
-    fun logEndBuildList(iterationCount: Int, topLevelEntries: Int, numChildren: Int) {
+    fun logEndBuildList(buildId: Int, topLevelEntries: Int, numChildren: Int) {
         buffer.log(TAG, INFO, {
-            long1 = iterationCount.toLong()
+            long1 = buildId.toLong()
             int1 = topLevelEntries
             int2 = numChildren
         }, {
             "(Build $long1) Build complete ($int1 top-level entries, $int2 children)"
+        })
+    }
+
+    fun logPreRenderInvalidated(filterName: String, pipelineState: Int) {
+        buffer.log(TAG, DEBUG, {
+            str1 = filterName
+            int1 = pipelineState
+        }, {
+            """Pre-render Invalidator "$str1" invalidated; pipeline state is $int1"""
         })
     }
 
@@ -54,6 +62,15 @@ class ShadeListBuilderLogger @Inject constructor(
             int1 = pipelineState
         }, {
             """Pre-group NotifFilter "$str1" invalidated; pipeline state is $int1"""
+        })
+    }
+
+    fun logReorderingAllowedInvalidated(name: String, pipelineState: Int) {
+        buffer.log(TAG, DEBUG, {
+            str1 = name
+            int1 = pipelineState
+        }, {
+            """ReorderingNowAllowed "$str1" invalidated; pipeline state is $int1"""
         })
     }
 
@@ -95,21 +112,21 @@ class ShadeListBuilderLogger @Inject constructor(
 
     fun logDuplicateSummary(buildId: Int, groupKey: String, existingKey: String, newKey: String) {
         buffer.log(TAG, WARNING, {
-            int1 = buildId
+            long1 = buildId.toLong()
             str1 = groupKey
             str2 = existingKey
             str3 = newKey
         }, {
-            """(Build $int1) Duplicate summary for group "$str1": "$str2" vs. "$str3""""
+            """(Build $long1) Duplicate summary for group "$str1": "$str2" vs. "$str3""""
         })
     }
 
     fun logDuplicateTopLevelKey(buildId: Int, topLevelKey: String) {
         buffer.log(TAG, WARNING, {
-            int1 = buildId
+            long1 = buildId.toLong()
             str1 = topLevelKey
         }, {
-            "(Build $int1) Duplicate top-level key: $str1"
+            "(Build $long1) Duplicate top-level key: $str1"
         })
     }
 
@@ -120,34 +137,79 @@ class ShadeListBuilderLogger @Inject constructor(
         newParent: GroupEntry?
     ) {
         buffer.log(TAG, INFO, {
-            int1 = buildId
+            long1 = buildId.toLong()
             str1 = key
             str2 = prevParent?.key
             str3 = newParent?.key
         }, {
-            if (str2 == null && str3 != null) {
-                "(Build $int1) ATTACHED {$str1}"
+
+            val action = if (str2 == null && str3 != null) {
+                "ATTACHED"
             } else if (str2 != null && str3 == null) {
-                "(Build $int1) DETACHED {$str1}"
+                "DETACHED"
+            } else if (str2 == null && str3 == null) {
+                "MODIFIED (DETACHED)"
             } else {
-                "(Build $int1) MODIFIED {$str1}"
+                "MODIFIED (ATTACHED)"
             }
+
+            "(Build $long1) $action {$str1}"
         })
     }
 
     fun logParentChanged(buildId: Int, prevParent: GroupEntry?, newParent: GroupEntry?) {
         buffer.log(TAG, INFO, {
-            int1 = buildId
+            long1 = buildId.toLong()
             str1 = prevParent?.key
             str2 = newParent?.key
         }, {
             if (str1 == null && str2 != null) {
-                "(Build $int1)     Parent is {$str2}"
+                "(Build $long1)     Parent is {$str2}"
             } else if (str1 != null && str2 == null) {
-                "(Build $int1)     Parent was {$str1}"
+                "(Build $long1)     Parent was {$str1}"
             } else {
-                "(Build $int1)     Reparent: {$str2} -> {$str3}"
+                "(Build $long1)     Reparent: {$str1} -> {$str2}"
             }
+        })
+    }
+
+    fun logParentChangeSuppressed(
+        buildId: Int,
+        suppressedParent: GroupEntry?,
+        keepingParent: GroupEntry?
+    ) {
+        buffer.log(TAG, INFO, {
+            long1 = buildId.toLong()
+            str1 = suppressedParent?.key
+            str2 = keepingParent?.key
+        }, {
+            "(Build $long1)     Change of parent to '$str1' suppressed; keeping parent '$str2'"
+        })
+    }
+
+    fun logGroupPruningSuppressed(
+        buildId: Int,
+        keepingParent: GroupEntry?
+    ) {
+        buffer.log(TAG, INFO, {
+            long1 = buildId.toLong()
+            str1 = keepingParent?.key
+        }, {
+            "(Build $long1)     Group pruning suppressed; keeping parent '$str1'"
+        })
+    }
+
+    fun logPrunedReasonChanged(
+        buildId: Int,
+        prevReason: String?,
+        newReason: String?
+    ) {
+        buffer.log(TAG, INFO, {
+            long1 = buildId.toLong()
+            str1 = prevReason
+            str2 = newReason
+        }, {
+            "(Build $long1)     Pruned reason changed: $str1 -> $str2"
         })
     }
 
@@ -157,11 +219,11 @@ class ShadeListBuilderLogger @Inject constructor(
         newFilter: NotifFilter?
     ) {
         buffer.log(TAG, INFO, {
-            int1 = buildId
+            long1 = buildId.toLong()
             str1 = prevFilter?.name
             str2 = newFilter?.name
         }, {
-            "(Build $int1)     Filter changed: $str1 -> $str2"
+            "(Build $long1)     Filter changed: $str1 -> $str2"
         })
     }
 
@@ -171,33 +233,43 @@ class ShadeListBuilderLogger @Inject constructor(
         newPromoter: NotifPromoter?
     ) {
         buffer.log(TAG, INFO, {
-            int1 = buildId
+            long1 = buildId.toLong()
             str1 = prevPromoter?.name
             str2 = newPromoter?.name
         }, {
-            "(Build $int1)     Promoter changed: $str1 -> $str2"
+            "(Build $long1)     Promoter changed: $str1 -> $str2"
         })
     }
 
     fun logSectionChanged(
         buildId: Int,
         prevSection: NotifSection?,
-        prevIndex: Int,
-        newSection: NotifSection?,
-        newIndex: Int
+        newSection: NotifSection?
     ) {
         buffer.log(TAG, INFO, {
             long1 = buildId.toLong()
-            str1 = prevSection?.name
-            int1 = prevIndex
-            str2 = newSection?.name
-            int2 = newIndex
+            str1 = prevSection?.label
+            str2 = newSection?.label
         }, {
             if (str1 == null) {
-                "(Build $long1)     Section assigned: '$str2' (#$int2)"
+                "(Build $long1)     Section assigned: $str2"
             } else {
-                "(Build $long1)     Section changed: '$str1' (#$int1) -> '$str2' (#$int2)"
+                "(Build $long1)     Section changed: $str1 -> $str2"
             }
+        })
+    }
+
+    fun logSectionChangeSuppressed(
+        buildId: Int,
+        suppressedSection: NotifSection?,
+        assignedSection: NotifSection?
+    ) {
+        buffer.log(TAG, INFO, {
+            long1 = buildId.toLong()
+            str1 = suppressedSection?.label
+            str2 = assignedSection?.label
+        }, {
+            "(Build $long1)     Suppressing section change to $str1 (staying at $str2)"
         })
     }
 
@@ -234,6 +306,9 @@ class ShadeListBuilderLogger @Inject constructor(
             }
         }
     }
+
+    fun logPipelineRunSuppressed() =
+            buffer.log(TAG, INFO, {}) { "Suppressing pipeline run during animation." }
 }
 
 private const val TAG = "ShadeListBuilder"

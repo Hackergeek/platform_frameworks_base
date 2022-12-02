@@ -43,8 +43,8 @@ inline infix fun Int.times(action: () -> Unit) {
  * cccc dd
  */
 fun Iterable<Pair<String, String>>.columnize(separator: String = " | "): String {
-    val col1w = map { (a, _) -> a.length }.max()!!
-    val col2w = map { (_, b) -> b.length }.max()!!
+    val col1w = map { (a, _) -> a.length }.maxOrNull()!!
+    val col2w = map { (_, b) -> b.length }.maxOrNull()!!
     return map { it.first.padEnd(col1w) + separator + it.second.padEnd(col2w) }.joinToString("\n")
 }
 
@@ -103,6 +103,10 @@ val TypeDeclaration<*>.nestedTypes get() = childNodes.filterIsInstance<TypeDecla
 val TypeDeclaration<*>.nestedDataClasses get()
         = nestedTypes.filterIsInstance<ClassOrInterfaceDeclaration>()
             .filter { it.annotations.any { it.nameAsString.endsWith("DataClass") } }
+val TypeDeclaration<*>.nestedNonDataClasses get()
+        = nestedTypes.filterIsInstance<ClassOrInterfaceDeclaration>()
+            .filter { it.annotations.none { it.nameAsString.endsWith("DataClass") } }
+            .filterNot { it.isInterface }
 val TypeDeclaration<*>.startLine get() = range.get()!!.begin.line
 
 inline fun <T> List<T>.forEachSequentialPair(action: (T, T?) -> Unit) {

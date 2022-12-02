@@ -38,6 +38,8 @@ import android.view.autofill.AutofillId;
 import android.view.autofill.AutofillManager;
 import android.view.autofill.AutofillValue;
 
+import com.android.internal.os.IResultReceiver;
+
 /**
  * An {@code AutofillService} is a service used to automatically fill the contents of the screen
  * on behalf of a given user - for more information about autofill, read
@@ -463,7 +465,7 @@ import android.view.autofill.AutofillValue;
  * <p>Prior to Android {@link android.os.Build.VERSION_CODES#P}, the metrics covered just the
  * scenarios where the service knew how to autofill an activity, but Android
  * {@link android.os.Build.VERSION_CODES#P} introduced a new mechanism called field classification,
- * which allows the service to dinamically classify the meaning of fields based on the existing user
+ * which allows the service to dynamically classify the meaning of fields based on the existing user
  * data known by the service.
  *
  * <p>Typically, field classification can be used to detect fields that can be autofilled with
@@ -575,6 +577,28 @@ public abstract class AutofillService extends Service {
      */
     public static final String SERVICE_META_DATA = "android.autofill";
 
+    /**
+     * Name of the {@link FillResponse} extra used to return a delayed fill response.
+     *
+     * <p>Please see {@link FillRequest#getDelayedFillIntentSender()} on how to send a delayed
+     * fill response to framework.</p>
+     */
+    public static final String EXTRA_FILL_RESPONSE = "android.service.autofill.extra.FILL_RESPONSE";
+
+    /**
+     * Name of the {@link IResultReceiver} extra used to return the primary result of a request.
+     *
+     * @hide
+     */
+    public static final String EXTRA_RESULT = "result";
+
+    /**
+     * Name of the {@link IResultReceiver} extra used to return the error reason of a request.
+     *
+     * @hide
+     */
+    public static final String EXTRA_ERROR = "error";
+
     private final IAutoFillService mInterface = new IAutoFillService.Stub() {
         @Override
         public void onConnectedStateChanged(boolean connected) {
@@ -602,6 +626,14 @@ public abstract class AutofillService extends Service {
             mHandler.sendMessage(obtainMessage(
                     AutofillService::onSaveRequest,
                     AutofillService.this, request, new SaveCallback(callback)));
+        }
+
+        @Override
+        public void onSavedPasswordCountRequest(IResultReceiver receiver) {
+            mHandler.sendMessage(obtainMessage(
+                    AutofillService::onSavedDatasetsInfoRequest,
+                    AutofillService.this,
+                    new SavedDatasetsInfoCallbackImpl(receiver, SavedDatasetsInfo.TYPE_PASSWORDS)));
         }
     };
 
@@ -671,6 +703,19 @@ public abstract class AutofillService extends Service {
      */
     public abstract void onSaveRequest(@NonNull SaveRequest request,
             @NonNull SaveCallback callback);
+
+    /**
+     * Called from system settings to display information about the datasets the user saved to this
+     * service.
+     *
+     * <p>There is no timeout for the request, but it's recommended to return the result within a
+     * few seconds, or the user may navigate away from the activity that would display the result.
+     *
+     * @param callback callback for responding to the request
+     */
+    public void onSavedDatasetsInfoRequest(@NonNull SavedDatasetsInfoCallback callback) {
+        callback.onError(SavedDatasetsInfoCallback.ERROR_UNSUPPORTED);
+    }
 
     /**
      * Called when the Android system disconnects from the service.

@@ -30,10 +30,12 @@
 #include <nativehelper/ScopedPrimitiveArray.h>
 #include <nativehelper/ScopedStringChars.h>
 
+#include "FontUtils.h"
 #include "Bitmap.h"
 #include "SkGraphics.h"
 #include "SkRegion.h"
 #include "SkVertices.h"
+#include "SkRRect.h"
 
 namespace minikin {
 class MeasuredText;
@@ -92,16 +94,14 @@ static jint save(CRITICAL_JNI_PARAMS_COMMA jlong canvasHandle, jint flagsHandle)
 }
 
 static jint saveLayer(CRITICAL_JNI_PARAMS_COMMA jlong canvasHandle, jfloat l, jfloat t,
-                      jfloat r, jfloat b, jlong paintHandle, jint flagsHandle) {
+                      jfloat r, jfloat b, jlong paintHandle) {
     Paint* paint  = reinterpret_cast<Paint*>(paintHandle);
-    SaveFlags::Flags flags = static_cast<SaveFlags::Flags>(flagsHandle);
-    return static_cast<jint>(get_canvas(canvasHandle)->saveLayer(l, t, r, b, paint, flags));
+    return static_cast<jint>(get_canvas(canvasHandle)->saveLayer(l, t, r, b, paint));
 }
 
 static jint saveLayerAlpha(CRITICAL_JNI_PARAMS_COMMA jlong canvasHandle, jfloat l, jfloat t,
-                           jfloat r, jfloat b, jint alpha, jint flagsHandle) {
-    SaveFlags::Flags flags = static_cast<SaveFlags::Flags>(flagsHandle);
-    return static_cast<jint>(get_canvas(canvasHandle)->saveLayerAlpha(l, t, r, b, alpha, flags));
+                           jfloat r, jfloat b, jint alpha) {
+    return static_cast<jint>(get_canvas(canvasHandle)->saveLayerAlpha(l, t, r, b, alpha));
 }
 
 static jint saveUnclippedLayer(CRITICAL_JNI_PARAMS_COMMA jlong canvasHandle, jint l, jint t, jint r, jint b) {
@@ -188,39 +188,57 @@ static jboolean quickRejectPath(CRITICAL_JNI_PARAMS_COMMA jlong canvasHandle, jl
     return result ? JNI_TRUE : JNI_FALSE;
 }
 
-// SkRegion::Op and SkClipOp are numerically identical, so we can freely cast
-// from one to the other (though SkClipOp is destined to become a strict subset)
+// SkClipOp is a strict subset of SkRegion::Op and is castable back and forth for their
+// shared operations (intersect and difference).
 static_assert(SkRegion::kDifference_Op == static_cast<SkRegion::Op>(SkClipOp::kDifference), "");
 static_assert(SkRegion::kIntersect_Op == static_cast<SkRegion::Op>(SkClipOp::kIntersect), "");
-static_assert(SkRegion::kUnion_Op == static_cast<SkRegion::Op>(SkClipOp::kUnion_deprecated), "");
-static_assert(SkRegion::kXOR_Op == static_cast<SkRegion::Op>(SkClipOp::kXOR_deprecated), "");
-static_assert(SkRegion::kReverseDifference_Op == static_cast<SkRegion::Op>(SkClipOp::kReverseDifference_deprecated), "");
-static_assert(SkRegion::kReplace_Op == static_cast<SkRegion::Op>(SkClipOp::kReplace_deprecated), "");
-
-static SkClipOp opHandleToClipOp(jint opHandle) {
-    // The opHandle is defined in Canvas.java to be Region::Op
-    SkRegion::Op rgnOp = static_cast<SkRegion::Op>(opHandle);
-
-    // In the future, when we no longer support the wide range of ops (e.g. Union, Xor)
-    // this function can perform a range check and throw an unsupported-exception.
-    // e.g. if (rgnOp != kIntersect && rgnOp != kDifference) throw...
-
-    // Skia now takes a different type, SkClipOp, as the parameter to clipping calls
-    // This type is binary compatible with SkRegion::Op, so a static_cast<> is safe.
-    return static_cast<SkClipOp>(rgnOp);
-}
 
 static jboolean clipRect(CRITICAL_JNI_PARAMS_COMMA jlong canvasHandle, jfloat l, jfloat t,
                          jfloat r, jfloat b, jint opHandle) {
-    bool nonEmptyClip = get_canvas(canvasHandle)->clipRect(l, t, r, b,
-            opHandleToClipOp(opHandle));
+    // The opHandle is defined in Canvas.java to be Region::Op
+    SkRegion::Op rgnOp = static_cast<SkRegion::Op>(opHandle);
+    bool nonEmptyClip;
+    switch (rgnOp) {
+        case SkRegion::Op::kIntersect_Op:
+        case SkRegion::Op::kDifference_Op:
+            // Intersect and difference are supported clip operations
+            nonEmptyClip =
+                    get_canvas(canvasHandle)->clipRect(l, t, r, b, static_cast<SkClipOp>(rgnOp));
+            break;
+        case SkRegion::Op::kReplace_Op:
+            // Replace is emulated to support legacy apps older than P
+            nonEmptyClip = get_canvas(canvasHandle)->replaceClipRect_deprecated(l, t, r, b);
+            break;
+        default:
+            // All other operations would expand the clip and are no longer supported,
+            // so log and skip (to avoid breaking legacy apps).
+            ALOGW("Ignoring unsupported clip operation %d", opHandle);
+            SkRect clipBounds;  // ignored
+            nonEmptyClip = get_canvas(canvasHandle)->getClipBounds(&clipBounds);
+            break;
+    }
     return nonEmptyClip ? JNI_TRUE : JNI_FALSE;
 }
 
 static jboolean clipPath(CRITICAL_JNI_PARAMS_COMMA jlong canvasHandle, jlong pathHandle,
                          jint opHandle) {
+    SkRegion::Op rgnOp = static_cast<SkRegion::Op>(opHandle);
     SkPath* path = reinterpret_cast<SkPath*>(pathHandle);
-    bool nonEmptyClip = get_canvas(canvasHandle)->clipPath(path, opHandleToClipOp(opHandle));
+    bool nonEmptyClip;
+    switch (rgnOp) {
+        case SkRegion::Op::kIntersect_Op:
+        case SkRegion::Op::kDifference_Op:
+            nonEmptyClip = get_canvas(canvasHandle)->clipPath(path, static_cast<SkClipOp>(rgnOp));
+            break;
+        case SkRegion::Op::kReplace_Op:
+            nonEmptyClip = get_canvas(canvasHandle)->replaceClipPath_deprecated(path);
+            break;
+        default:
+            ALOGW("Ignoring unsupported clip operation %d", opHandle);
+            SkRect clipBounds;  // ignored
+            nonEmptyClip = get_canvas(canvasHandle)->getClipBounds(&clipBounds);
+            break;
+    }
     return nonEmptyClip ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -233,7 +251,7 @@ static void drawColorLong(JNIEnv* env, jobject, jlong canvasHandle, jlong colorS
         jlong colorLong, jint modeHandle) {
     SkColor4f color = GraphicsJNI::convertColorLong(colorLong);
     sk_sp<SkColorSpace> cs = GraphicsJNI::getNativeColorSpace(colorSpaceHandle);
-    SkPaint p;
+    Paint p;
     p.setColor4f(color, cs.get());
 
     SkBlendMode mode = static_cast<SkBlendMode>(modeHandle);
@@ -421,7 +439,7 @@ static void drawNinePatch(JNIEnv* env, jobject, jlong canvasHandle, jlong bitmap
         if (paint) {
             filteredPaint = *paint;
         }
-        filteredPaint.setFilterQuality(kLow_SkFilterQuality);
+        filteredPaint.setFilterBitmap(true);
 
         canvas->drawNinePatch(bitmap, *chunk, 0, 0, (right-left)/scale, (bottom-top)/scale,
                 &filteredPaint);
@@ -443,7 +461,7 @@ static void drawBitmap(JNIEnv* env, jobject, jlong canvasHandle, jlong bitmapHan
             if (paint) {
                 filteredPaint = *paint;
             }
-            filteredPaint.setFilterQuality(kLow_SkFilterQuality);
+            filteredPaint.setFilterBitmap(true);
             canvas->drawBitmap(bitmap, left, top, &filteredPaint);
         } else {
             canvas->drawBitmap(bitmap, left, top, paint);
@@ -458,7 +476,7 @@ static void drawBitmap(JNIEnv* env, jobject, jlong canvasHandle, jlong bitmapHan
         if (paint) {
             filteredPaint = *paint;
         }
-        filteredPaint.setFilterQuality(kLow_SkFilterQuality);
+        filteredPaint.setFilterBitmap(true);
 
         canvas->drawBitmap(bitmap, 0, 0, &filteredPaint);
         canvas->restore();
@@ -486,7 +504,7 @@ static void drawBitmapRect(JNIEnv* env, jobject, jlong canvasHandle, jlong bitma
         if (paint) {
             filteredPaint = *paint;
         }
-        filteredPaint.setFilterQuality(kLow_SkFilterQuality);
+        filteredPaint.setFilterBitmap(true);
         canvas->drawBitmap(bitmap, srcLeft, srcTop, srcRight, srcBottom,
                            dstLeft, dstTop, dstRight, dstBottom, &filteredPaint);
     } else {
@@ -538,6 +556,21 @@ static void drawBitmapMesh(JNIEnv* env, jobject, jlong canvasHandle, jlong bitma
     get_canvas(canvasHandle)->drawBitmapMesh(bitmap, meshWidth, meshHeight,
                                              vertA.ptr() + vertIndex*2,
                                              colorA.ptr() + colorIndex, paint);
+}
+
+static void drawGlyphs(JNIEnv* env, jobject, jlong canvasHandle, jintArray glyphIds,
+                       jfloatArray positions, jint glyphOffset, jint positionOffset,
+                       jint glyphCount, jlong fontHandle, jlong paintHandle) {
+    Paint* paint = reinterpret_cast<Paint*>(paintHandle);
+    FontWrapper* font = reinterpret_cast<FontWrapper*>(fontHandle);
+    AutoJavaIntArray glyphIdArray(env, glyphIds);
+    AutoJavaFloatArray positionArray(env, positions);
+    get_canvas(canvasHandle)->drawGlyphs(
+        *font->font.get(),
+        glyphIdArray.ptr() + glyphOffset,
+        positionArray.ptr() + positionOffset,
+        glyphCount,
+        *paint);
 }
 
 static void drawTextChars(JNIEnv* env, jobject, jlong canvasHandle, jcharArray charArray,
@@ -653,6 +686,11 @@ static void setCompatibilityVersion(JNIEnv* env, jobject, jint apiLevel) {
     Canvas::setCompatibilityVersion(apiLevel);
 }
 
+static void punchHole(JNIEnv* env, jobject, jlong canvasPtr, jfloat left, jfloat top, jfloat right,
+        jfloat bottom, jfloat rx, jfloat ry) {
+    auto canvas = reinterpret_cast<Canvas*>(canvasPtr);
+    canvas->punchHole(SkRRect::MakeRectXY(SkRect::MakeLTRB(left, top, right, bottom), rx, ry));
+}
 
 }; // namespace CanvasJNI
 
@@ -672,8 +710,8 @@ static const JNINativeMethod gMethods[] = {
     {"nGetWidth","(J)I", (void*) CanvasJNI::getWidth},
     {"nGetHeight","(J)I", (void*) CanvasJNI::getHeight},
     {"nSave","(JI)I", (void*) CanvasJNI::save},
-    {"nSaveLayer","(JFFFFJI)I", (void*) CanvasJNI::saveLayer},
-    {"nSaveLayerAlpha","(JFFFFII)I", (void*) CanvasJNI::saveLayerAlpha},
+    {"nSaveLayer","(JFFFFJ)I", (void*) CanvasJNI::saveLayer},
+    {"nSaveLayerAlpha","(JFFFFI)I", (void*) CanvasJNI::saveLayerAlpha},
     {"nSaveUnclippedLayer","(JIIII)I", (void*) CanvasJNI::saveUnclippedLayer},
     {"nRestoreUnclippedLayer","(JIJ)V", (void*) CanvasJNI::restoreUnclippedLayer},
     {"nGetSaveCount","(J)I", (void*) CanvasJNI::getSaveCount},
@@ -719,12 +757,14 @@ static const JNINativeMethod gDrawMethods[] = {
     {"nDrawBitmap","(JJFFJIII)V", (void*) CanvasJNI::drawBitmap},
     {"nDrawBitmap","(JJFFFFFFFFJII)V", (void*) CanvasJNI::drawBitmapRect},
     {"nDrawBitmap", "(J[IIIFFIIZJ)V", (void*)CanvasJNI::drawBitmapArray},
+    {"nDrawGlyphs", "(J[I[FIIIJJ)V", (void*)CanvasJNI::drawGlyphs},
     {"nDrawText","(J[CIIFFIJ)V", (void*) CanvasJNI::drawTextChars},
     {"nDrawText","(JLjava/lang/String;IIFFIJ)V", (void*) CanvasJNI::drawTextString},
     {"nDrawTextRun","(J[CIIIIFFZJJ)V", (void*) CanvasJNI::drawTextRunChars},
     {"nDrawTextRun","(JLjava/lang/String;IIIIFFZJ)V", (void*) CanvasJNI::drawTextRunString},
     {"nDrawTextOnPath","(J[CIIJFFIJ)V", (void*) CanvasJNI::drawTextOnPathChars},
     {"nDrawTextOnPath","(JLjava/lang/String;JFFIJ)V", (void*) CanvasJNI::drawTextOnPathString},
+    {"nPunchHole", "(JFFFFFF)V", (void*) CanvasJNI::punchHole}
 };
 
 int register_android_graphics_Canvas(JNIEnv* env) {

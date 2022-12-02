@@ -16,6 +16,7 @@
 
 package android.os;
 
+import static android.os.FileUtils.convertToModernFd;
 import static android.os.FileUtils.roundStorageSize;
 import static android.os.FileUtils.translateModeAccessToPosix;
 import static android.os.FileUtils.translateModePfdToPosix;
@@ -45,6 +46,8 @@ import static android.text.format.DateUtils.WEEK_IN_MILLIS;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -55,9 +58,9 @@ import android.provider.DocumentsContract.Document;
 import androidx.test.InstrumentationRegistry;
 import androidx.test.runner.AndroidJUnit4;
 
-import libcore.io.Streams;
-
 import com.google.android.collect.Sets;
+
+import libcore.io.Streams;
 
 import org.junit.After;
 import org.junit.Before;
@@ -67,6 +70,7 @@ import org.junit.runner.RunWith;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.util.Arrays;
@@ -221,6 +225,27 @@ public class FileUtilsTest {
             actual = readFile(dest);
             assertArrayEquals(expected, actual);
         }
+    }
+
+    @Test
+    public void testCopyFileWithAppend() throws Exception {
+        final File src = new File(mTarget, "src");
+        final File dest = new File(mTarget, "dest");
+
+        byte[] expected = new byte[10];
+        byte[] actual = new byte[10];
+        new Random().nextBytes(expected);
+        writeFile(src, expected);
+
+        try (FileInputStream in = new FileInputStream(src);
+                FileOutputStream out = new FileOutputStream(dest, true /* append */)) {
+            // sendfile(2) fails if output fd is opened with O_APPEND, but FileUtils#copy should
+            // fallback to userspace copy
+            FileUtils.copy(in, out);
+        }
+
+        actual = readFile(dest);
+        assertArrayEquals(expected, actual);
     }
 
     @Test
@@ -499,6 +524,56 @@ public class FileUtilsTest {
     }
 
     @Test
+    public void testParseSize() {
+        assertEquals(0L, FileUtils.parseSize("0MB"));
+        assertEquals(1_024L, FileUtils.parseSize("1024b"));
+        assertEquals(-1L, FileUtils.parseSize(" -1 b "));
+        assertEquals(0L, FileUtils.parseSize(" -0 gib "));
+        assertEquals(1_000L, FileUtils.parseSize("1K"));
+        assertEquals(1_000L, FileUtils.parseSize("1KB"));
+        assertEquals(10_000L, FileUtils.parseSize("10KB"));
+        assertEquals(100_000L, FileUtils.parseSize("100KB"));
+        assertEquals(1_000_000L, FileUtils.parseSize("1000KB"));
+        assertEquals(1_024_000L, FileUtils.parseSize("1000KiB"));
+        assertEquals(70_000_000L, FileUtils.parseSize("070M"));
+        assertEquals(70_000_000L, FileUtils.parseSize("070MB"));
+        assertEquals(73_400_320L, FileUtils.parseSize("70MiB"));
+        assertEquals(700_000_000L, FileUtils.parseSize("700000KB"));
+        assertEquals(200_000_000L, FileUtils.parseSize("+200MB"));
+        assertEquals(1_000_000_000L, FileUtils.parseSize("1000MB"));
+        assertEquals(1_000_000_000L, FileUtils.parseSize("+1000 mb"));
+        assertEquals(644_245_094_400L, FileUtils.parseSize("600GiB"));
+        assertEquals(999_000_000_000L, FileUtils.parseSize("999GB"));
+        assertEquals(999_000_000_000L, FileUtils.parseSize("999 gB"));
+        assertEquals(9_999_000_000_000L, FileUtils.parseSize("9999GB"));
+        assertEquals(9_000_000_000_000L, FileUtils.parseSize(" 9000 GB   "));
+        assertEquals(1_234_000_000_000L, FileUtils.parseSize(" 1234 GB  "));
+        assertEquals(1_234_567_890_000L, FileUtils.parseSize(" 1234567890 KB  "));
+    }
+
+    @Test
+    public void testParseSize_invalidArguments() {
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize(null));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("null"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize(""));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("     "));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("KB"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("123 dd"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("Invalid"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize(" ABC890 KB  "));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("-=+90 KB  "));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("123"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("--123"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("-KB"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("++123"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("+"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("+ 1 +"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("+--+ 1 +"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize("1GB+"));
+        assertEquals(Long.MIN_VALUE, FileUtils.parseSize(" + 1234567890 KB  "));
+    }
+
+    @Test
     public void testTranslateMode() throws Exception {
         assertTranslate("r", O_RDONLY, MODE_READ_ONLY);
 
@@ -560,6 +635,49 @@ public class FileUtilsTest {
         assertEquals(O_WRONLY, translateModeAccessToPosix(W_OK));
         assertEquals(O_RDWR, translateModeAccessToPosix(R_OK | W_OK));
         assertEquals(O_RDWR, translateModeAccessToPosix(R_OK | W_OK | X_OK));
+    }
+
+    @Test
+    public void testConvertToModernFd() throws Exception {
+        final String nonce = String.valueOf(System.nanoTime());
+
+        final File cameraDir = new File("/storage/emulated/0/DCIM/Camera");
+        final File nonCameraDir = new File("/storage/emulated/0/Pictures");
+        cameraDir.mkdirs();
+        nonCameraDir.mkdirs();
+
+        final File validVideoCameraDir = new File(cameraDir, "validVideo-" + nonce + ".mp4");
+        final File validImageCameraDir = new File(cameraDir, "validImage-" + nonce + ".jpg");
+
+        final File validVideoNonCameraDir = new File(nonCameraDir, "validVideo-" + nonce + ".mp4");
+        final File validImageNonCameraDir = new File(nonCameraDir, "validImage-" + nonce + ".jpg");
+
+        try {
+            FileDescriptor pfdValidVideoCameraDir =
+                    ParcelFileDescriptor.open(validVideoCameraDir,
+                            MODE_CREATE | MODE_READ_WRITE).getFileDescriptor();
+            FileDescriptor pfdValidImageCameraDir =
+                    ParcelFileDescriptor.open(validImageCameraDir,
+                            MODE_CREATE | MODE_READ_WRITE).getFileDescriptor();
+
+            FileDescriptor pfdValidVideoNonCameraDir =
+                    ParcelFileDescriptor.open(validVideoNonCameraDir,
+                            MODE_CREATE | MODE_READ_WRITE).getFileDescriptor();
+            FileDescriptor pfdValidImageNonCameraDir =
+                    ParcelFileDescriptor.open(validImageNonCameraDir,
+                            MODE_CREATE | MODE_READ_WRITE).getFileDescriptor();
+
+            assertNotNull(convertToModernFd(pfdValidVideoCameraDir));
+
+            assertNull(convertToModernFd(pfdValidImageCameraDir));
+            assertNull(convertToModernFd(pfdValidVideoNonCameraDir));
+            assertNull(convertToModernFd(pfdValidImageNonCameraDir));
+        } finally {
+            validVideoCameraDir.delete();
+            validImageCameraDir.delete();
+            validVideoNonCameraDir.delete();
+            validImageNonCameraDir.delete();
+        }
     }
 
     private static void assertTranslate(String string, int posix, int pfd) {

@@ -17,9 +17,6 @@
 package android.widget;
 
 import static android.widget.espresso.DragHandleUtils.onHandleView;
-import static android.widget.espresso.FloatingToolbarEspressoUtils.assertFloatingToolbarContainsItem;
-import static android.widget.espresso.FloatingToolbarEspressoUtils.clickFloatingToolbarItem;
-import static android.widget.espresso.FloatingToolbarEspressoUtils.sleepForFloatingToolbarPopup;
 import static android.widget.espresso.SuggestionsPopupwindowUtils.assertSuggestionsPopupContainsItem;
 import static android.widget.espresso.SuggestionsPopupwindowUtils.assertSuggestionsPopupIsDisplayed;
 import static android.widget.espresso.SuggestionsPopupwindowUtils.assertSuggestionsPopupIsNotDisplayed;
@@ -41,7 +38,9 @@ import static androidx.test.platform.app.InstrumentationRegistry.getInstrumentat
 
 import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import android.content.res.TypedArray;
 import android.text.Selection;
@@ -70,6 +69,7 @@ public class SuggestionsPopupWindowTest {
     @Rule
     public final ActivityTestRule<TextViewActivity> mActivityRule =
             new ActivityTestRule<>(TextViewActivity.class);
+    private final FloatingToolbarUtils mToolbar = new FloatingToolbarUtils();
 
     private TextViewActivity getActivity() {
         return mActivityRule.getActivity();
@@ -116,22 +116,19 @@ public class SuggestionsPopupWindowTest {
         setSuggestionSpan(suggestionSpan, text.indexOf('d'), text.indexOf('f') + 1);
 
         onView(withId(R.id.textview)).perform(longPressOnTextAtIndex(text.indexOf('e')));
-        sleepForFloatingToolbarPopup();
-        assertFloatingToolbarContainsItem(
-                getActivity().getString(com.android.internal.R.string.replace));
-        sleepForFloatingToolbarPopup();
-        clickFloatingToolbarItem(
+        mToolbar.clickFloatingToolbarOverflowItem(
                 getActivity().getString(com.android.internal.R.string.replace));
 
         assertSuggestionsPopupIsDisplayed();
     }
 
     @Test
-    public void testInsertionActionMode() {
+    public void testInsertionActionMode() throws Throwable {
         final String text = "abc def ghi";
 
         onView(withId(R.id.textview)).perform(click());
         onView(withId(R.id.textview)).perform(replaceText(text));
+        Thread.sleep(500);
 
         final SuggestionSpan suggestionSpan = new SuggestionSpan(getActivity(),
                 new String[]{"DEF", "Def"}, SuggestionSpan.FLAG_AUTO_CORRECTION);
@@ -139,10 +136,7 @@ public class SuggestionsPopupWindowTest {
 
         onView(withId(R.id.textview)).perform(clickOnTextAtIndex(text.indexOf('e')));
         onHandleView(com.android.internal.R.id.insertion_handle).perform(click());
-        sleepForFloatingToolbarPopup();
-        assertFloatingToolbarContainsItem(
-                getActivity().getString(com.android.internal.R.string.replace));
-        clickFloatingToolbarItem(
+        mToolbar.clickFloatingToolbarItem(
                 getActivity().getString(com.android.internal.R.string.replace));
 
         assertSuggestionsPopupIsDisplayed();
@@ -354,6 +348,73 @@ public class SuggestionsPopupWindowTest {
             onView(withId(R.id.textview))
                     .inRoot(withDecorView(is(getActivity().getWindow().getDecorView())))
                     .perform(clearText());
+        }
+    }
+
+    @Test
+    public void testCursorVisibility() {
+        final TextView textView = getActivity().findViewById(R.id.textview);
+        final String text = "abc";
+
+        assertTrue(textView.isCursorVisible());
+
+        onView(withId(R.id.textview)).perform(click());
+        onView(withId(R.id.textview)).perform(replaceText(text));
+        final SuggestionSpan suggestionSpan = new SuggestionSpan(getActivity(),
+                new String[]{"ABC"}, SuggestionSpan.FLAG_AUTO_CORRECTION);
+        setSuggestionSpan(suggestionSpan, text.indexOf('a'), text.indexOf('c') + 1);
+        showSuggestionsPopup();
+
+        assertSuggestionsPopupIsDisplayed();
+        assertSuggestionsPopupContainsItem("ABC");
+        assertFalse(textView.isCursorVisible());
+
+        // Delete an item.
+        clickSuggestionsPopupItem(
+                getActivity().getString(com.android.internal.R.string.delete));
+        assertSuggestionsPopupIsNotDisplayed();
+        assertTrue(textView.isCursorVisible());
+    }
+
+    @Test
+    public void testCursorVisibilityWhenImeConsumesInput() {
+        final TextView textView = getActivity().findViewById(R.id.textview);
+        final String text = "abc";
+
+        assertTrue(textView.isCursorVisible());
+
+        onView(withId(R.id.textview)).perform(click());
+        onView(withId(R.id.textview)).perform(replaceText(text));
+        setImeConsumesInputWithExpect(textView, true /* imeConsumesInput */,
+                false /* expectedCursorVisibility */);
+        final SuggestionSpan suggestionSpan = new SuggestionSpan(getActivity(),
+                new String[]{"ABC"}, SuggestionSpan.FLAG_AUTO_CORRECTION);
+        setSuggestionSpan(suggestionSpan, text.indexOf('a'), text.indexOf('c') + 1);
+        showSuggestionsPopup();
+
+        assertSuggestionsPopupIsDisplayed();
+        assertSuggestionsPopupContainsItem("ABC");
+        assertFalse(textView.isCursorVisible());
+
+        // Delete an item.
+        clickSuggestionsPopupItem(
+                getActivity().getString(com.android.internal.R.string.delete));
+        assertSuggestionsPopupIsNotDisplayed();
+        assertFalse(textView.isCursorVisible());
+
+        // Set IME not consumes input, cursor should be back to visible.
+        setImeConsumesInputWithExpect(textView, false /* imeConsumesInput */,
+                true /* expectedCursorVisibility */);
+    }
+
+    private void setImeConsumesInputWithExpect(
+            final TextView textView, boolean imeConsumesInput, boolean expectedCursorVisibility) {
+        textView.post(() -> textView.setImeConsumesInput(imeConsumesInput));
+        getInstrumentation().waitForIdleSync();
+        if (expectedCursorVisibility) {
+            assertTrue(textView.isCursorVisible());
+        } else {
+            assertFalse(textView.isCursorVisible());
         }
     }
 }

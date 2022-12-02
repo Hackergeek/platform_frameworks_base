@@ -16,11 +16,14 @@
 
 package android.graphics.drawable;
 
+import static android.content.Context.CONTEXT_INCLUDE_CODE;
+import static android.content.Context.CONTEXT_RESTRICTED;
+
 import android.annotation.ColorInt;
 import android.annotation.DrawableRes;
-import android.annotation.IdRes;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -39,6 +42,8 @@ import android.os.Handler;
 import android.os.Message;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.Process;
+import android.os.UserHandle;
 import android.text.TextUtils;
 import android.util.Log;
 
@@ -123,6 +128,7 @@ public final class Icon implements Parcelable {
     // TYPE_RESOURCE: Resources
     // TYPE_DATA: DataBytes
     private Object          mObj1;
+    private boolean mCachedAshmem = false;
 
     // TYPE_RESOURCE: package name
     // TYPE_URI: uri string
@@ -151,6 +157,8 @@ public final class Icon implements Parcelable {
     /**
      * @return The {@link android.graphics.Bitmap} held by this {@link #TYPE_BITMAP} or
      * {@link #TYPE_ADAPTIVE_BITMAP} Icon.
+     *
+     * Note that this will always return an immutable Bitmap.
      * @hide
      */
     @UnsupportedAppUsage
@@ -161,15 +169,27 @@ public final class Icon implements Parcelable {
         return (Bitmap) mObj1;
     }
 
+    /**
+     * Sets the Icon's contents to a particular Bitmap. Note that this may make a copy of the Bitmap
+     * if the supplied Bitmap is mutable. In that case, the value returned by getBitmap() may not
+     * equal the Bitmap passed to setBitmap().
+     *
+     * @hide
+     */
     private void setBitmap(Bitmap b) {
-        mObj1 = b;
+        if (b.isMutable()) {
+            mObj1 = b.copy(b.getConfig(), false);
+        } else {
+            mObj1 = b;
+        }
+        mCachedAshmem = false;
     }
 
     /**
      * @return The length of the compressed bitmap byte array held by this {@link #TYPE_DATA} Icon.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public int getDataLength() {
         if (mType != TYPE_DATA) {
             throw new IllegalStateException("called getDataLength() on " + this);
@@ -243,7 +263,7 @@ public final class Icon implements Parcelable {
      * Note: This resource may not be available if the application changes at all, and it is
      * up to the caller to ensure safety if this resource is re-used and/or persisted.
      */
-    @IdRes
+    @DrawableRes
     public int getResId() {
         if (mType != TYPE_RESOURCE) {
             throw new IllegalStateException("called getResId() on " + this);
@@ -297,7 +317,7 @@ public final class Icon implements Parcelable {
      *                is available. The {@link android.os.Message#obj obj}
      *                property is populated with the Drawable.
      */
-    public void loadDrawableAsync(Context context, Message andThen) {
+    public void loadDrawableAsync(@NonNull Context context, @NonNull Message andThen) {
         if (andThen.getTarget() == null) {
             throw new IllegalArgumentException("callback message must have a target handler");
         }
@@ -315,7 +335,7 @@ public final class Icon implements Parcelable {
      *                 {@link #loadDrawable(Context)} finished
      * @param handler {@link Handler} on which to notify the {@code listener}
      */
-    public void loadDrawableAsync(Context context, final OnDrawableLoadedListener listener,
+    public void loadDrawableAsync(@NonNull Context context, final OnDrawableLoadedListener listener,
             Handler handler) {
         new LoadDrawableTask(context, handler, listener).runAsync();
     }
@@ -330,9 +350,9 @@ public final class Icon implements Parcelable {
      *                to access {@link android.content.res.Resources Resources}, for example.
      * @return A fresh instance of a drawable for this image, yours to keep.
      */
-    public Drawable loadDrawable(Context context) {
+    public @Nullable Drawable loadDrawable(Context context) {
         final Drawable result = loadDrawableInner(context);
-        if (result != null && (mTintList != null || mBlendMode != DEFAULT_BLEND_MODE)) {
+        if (result != null && hasTint()) {
             result.mutate();
             result.setTintList(mTintList);
             result.setTintBlendMode(mBlendMode);
@@ -364,7 +384,9 @@ public final class Icon implements Parcelable {
                         final PackageManager pm = context.getPackageManager();
                         try {
                             ApplicationInfo ai = pm.getApplicationInfo(
-                                    resPackage, PackageManager.MATCH_UNINSTALLED_PACKAGES);
+                                    resPackage,
+                                    PackageManager.MATCH_UNINSTALLED_PACKAGES
+                                    | PackageManager.GET_SHARED_LIBRARY_FILES);
                             if (ai != null) {
                                 mObj1 = pm.getResourcesForApplication(ai);
                             } else {
@@ -408,7 +430,7 @@ public final class Icon implements Parcelable {
         return null;
     }
 
-    private InputStream getUriInputStream(Context context) {
+    private @Nullable InputStream getUriInputStream(Context context) {
         final Uri uri = getUri();
         final String scheme = uri.getScheme();
         if (ContentResolver.SCHEME_CONTENT.equals(scheme)
@@ -441,10 +463,22 @@ public final class Icon implements Parcelable {
                 resPackage = context.getPackageName();
             }
             if (getResources() == null && !(getResPackage().equals("android"))) {
-                final PackageManager pm = context.getPackageManager();
+                // TODO(b/173307037): Move CONTEXT_INCLUDE_CODE to ContextImpl.createContextAsUser
+                final Context userContext;
+                if (context.getUserId() == userId) {
+                    userContext = context;
+                } else {
+                    final boolean sameAppWithProcess =
+                            UserHandle.isSameApp(context.getApplicationInfo().uid, Process.myUid());
+                    final int flags = (sameAppWithProcess ? CONTEXT_INCLUDE_CODE : 0)
+                            | CONTEXT_RESTRICTED;
+                    userContext = context.createContextAsUser(UserHandle.of(userId), flags);
+                }
+
+                final PackageManager pm = userContext.getPackageManager();
                 try {
                     // assign getResources() as the correct user
-                    mObj1 = pm.getResourcesForApplicationAsUser(resPackage, userId);
+                    mObj1 = pm.getResourcesForApplication(resPackage);
                 } catch (PackageManager.NameNotFoundException e) {
                     Log.e(TAG, String.format("Unable to find pkg=%s user=%d",
                                     getResPackage(),
@@ -467,8 +501,9 @@ public final class Icon implements Parcelable {
         if ((mType == TYPE_BITMAP || mType == TYPE_ADAPTIVE_BITMAP) &&
             getBitmap().isMutable() &&
             getBitmap().getAllocationByteCount() >= MIN_ASHMEM_ICON_SIZE) {
-            setBitmap(getBitmap().createAshmemBitmap());
+            setBitmap(getBitmap().asShared());
         }
+        mCachedAshmem = true;
     }
 
     /**
@@ -477,7 +512,7 @@ public final class Icon implements Parcelable {
      * @param stream The stream on which to serialize the Icon.
      * @hide
      */
-    public void writeToStream(OutputStream stream) throws IOException {
+    public void writeToStream(@NonNull OutputStream stream) throws IOException {
         DataOutputStream dataStream = new DataOutputStream(stream);
 
         dataStream.writeInt(VERSION_STREAM_SERIALIZER);
@@ -513,7 +548,7 @@ public final class Icon implements Parcelable {
      * @param stream The input stream from which to reconstruct the Icon.
      * @hide
      */
-    public static Icon createFromStream(InputStream stream) throws IOException {
+    public static @Nullable Icon createFromStream(@NonNull InputStream stream) throws IOException {
         DataInputStream inputStream = new DataInputStream(stream);
 
         final int version = inputStream.readInt();
@@ -552,7 +587,7 @@ public final class Icon implements Parcelable {
      * @return whether this icon is the same as the another one
      * @hide
      */
-    public boolean sameAs(Icon otherIcon) {
+    public boolean sameAs(@NonNull Icon otherIcon) {
         if (otherIcon == this) {
             return true;
         }
@@ -583,7 +618,7 @@ public final class Icon implements Parcelable {
      *                given resource ID.
      * @param resId ID of the drawable resource
      */
-    public static Icon createWithResource(Context context, @DrawableRes int resId) {
+    public static @NonNull Icon createWithResource(Context context, @DrawableRes int resId) {
         if (context == null) {
             throw new IllegalArgumentException("Context must not be null.");
         }
@@ -597,8 +632,8 @@ public final class Icon implements Parcelable {
      * Version of createWithResource that takes Resources. Do not use.
      * @hide
      */
-    @UnsupportedAppUsage
-    public static Icon createWithResource(Resources res, @DrawableRes int resId) {
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public static @NonNull Icon createWithResource(Resources res, @DrawableRes int resId) {
         if (res == null) {
             throw new IllegalArgumentException("Resource must not be null.");
         }
@@ -613,7 +648,7 @@ public final class Icon implements Parcelable {
      * @param resPackage Name of the package containing the resource in question
      * @param resId ID of the drawable resource
      */
-    public static Icon createWithResource(String resPackage, @DrawableRes int resId) {
+    public static @NonNull Icon createWithResource(String resPackage, @DrawableRes int resId) {
         if (resPackage == null) {
             throw new IllegalArgumentException("Resource package name must not be null.");
         }
@@ -627,7 +662,7 @@ public final class Icon implements Parcelable {
      * Create an Icon pointing to a bitmap in memory.
      * @param bits A valid {@link android.graphics.Bitmap} object
      */
-    public static Icon createWithBitmap(Bitmap bits) {
+    public static @NonNull Icon createWithBitmap(Bitmap bits) {
         if (bits == null) {
             throw new IllegalArgumentException("Bitmap must not be null.");
         }
@@ -641,7 +676,7 @@ public final class Icon implements Parcelable {
      * by {@link AdaptiveIconDrawable}.
      * @param bits A valid {@link android.graphics.Bitmap} object
      */
-    public static Icon createWithAdaptiveBitmap(Bitmap bits) {
+    public static @NonNull Icon createWithAdaptiveBitmap(Bitmap bits) {
         if (bits == null) {
             throw new IllegalArgumentException("Bitmap must not be null.");
         }
@@ -658,7 +693,7 @@ public final class Icon implements Parcelable {
      * @param offset Offset into <code>data</code> at which the bitmap data starts
      * @param length Length of the bitmap data
      */
-    public static Icon createWithData(byte[] data, int offset, int length) {
+    public static @NonNull Icon createWithData(byte[] data, int offset, int length) {
         if (data == null) {
             throw new IllegalArgumentException("Data must not be null.");
         }
@@ -674,7 +709,7 @@ public final class Icon implements Parcelable {
      *
      * @param uri A uri referring to local content:// or file:// image data.
      */
-    public static Icon createWithContentUri(String uri) {
+    public static @NonNull Icon createWithContentUri(String uri) {
         if (uri == null) {
             throw new IllegalArgumentException("Uri must not be null.");
         }
@@ -688,7 +723,7 @@ public final class Icon implements Parcelable {
      *
      * @param uri A uri referring to local content:// or file:// image data.
      */
-    public static Icon createWithContentUri(Uri uri) {
+    public static @NonNull Icon createWithContentUri(Uri uri) {
         if (uri == null) {
             throw new IllegalArgumentException("Uri must not be null.");
         }
@@ -701,8 +736,7 @@ public final class Icon implements Parcelable {
      *
      * @param uri A uri referring to local content:// or file:// image data.
      */
-    @NonNull
-    public static Icon createWithAdaptiveBitmapContentUri(@NonNull String uri) {
+    public static @NonNull Icon createWithAdaptiveBitmapContentUri(@NonNull String uri) {
         if (uri == null) {
             throw new IllegalArgumentException("Uri must not be null.");
         }
@@ -731,7 +765,7 @@ public final class Icon implements Parcelable {
      * @param tint a color, as in {@link Drawable#setTint(int)}
      * @return this same object, for use in chained construction
      */
-    public Icon setTint(@ColorInt int tint) {
+    public @NonNull Icon setTint(@ColorInt int tint) {
         return setTintList(ColorStateList.valueOf(tint));
     }
 
@@ -741,9 +775,14 @@ public final class Icon implements Parcelable {
      * @param tintList as in {@link Drawable#setTintList(ColorStateList)}, null to remove tint
      * @return this same object, for use in chained construction
      */
-    public Icon setTintList(ColorStateList tintList) {
+    public @NonNull Icon setTintList(ColorStateList tintList) {
         mTintList = tintList;
         return this;
+    }
+
+    /** @hide */
+    public @Nullable ColorStateList getTintList() {
+        return mTintList;
     }
 
     /**
@@ -769,7 +808,12 @@ public final class Icon implements Parcelable {
     }
 
     /** @hide */
-    @UnsupportedAppUsage
+    public @NonNull BlendMode getTintBlendMode() {
+        return mBlendMode;
+    }
+
+    /** @hide */
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public boolean hasTint() {
         return (mTintList != null) || (mBlendMode != DEFAULT_BLEND_MODE);
     }
@@ -780,7 +824,7 @@ public final class Icon implements Parcelable {
      * @param path A path to a file that contains compressed bitmap data of
      *           a type that {@link android.graphics.BitmapFactory} can decode.
      */
-    public static Icon createWithFilePath(String path) {
+    public static @NonNull Icon createWithFilePath(String path) {
         if (path == null) {
             throw new IllegalArgumentException("Path must not be null.");
         }
@@ -885,7 +929,10 @@ public final class Icon implements Parcelable {
         switch (mType) {
             case TYPE_BITMAP:
             case TYPE_ADAPTIVE_BITMAP:
-                final Bitmap bits = getBitmap();
+                if (!mCachedAshmem) {
+                    mObj1 = ((Bitmap) mObj1).asShared();
+                    mCachedAshmem = true;
+                }
                 getBitmap().writeToParcel(dest, flags);
                 break;
             case TYPE_RESOURCE:

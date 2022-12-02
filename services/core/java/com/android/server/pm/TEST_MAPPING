@@ -1,6 +1,14 @@
 {
   "presubmit": [
     {
+      "name": "CtsPackageInstallTestCases",
+      "file_patterns": [
+        "core/java/.*Install.*",
+        "services/core/.*Install.*",
+        "services/core/java/com/android/server/pm/.*"
+      ]
+    },
+    {
       "name": "CtsUsesLibraryHostTestCases"
     },
     {
@@ -16,30 +24,26 @@
       "name": "CtsMatchFlagTestCases"
     },
     {
-      "name": "FrameworksServicesTests",
+      "name": "FrameworksMockingServicesTests",
       "options": [
         {
           "include-filter": "com.android.server.pm."
-        },
-        {
-          "include-annotation": "android.platform.test.annotations.Presubmit"
-        },
-        {
-          "exclude-annotation": "androidx.test.filters.FlakyTest"
         }
       ]
     },
     {
-      "name": "CtsContentTestCases",
+      "name": "CtsShortcutHostTestCases",
+      "file_patterns": ["(/|^)ShortcutService\\.java"]
+    },
+    {
+      "name": "CtsShortcutManagerTestCases",
+      "file_patterns": ["(/|^)ShortcutService\\.java"]
+    },
+    {
+      "name": "GtsContentTestCases",
       "options": [
         {
-          "include-filter": "android.content.pm.cts.PackageManagerShellCommandTest"
-        },
-        {
-          "include-filter": "android.content.pm.cts.PackageManagerShellCommandIncrementalTest"
-        },
-        {
-          "include-filter": "android.content.pm.cts.PackageManagerTest"
+          "include-filter": "com.google.android.content.gts"
         }
       ]
     },
@@ -52,29 +56,43 @@
       ]
     },
     {
-      "name": "CtsAppSecurityHostTestCases",
+      "name": "PackageManagerServiceHostTests",
       "options": [
         {
-          "include-filter": "android.appsecurity.cts.PrivilegedUpdateTests"
-        }
-      ]
-    },
-    {
-      "name": "FrameworksCoreTests",
-      "options": [
-        {
-          "include-filter": "android.content.pm.PackageManagerTests"
-        },
-        {
-            "exclude-annotation": "androidx.test.filters.Suppress"
+          "include-annotation": "android.platform.test.annotations.Presubmit"
         }
       ]
     },
     {
       "name": "PackageManagerServiceHostTests",
+      "file_patterns": ["AppsFilter\\.java"],
       "options": [
         {
-          "include-annotation": "android.platform.test.annotations.Presubmit"
+          "include-filter": "com.android.server.pm.test.OverlayActorVisibilityTest"
+        }
+      ]
+    },
+    {
+      "name": "CtsSharedUserMigrationTestCases",
+      "options": [
+        {
+          "include-filter": "android.uidmigration.cts"
+        }
+      ]
+    }
+  ],
+  "presubmit-large": [
+    {
+      "name": "CtsContentTestCases",
+      "options": [
+        {
+          "exclude-annotation": "androidx.test.filters.FlakyTest"
+        },
+        {
+          "exclude-annotation": "org.junit.Ignore"
+        },
+        {
+          "include-filter": "android.content.pm.cts"
         }
       ]
     }
@@ -93,47 +111,6 @@
     },
     {
       "name": "PackageManagerServiceHostTests"
-    },
-    {
-      "name": "FrameworksServicesTests",
-      "options": [
-        {
-          "install-arg": "-t"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserDataPreparerTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserLifecycleStressTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserManagerServiceCreateProfileTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserManagerServiceIdRecyclingTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserManagerServiceTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserManagerServiceUserInfoTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserManagerServiceUserTypeTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserManagerTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserRestrictionsUtilsTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.UserSystemPackageInstallerTest"
-        },
-        {
-          "include-filter": "com.android.server.pm.parsing.SystemPartitionParseTest"
-        }
-      ]
     }
   ],
   "imports": [

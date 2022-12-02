@@ -24,6 +24,7 @@ import android.compat.annotation.UnsupportedAppUsage;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.AbstractSet;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -108,6 +109,15 @@ import java.util.stream.Collectors;
  * <tr><td>{@link #KEY_ENCODER_DELAY}</td><td>Integer</td><td>optional, the number of frames to trim from the start of the decoded audio stream.</td></tr>
  * <tr><td>{@link #KEY_ENCODER_PADDING}</td><td>Integer</td><td>optional, the number of frames to trim from the end of the decoded audio stream.</td></tr>
  * <tr><td>{@link #KEY_FLAC_COMPRESSION_LEVEL}</td><td>Integer</td><td><b>encoder-only</b>, optional, if content is FLAC audio, specifies the desired compression level.</td></tr>
+ * <tr><td>{@link #KEY_MPEGH_PROFILE_LEVEL_INDICATION}</td><td>Integer</td>
+ *     <td><b>decoder-only</b>, optional, if content is MPEG-H audio,
+ *         specifies the profile and level of the stream.</td></tr>
+ * <tr><td>{@link #KEY_MPEGH_COMPATIBLE_SETS}</td><td>ByteBuffer</td>
+ *     <td><b>decoder-only</b>, optional, if content is MPEG-H audio,
+ *         specifies the compatible sets (profile and level) of the stream.</td></tr>
+ * <tr><td>{@link #KEY_MPEGH_REFERENCE_CHANNEL_LAYOUT}</td>
+ *     <td>Integer</td><td><b>decoder-only</b>, optional, if content is MPEG-H audio,
+ *         specifies the preferred reference channel layout of the stream.</td></tr>
  * </table>
  *
  * Subtitle formats have the following keys:
@@ -160,6 +170,71 @@ public final class MediaFormat {
     public static final String MIMETYPE_AUDIO_EAC3_JOC = "audio/eac3-joc";
     public static final String MIMETYPE_AUDIO_AC4 = "audio/ac4";
     public static final String MIMETYPE_AUDIO_SCRAMBLED = "audio/scrambled";
+    /** MIME type for MPEG-H Audio single stream */
+    public static final String MIMETYPE_AUDIO_MPEGH_MHA1 = "audio/mha1";
+    /** MIME type for MPEG-H Audio single stream, encapsulated in MHAS */
+    public static final String MIMETYPE_AUDIO_MPEGH_MHM1 = "audio/mhm1";
+    /** MIME type for DTS (up to 5.1 channels) audio stream. */
+    public static final String MIMETYPE_AUDIO_DTS = "audio/vnd.dts";
+    /** MIME type for DTS HD (up to 7.1 channels) audio stream. */
+    public static final String MIMETYPE_AUDIO_DTS_HD = "audio/vnd.dts.hd";
+    /** MIME type for DTS UHD (object-based) audio stream. */
+    public static final String MIMETYPE_AUDIO_DTS_UHD = "audio/vnd.dts.uhd";
+    /** MIME type for Dynamic Resolution Adaptation (DRA) audio stream. */
+    public static final String MIMETYPE_AUDIO_DRA = "audio/vnd.dra";
+    /** MIME type for Dolby Metadata-enhanced Audio Transmission (MAT) audio stream. */
+    public static final String MIMETYPE_AUDIO_DOLBY_MAT = "audio/vnd.dolby.mat";
+    /** MIME type for Dolby TrueHD audio format, based on Meridian Lossless Packing (MLP). */
+    public static final String MIMETYPE_AUDIO_DOLBY_TRUEHD = "audio/vnd.dolby.mlp";
+    /**
+     * MIME type for AAC Low Complexity (LC) audio stream. Uses the scheme defined by
+     * RFC 6381 with OTI of MPEG-4 (40) and AOT of AAC LC (2) from ISO/IEC 14496-3.
+     */
+    public static final String MIMETYPE_AUDIO_AAC_LC = "audio/mp4a.40.02";
+    /**
+     * MIME type for HE-AAC v1 (LC + SBR) audio stream. Uses the scheme defined by
+     * RFC 6381 with OTI of MPEG-4 (40) and AOT of AAC SBR (5) from ISO/IEC 14496-3.
+     */
+    public static final String MIMETYPE_AUDIO_AAC_HE_V1 = "audio/mp4a.40.05";
+    /**
+     * MIME type for HE-AAC v2 (LC + SBR + PS) audio stream. Uses the scheme defined by
+     * RFC 6381 with OTI of MPEG-4 (40) and AOT of PS (29) from ISO/IEC 14496-3.
+     */
+    public static final String MIMETYPE_AUDIO_AAC_HE_V2 = "audio/mp4a.40.29";
+    /**
+     * MIME type for AAC Enhanced Low Delay (ELD) audio stream. Uses the scheme defined by
+     * RFC 6381 with OTI of MPEG-4 (40) and AOT of ELD (39) from ISO/IEC 14496-3.
+     */
+    public static final String MIMETYPE_AUDIO_AAC_ELD = "audio/mp4a.40.39";
+    /**
+     * MIME type for AAC XHE audio stream. Uses the scheme defined by
+     * RFC 6381 with OTI of MPEG-4 (40) and AOT of USAC (42) from ISO/IEC 14496-3.
+     */
+    public static final String MIMETYPE_AUDIO_AAC_XHE = "audio/mp4a.40.42";
+    /**
+     * MIME type for MPEG-H Baseline (BL) Profile L3 audio stream. Uses the scheme defined by
+     * RFC 6381 with mpegh3daProfileLevelIndication for main profile/L3 (0x3) from ISO/IEC 23008-3.
+     */
+    public static final String MIMETYPE_AUDIO_MPEGH_BL_L3 = "audio/mhm1.03";
+    /**
+     * MIME type for MPEG-H Baseline (BL) Profile L4 audio stream. Uses the scheme defined by
+     * RFC 6381 with mpegh3daProfileLevelIndication for main profile/L4 (0x4) from ISO/IEC 23008-3.
+     */
+    public static final String MIMETYPE_AUDIO_MPEGH_BL_L4 = "audio/mhm1.04";
+    /**
+     * MIME type for MPEG-H Low Complexity (LC) L3 audio stream. Uses the scheme defined by
+     * RFC 6381 with mpegh3daProfileLevelIndication for LC profile/L3 (0xD) from ISO/IEC 23008-3.
+     */
+    public static final String MIMETYPE_AUDIO_MPEGH_LC_L3 = "audio/mhm1.0d";
+    /**
+     * MIME type for MPEG-H Low Complexity (LC) L4 audio stream. Uses the scheme defined by
+     * RFC 6381 with mpegh3daProfileLevelIndication for LC profile/L4 (0xE) from ISO/IEC 23008-3.
+     */
+    public static final String MIMETYPE_AUDIO_MPEGH_LC_L4 = "audio/mhm1.0e";
+    /**
+     * MIME type for the IEC61937 audio stream encapsulation. This type isn't defined by IANA.
+     */
+    public static final String MIMETYPE_AUDIO_IEC61937 = "audio/x-iec61937";
 
     /**
      * MIME type for HEIF still image data encoded in HEVC.
@@ -212,6 +287,16 @@ public final class MediaFormat {
 
     @UnsupportedAppUsage
     private Map<String, Object> mMap;
+
+    /**
+     * A key describing the log session ID for MediaCodec. The log session ID is a random 32-byte
+     * hexadecimal string that is used to associate metrics from multiple media codec instances
+     * to the same playback or recording session. The value is created as
+     * {@link android.media.metrics.LogSessionId LogSessionId}. Sessions are created in
+     * {@link android.media.metrics.MediaMetricsManager MediaMetricsManager}.
+     * The associated value is a string.
+     */
+    public static final String LOG_SESSION_ID = "log-session-id";
 
     /**
      * A key describing the mime type of the MediaFormat.
@@ -275,6 +360,42 @@ public final class MediaFormat {
     public static final String KEY_HEIGHT = "height";
 
     /**
+     * A key describing the bottom-coordinate (y) of the crop rectangle.
+     * This is the bottom-most row included in the crop frame,
+     * where row indices start at 0.
+     * Additional information on the crop rectangle semantics can be found at
+     * {@link android.media.MediaCodec}.
+     */
+    public static final String KEY_CROP_BOTTOM = "crop-bottom";
+
+    /**
+     * A key describing the left-coordinate (x) of the crop rectangle.
+     * This is the left-most column included in the crop frame,
+     * where column indices start at 0.
+     * Additional information on the crop rectangle semantics can be found at
+     * {@link android.media.MediaCodec}.
+     */
+    public static final String KEY_CROP_LEFT = "crop-left";
+
+    /**
+     * A key describing the right-coordinate (x) of the crop rectangle.
+     * This is the right-most column included in the crop frame,
+     * where column indices start at 0.
+     * Additional information on the crop rectangle semantics can be found at
+     * {@link android.media.MediaCodec}.
+     */
+    public static final String KEY_CROP_RIGHT = "crop-right";
+
+    /**
+     * A key describing the top-coordinate (y) of the crop rectangle.
+     * This is the top-most row included in the crop frame,
+     * where row indices start at 0.
+     * Additional information on the crop rectangle semantics can be found at
+     * {@link android.media.MediaCodec}.
+     */
+    public static final String KEY_CROP_TOP = "crop-top";
+
+    /**
      * A key describing the maximum expected width of the content in a video
      * decoder format, in case there are resolution changes in the video content.
      * The associated value is an integer
@@ -336,17 +457,27 @@ public final class MediaFormat {
 
     /**
      * A key describing the frame rate of a video format in frames/sec.
+     * <p>
      * The associated value is normally an integer when the value is used by the platform,
      * but video codecs also accept float configuration values.
      * Specifically, {@link MediaExtractor#getTrackFormat MediaExtractor} provides an integer
      * value corresponding to the frame rate information of the track if specified and non-zero.
      * Otherwise, this key is not present. {@link MediaCodec#configure MediaCodec} accepts both
-     * float and integer values. This represents the desired operating frame rate if the
+     * float and integer values.
+     * <p>
+     * This represents the desired operating frame rate if the
      * {@link #KEY_OPERATING_RATE} is not present and {@link #KEY_PRIORITY} is {@code 0}
-     * (realtime). For video encoders this value corresponds to the intended frame rate,
-     * although encoders are expected
-     * to support variable frame rate based on {@link MediaCodec.BufferInfo#presentationTimeUs
-     * buffer timestamp}. This key is not used in the {@code MediaCodec}
+     * (realtime). Otherwise, this is just informational.
+     * <p>
+     * For video encoders this value corresponds to the intended frame rate (the rate at which
+     * the application intends to send frames to the encoder, as calculated by the buffer
+     * timestamps, and not from the actual real-time rate that the frames are sent to
+     * the encoder). Encoders use this hint for rate control, specifically for the initial
+     * frames, as encoders are expected to support variable frame rate (for rate control) based
+     * on the actual {@link MediaCodec.BufferInfo#presentationTimeUs buffer timestamps} of
+     * subsequent frames.
+     * <p>
+     * This key is not used in the {@code MediaCodec}
      * {@link MediaCodec#getInputFormat input}/{@link MediaCodec#getOutputFormat output} formats,
      * nor by {@link MediaMuxer#addTrack MediaMuxer}.
      */
@@ -434,6 +565,52 @@ public final class MediaFormat {
      * </p>
      */
     public static final String KEY_CAPTURE_RATE = "capture-rate";
+
+    /**
+     * A key for retrieving the slow-motion marker information associated with a video track.
+     * <p>
+     * The associated value is a ByteBuffer in {@link ByteOrder#BIG_ENDIAN}
+     * (networking order) of the following format:
+     * </p>
+     * <pre class="prettyprint">
+     *     float(32) playbackRate;
+     *     unsigned int(32) numMarkers;
+     *     for (i = 0;i < numMarkers; i++) {
+     *         int(64) timestampUs;
+     *         float(32) speedRatio;
+     *     }</pre>
+     * The meaning of each field is as follows:
+     * <table border="1" width="90%" align="center" cellpadding="5">
+     *     <tbody>
+     *     <tr>
+     *         <td>playbackRate</td>
+     *         <td>The frame rate at which the playback should happen (or the flattened
+     *             clip should be).</td>
+     *     </tr>
+     *     <tr>
+     *         <td>numMarkers</td>
+     *         <td>The number of slow-motion markers that follows.</td>
+     *     </tr>
+     *     <tr>
+     *         <td>timestampUs</td>
+     *         <td>The starting point of a new segment.</td>
+     *     </tr>
+     *     <tr>
+     *         <td>speedRatio</td>
+     *         <td>The playback speed for that segment. The playback speed is a floating
+     *             point number, indicating how fast the time progresses relative to that
+     *             written in the container. (Eg. 4.0 means time goes 4x as fast, which
+     *             makes 30fps become 120fps.)</td>
+     *     </tr>
+     * </table>
+     * <p>
+     * The following constraints apply to the timestampUs of the markers:
+     * </p>
+     * <li>The timestampUs shall be monotonically increasing.</li>
+     * <li>The timestampUs shall fall within the time span of the video track.</li>
+     * <li>The first timestampUs should match that of the first video sample.</li>
+     */
+    public static final String KEY_SLOW_MOTION_MARKERS = "slow-motion-markers";
 
     /**
      * A key describing the frequency of key frames expressed in seconds between key frames.
@@ -614,6 +791,19 @@ public final class MediaFormat {
     public static final String KEY_CHANNEL_MASK = "channel-mask";
 
     /**
+     * A key describing the maximum number of channels that can be output by an audio decoder.
+     * By default, the decoder will output the same number of channels as present in the encoded
+     * stream, if supported. Set this value to limit the number of output channels, and use
+     * the downmix information in the stream, if available.
+     * <p>Values larger than the number of channels in the content to decode behave like the number
+     * of channels in the content (if applicable), for instance passing 99 for a 5.1 audio stream
+     * behaves like passing 6.
+     * <p>This key is only used during decoding.
+     */
+    public static final String KEY_MAX_OUTPUT_CHANNEL_COUNT =
+            "max-output-channel-count";
+
+    /**
      * A key describing the number of frames to trim from the start of the decoded audio stream.
      * The associated value is an integer.
      */
@@ -650,8 +840,11 @@ public final class MediaFormat {
      * By default, the decoder will output the same number of channels as present in the encoded
      * stream, if supported. Set this value to limit the number of output channels, and use
      * the downmix information in the stream, if available.
-     * <p>Values larger than the number of channels in the content to decode are ignored.
+     * <p>Values larger than the number of channels in the content to decode behave just
+     * like the actual channel count of the content (e.g. passing 99 for the decoding of 5.1 content
+     * will behave like using 6).
      * <p>This key is only used during decoding.
+     * @deprecated Use the non-AAC-specific key {@link #KEY_MAX_OUTPUT_CHANNEL_COUNT} instead
      */
     public static final String KEY_AAC_MAX_OUTPUT_CHANNEL_COUNT = "aac-max-output-channel_count";
 
@@ -807,6 +1000,30 @@ public final class MediaFormat {
     public static final String KEY_FLAC_COMPRESSION_LEVEL = "flac-compression-level";
 
     /**
+     * A key describing the MPEG-H stream profile-level indication.
+     *
+     * See ISO_IEC_23008-3;2019 MHADecoderConfigurationRecord mpegh3daProfileLevelIndication.
+     */
+    public static final String KEY_MPEGH_PROFILE_LEVEL_INDICATION =
+            "mpegh-profile-level-indication";
+
+    /**
+     * A key describing the MPEG-H stream compatible sets.
+     *
+     * See FDAmd_2 of ISO_IEC_23008-3;2019 MHAProfileAndLevelCompatibilitySetBox.
+     */
+    public static final String KEY_MPEGH_COMPATIBLE_SETS = "mpegh-compatible-sets";
+
+    /**
+     * A key describing the MPEG-H stream reference channel layout.
+     *
+     * See ISO_IEC_23008-3;2019 MHADecoderConfigurationRecord referenceChannelLayout
+     * and ISO_IEC_23001‐8 ChannelConfiguration value.
+     */
+    public static final String KEY_MPEGH_REFERENCE_CHANNEL_LAYOUT =
+            "mpegh-reference-channel-layout";
+
+    /**
      * A key describing the encoding complexity.
      * The associated value is an integer.  These values are device and codec specific,
      * but lower values generally result in faster and/or less power-hungry encoding.
@@ -863,11 +1080,20 @@ public final class MediaFormat {
 
     /**
      * A key describing the desired profile to be used by an encoder.
+     * <p>
      * The associated value is an integer.
      * Constants are declared in {@link MediaCodecInfo.CodecProfileLevel}.
      * This key is used as a hint, and is only supported for codecs
-     * that specify a profile. Note: Codecs are free to use all the available
-     * coding tools at the specified profile.
+     * that specify a profile. When configuring profile, encoder configuration
+     * may fail if other parameters are not compatible with the desired
+     * profile or if the desired profile is not supported, but it may also
+     * fail silently (where the encoder ends up using a different, compatible profile.)
+     * <p class="note">
+     * <strong>Note:</strong> Codecs are free to use all the available
+     * coding tools at the specified profile, but may ultimately choose to not do so.
+     * <p class="note">
+     * <strong>Note:</strong> When configuring video encoders, profile must be
+     * set together with {@link #KEY_LEVEL level}.
      *
      * @see MediaCodecInfo.CodecCapabilities#profileLevels
      */
@@ -875,12 +1101,22 @@ public final class MediaFormat {
 
     /**
      * A key describing the desired profile to be used by an encoder.
+     * <p>
      * The associated value is an integer.
      * Constants are declared in {@link MediaCodecInfo.CodecProfileLevel}.
      * This key is used as a further hint when specifying a desired profile,
      * and is only supported for codecs that specify a level.
      * <p>
      * This key is ignored if the {@link #KEY_PROFILE profile} is not specified.
+     * Otherwise, the value should be a level compatible with the configured encoding
+     * parameters.
+     * <p class="note">
+     * <strong>Note:</strong> This key cannot be used to constrain the encoder's
+     * output to a maximum encoding level. Encoders are free to target a different
+     * level if the configured encoding parameters dictate it. Nevertheless,
+     * encoders shall use (and encode) a level sufficient to decode the generated
+     * bitstream, though they may exceed the (Video) Buffering Verifier limits for
+     * that encoded level.
      *
      * @see MediaCodecInfo.CodecCapabilities#profileLevels
      */
@@ -933,6 +1169,152 @@ public final class MediaFormat {
     public static final String KEY_BITRATE_MODE = "bitrate-mode";
 
     /**
+     * A key describing the maximum Quantization Parameter allowed for encoding video.
+     * This key applies to all three video picture types (I, P, and B).
+     * The value is used directly for picture type I; a per-mime formula is used
+     * to calculate the value for the remaining picture types.
+     *
+     * This calculation can be avoided by directly specifying values for each picture type
+     * using the type-specific keys {@link #KEY_VIDEO_QP_I_MAX}, {@link #KEY_VIDEO_QP_P_MAX},
+     * and {@link #KEY_VIDEO_QP_B_MAX}.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_MAX = "video-qp-max";
+
+    /**
+     * A key describing the minimum Quantization Parameter allowed for encoding video.
+     * This key applies to all three video frame types (I, P, and B).
+     * The value is used directly for picture type I; a per-mime formula is used
+     * to calculate the value for the remaining picture types.
+     *
+     * This calculation can be avoided by directly specifying values for each picture type
+     * using the type-specific keys {@link #KEY_VIDEO_QP_I_MIN}, {@link #KEY_VIDEO_QP_P_MIN},
+     * and {@link #KEY_VIDEO_QP_B_MIN}.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_MIN = "video-qp-min";
+
+    /**
+     * A key describing the maximum Quantization Parameter allowed for encoding video.
+     * This value applies to video I-frames.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_I_MAX = "video-qp-i-max";
+
+    /**
+     * A key describing the minimum Quantization Parameter allowed for encoding video.
+     * This value applies to video I-frames.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_I_MIN = "video-qp-i-min";
+
+    /**
+     * A key describing the maximum Quantization Parameter allowed for encoding video.
+     * This value applies to video P-frames.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_P_MAX = "video-qp-p-max";
+
+    /**
+     * A key describing the minimum Quantization Parameter allowed for encoding video.
+     * This value applies to video P-frames.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_P_MIN = "video-qp-p-min";
+
+    /**
+     * A key describing the maximum Quantization Parameter allowed for encoding video.
+     * This value applies to video B-frames.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_B_MAX = "video-qp-b-max";
+
+    /**
+     * A key describing the minimum Quantization Parameter allowed for encoding video.
+     * This value applies to video B-frames.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_B_MIN = "video-qp-b-min";
+
+    /**
+     * A key describing the level of encoding statistics information emitted from video encoder.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_ENCODING_STATISTICS_LEVEL =
+            "video-encoding-statistics-level";
+
+    /**
+     * Encoding Statistics Level None.
+     * Encoder generates no information about Encoding statistics.
+     */
+    public static final int VIDEO_ENCODING_STATISTICS_LEVEL_NONE = 0;
+
+    /**
+     * Encoding Statistics Level 1.
+     * Encoder generates {@link MediaFormat#KEY_PICTURE_TYPE} and
+     * {@link MediaFormat#KEY_VIDEO_QP_AVERAGE} for each frame.
+     */
+    public static final int VIDEO_ENCODING_STATISTICS_LEVEL_1 = 1;
+
+    /** @hide */
+    @IntDef({
+        VIDEO_ENCODING_STATISTICS_LEVEL_NONE,
+        VIDEO_ENCODING_STATISTICS_LEVEL_1,
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface VideoEncodingStatisticsLevel {}
+
+    /**
+     * A key describing the per-frame average block QP (Quantization Parameter).
+     * This is a part of a video 'Encoding Statistics' export feature.
+     * This value is emitted from video encoder for a video frame.
+     * The average value is rounded to the nearest integer value.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_VIDEO_QP_AVERAGE = "video-qp-average";
+
+    /**
+     * A key describing the picture type of the encoded frame.
+     * This is a part of a video 'Encoding Statistics' export feature.
+     * This value is emitted from video encoder for a video frame.
+     *
+     * The associated value is an integer.
+     */
+    public static final String KEY_PICTURE_TYPE = "picture-type";
+
+    /** Picture Type is unknown. */
+    public static final int PICTURE_TYPE_UNKNOWN = 0;
+
+    /** Picture Type is I Frame. */
+    public static final int PICTURE_TYPE_I = 1;
+
+    /** Picture Type is P Frame. */
+    public static final int PICTURE_TYPE_P = 2;
+
+    /** Picture Type is B Frame. */
+    public static final int PICTURE_TYPE_B = 3;
+
+    /** @hide */
+    @IntDef({
+        PICTURE_TYPE_UNKNOWN,
+        PICTURE_TYPE_I,
+        PICTURE_TYPE_P,
+        PICTURE_TYPE_B,
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface PictureType {}
+
+    /**
      * A key describing the audio session ID of the AudioTrack associated
      * to a tunneled video codec.
      * The associated value is an integer.
@@ -940,6 +1322,17 @@ public final class MediaFormat {
      * @see MediaCodecInfo.CodecCapabilities#FEATURE_TunneledPlayback
      */
     public static final String KEY_AUDIO_SESSION_ID = "audio-session-id";
+
+    /**
+     * A key describing the audio hardware sync ID of the AudioTrack associated
+     * to a tunneled video codec. The associated value is an integer.
+     *
+     * @hide
+     *
+     * @see MediaCodecInfo.CodecCapabilities#FEATURE_TunneledPlayback
+     * @see AudioManager#getAudioHwSyncForSession
+     */
+    public static final String KEY_AUDIO_HW_SYNC = "audio-hw-sync";
 
     /**
      * A key for boolean AUTOSELECT behavior for the track. Tracks with AUTOSELECT=true
@@ -1106,6 +1499,22 @@ public final class MediaFormat {
     public static final String KEY_HDR10_PLUS_INFO = "hdr10-plus-info";
 
     /**
+     * An optional key describing the opto-electronic transfer function
+     * requested for the output video content.
+     *
+     * The associated value is an integer: 0 if unspecified, or one of the
+     * COLOR_TRANSFER_ values. When unspecified the component will not touch the
+     * video content; otherwise the component will tone-map the raw video frame
+     * to match the requested transfer function.
+     *
+     * After configure, component's input format will contain this key to note
+     * whether the request is supported or not. If the value in the input format
+     * is the same as the requested value, the request is supported. The value
+     * is set to 0 if unsupported.
+     */
+    public static final String KEY_COLOR_TRANSFER_REQUEST = "color-transfer-request";
+
+    /**
      * A key describing a unique ID for the content of a media track.
      *
      * <p>This key is used by {@link MediaExtractor}. Some extractors provide multiple encodings
@@ -1162,6 +1571,18 @@ public final class MediaFormat {
      * B frames; it's up to the encoder to decide.
      */
     public static final String KEY_MAX_B_FRAMES = "max-bframes";
+
+    /**
+     * A key for applications to opt out of allowing
+     * a Surface to discard undisplayed/unconsumed frames
+     * as means to catch up after falling behind.
+     * This value is an integer.
+     * The value 0 indicates the surface is not allowed to drop frames.
+     * The value 1 indicates the surface is allowed to drop frames.
+     *
+     * {@link MediaCodec} describes the semantics.
+     */
+    public static final String KEY_ALLOW_FRAME_DROP = "allow-frame-drop";
 
     /* package private */ MediaFormat(@NonNull Map<String, Object> map) {
         mMap = map;

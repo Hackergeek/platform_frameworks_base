@@ -17,15 +17,15 @@ package android.view.contentcapture;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.content.LocusId;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.util.DebugUtils;
 
-import com.android.internal.util.Preconditions;
-
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.Objects;
 
 /**
  * Defines a condition for when content capture should be allowed.
@@ -60,7 +60,7 @@ public final class ContentCaptureCondition implements Parcelable {
      * the {@code LocusId} used in the {@link ContentCaptureContext}).
      */
     public ContentCaptureCondition(@NonNull LocusId locusId, @Flags int flags) {
-        this.mLocusId = Preconditions.checkNotNull(locusId);
+        this.mLocusId = Objects.requireNonNull(locusId);
         this.mFlags = flags;
     }
 
@@ -91,7 +91,7 @@ public final class ContentCaptureCondition implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object obj) {
+    public boolean equals(@Nullable Object obj) {
         if (this == obj) return true;
         if (obj == null) return false;
         if (getClass() != obj.getClass()) return false;
@@ -133,7 +133,7 @@ public final class ContentCaptureCondition implements Parcelable {
 
                 @Override
                 public ContentCaptureCondition createFromParcel(@NonNull Parcel parcel) {
-                    return new ContentCaptureCondition(parcel.readParcelable(null),
+                    return new ContentCaptureCondition(parcel.readParcelable(null, android.content.LocusId.class),
                             parcel.readInt());
                 }
 

@@ -23,7 +23,8 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import android.content.pm.SharedLibraryInfo;
-import android.content.pm.parsing.ParsingPackage;
+import com.android.server.pm.pkg.parsing.ParsingPackage;
+import android.platform.test.annotations.Presubmit;
 import android.util.SparseArray;
 
 import androidx.test.filters.SmallTest;
@@ -46,6 +47,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+@Presubmit
 @RunWith(AndroidJUnit4.class)
 @SmallTest
 public class DexoptUtilsTest {
@@ -134,7 +136,7 @@ public class DexoptUtilsTest {
 
     private List<SharedLibraryInfo> createMockSharedLibrary(String [] sharedLibrary) {
         SharedLibraryInfo info = new SharedLibraryInfo(null, null, Arrays.asList(sharedLibrary),
-                null, 0L, SharedLibraryInfo.TYPE_STATIC, null, null, null);
+                null, 0L, SharedLibraryInfo.TYPE_STATIC, null, null, null, false /* isNative */);
         ArrayList<SharedLibraryInfo> libraries = new ArrayList<>();
         libraries.add(info);
         return libraries;

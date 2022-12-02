@@ -18,6 +18,7 @@ package android.service.notification;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.os.Parcel;
@@ -497,11 +498,11 @@ public final class ZenPolicy implements Parcelable {
             mZenPolicy.mPriorityCategories.set(category, STATE_UNSET);
 
             if (category == PRIORITY_CATEGORY_MESSAGES) {
-                mZenPolicy.mPriorityMessages = STATE_UNSET;
+                mZenPolicy.mPriorityMessages = PEOPLE_TYPE_UNSET;
             } else if (category == PRIORITY_CATEGORY_CALLS) {
-                mZenPolicy.mPriorityCalls = STATE_UNSET;
+                mZenPolicy.mPriorityCalls = PEOPLE_TYPE_UNSET;
             } else if (category == PRIORITY_CATEGORY_CONVERSATIONS) {
-                mZenPolicy.mConversationSenders = STATE_UNSET;
+                mZenPolicy.mConversationSenders = CONVERSATION_SENDERS_UNSET;
             }
 
             return this;
@@ -803,8 +804,8 @@ public final class ZenPolicy implements Parcelable {
         @Override
         public ZenPolicy createFromParcel(Parcel source) {
             ZenPolicy policy = new ZenPolicy();
-            policy.mPriorityCategories = source.readArrayList(Integer.class.getClassLoader());
-            policy.mVisualEffects = source.readArrayList(Integer.class.getClassLoader());
+            policy.mPriorityCategories = source.readArrayList(Integer.class.getClassLoader(), java.lang.Integer.class);
+            policy.mVisualEffects = source.readArrayList(Integer.class.getClassLoader(), java.lang.Integer.class);
             policy.mPriorityCalls = source.readInt();
             policy.mPriorityMessages = source.readInt();
             policy.mConversationSenders = source.readInt();
@@ -950,7 +951,7 @@ public final class ZenPolicy implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (!(o instanceof ZenPolicy)) return false;
         if (o == this) return true;
         final ZenPolicy other = (ZenPolicy) o;

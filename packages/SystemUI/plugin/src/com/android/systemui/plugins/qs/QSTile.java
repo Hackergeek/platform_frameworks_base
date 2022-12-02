@@ -19,6 +19,9 @@ import android.content.Context;
 import android.graphics.drawable.Drawable;
 import android.metrics.LogMaker;
 import android.service.quicksettings.Tile;
+import android.view.View;
+
+import androidx.annotation.Nullable;
 
 import com.android.internal.logging.InstanceId;
 import com.android.systemui.plugins.annotations.DependsOn;
@@ -32,14 +35,12 @@ import java.util.function.Supplier;
 
 @ProvidesInterface(version = QSTile.VERSION)
 @DependsOn(target = QSIconView.class)
-@DependsOn(target = DetailAdapter.class)
 @DependsOn(target = Callback.class)
 @DependsOn(target = Icon.class)
 @DependsOn(target = State.class)
 public interface QSTile {
-    int VERSION = 1;
+    int VERSION = 4;
 
-    DetailAdapter getDetailAdapter();
     String getTileSpec();
 
     boolean isAvailable();
@@ -53,12 +54,35 @@ public interface QSTile {
     void removeCallbacks();
 
     QSIconView createTileView(Context context);
-    
-    void click();
-    void secondaryClick();
-    void longClick();
+
+    /**
+     * The tile was clicked.
+     *
+     * @param view The view that was clicked.
+     */
+    void click(@Nullable View view);
+
+    /**
+     * The tile secondary click was triggered.
+     *
+     * @param view The view that was clicked.
+     */
+    void secondaryClick(@Nullable View view);
+
+    /**
+     * The tile was long clicked.
+     *
+     * @param view The view that was clicked.
+     */
+    void longClick(@Nullable View view);
 
     void userSwitch(int currentUser);
+
+    /**
+     * @deprecated not needed as {@link com.android.internal.logging.UiEvent} will use
+     * {@link #getMetricsSpec}
+     */
+    @Deprecated
     int getMetricsCategory();
 
     void setListening(Object client, boolean listening);
@@ -86,14 +110,20 @@ public interface QSTile {
      */
     InstanceId getInstanceId();
 
+    default boolean isTileReady() {
+        return false;
+    }
+
+    /**
+     * Return whether the tile is set to its listening state and therefore receiving updates and
+     * refreshes from controllers
+     */
+    boolean isListening();
+
     @ProvidesInterface(version = Callback.VERSION)
-    public interface Callback {
-        public static final int VERSION = 1;
+    interface Callback {
+        static final int VERSION = 2;
         void onStateChanged(State state);
-        void onShowDetail(boolean show);
-        void onToggleStateChanged(boolean state);
-        void onScanStateChanged(boolean state);
-        void onAnnouncementRequested(CharSequence announcement);
     }
 
     @ProvidesInterface(version = Icon.VERSION)
@@ -124,13 +154,15 @@ public interface QSTile {
     @ProvidesInterface(version = State.VERSION)
     public static class State {
         public static final int VERSION = 1;
+        public static final int DEFAULT_STATE = Tile.STATE_ACTIVE;
+
         public Icon icon;
         public Supplier<Icon> iconSupplier;
-        public int state = Tile.STATE_ACTIVE;
+        public int state = DEFAULT_STATE;
         public CharSequence label;
-        public CharSequence secondaryLabel;
+        @Nullable public CharSequence secondaryLabel;
         public CharSequence contentDescription;
-        public CharSequence stateDescription;
+        @Nullable public CharSequence stateDescription;
         public CharSequence dualLabelContentDescription;
         public boolean disabledByPolicy;
         public boolean dualTarget = false;
@@ -139,11 +171,15 @@ public interface QSTile {
         public SlashState slash;
         public boolean handlesLongClick = true;
         public boolean showRippleEffect = true;
+        @Nullable
+        public Drawable sideViewCustomDrawable;
+        public String spec;
 
         public boolean copyTo(State other) {
             if (other == null) throw new IllegalArgumentException();
             if (!other.getClass().equals(getClass())) throw new IllegalArgumentException();
-            final boolean changed = !Objects.equals(other.icon, icon)
+            final boolean changed = !Objects.equals(other.spec, spec)
+                    || !Objects.equals(other.icon, icon)
                     || !Objects.equals(other.iconSupplier, iconSupplier)
                     || !Objects.equals(other.label, label)
                     || !Objects.equals(other.secondaryLabel, secondaryLabel)
@@ -159,7 +195,9 @@ public interface QSTile {
                     || !Objects.equals(other.dualTarget, dualTarget)
                     || !Objects.equals(other.slash, slash)
                     || !Objects.equals(other.handlesLongClick, handlesLongClick)
-                    || !Objects.equals(other.showRippleEffect, showRippleEffect);
+                    || !Objects.equals(other.showRippleEffect, showRippleEffect)
+                    || !Objects.equals(other.sideViewCustomDrawable, sideViewCustomDrawable);
+            other.spec = spec;
             other.icon = icon;
             other.iconSupplier = iconSupplier;
             other.label = label;
@@ -175,6 +213,7 @@ public interface QSTile {
             other.slash = slash != null ? slash.copy() : null;
             other.handlesLongClick = handlesLongClick;
             other.showRippleEffect = showRippleEffect;
+            other.sideViewCustomDrawable = sideViewCustomDrawable;
             return changed;
         }
 
@@ -187,6 +226,7 @@ public interface QSTile {
         // This string may be used for CTS testing of tiles, so removing elements is discouraged.
         protected StringBuilder toStringBuilder() {
             final StringBuilder sb = new StringBuilder(getClass().getSimpleName()).append('[');
+            sb.append("spec=").append(spec);
             sb.append(",icon=").append(icon);
             sb.append(",iconSupplier=").append(iconSupplier);
             sb.append(",label=").append(label);
@@ -200,6 +240,7 @@ public interface QSTile {
             sb.append(",isTransient=").append(isTransient);
             sb.append(",state=").append(state);
             sb.append(",slash=\"").append(slash).append("\"");
+            sb.append(",sideViewCustomDrawable=").append(sideViewCustomDrawable);
             return sb.append(']');
         }
 
@@ -214,12 +255,16 @@ public interface QSTile {
     public static class BooleanState extends State {
         public static final int VERSION = 1;
         public boolean value;
+        public boolean forceExpandIcon;
 
         @Override
         public boolean copyTo(State other) {
             final BooleanState o = (BooleanState) other;
-            final boolean changed = super.copyTo(other) || o.value != value;
+            final boolean changed = super.copyTo(other)
+                    || o.value != value
+                    || o.forceExpandIcon != forceExpandIcon;
             o.value = value;
+            o.forceExpandIcon = forceExpandIcon;
             return changed;
         }
 
@@ -227,6 +272,7 @@ public interface QSTile {
         protected StringBuilder toStringBuilder() {
             final StringBuilder rt = super.toStringBuilder();
             rt.insert(rt.length() - 1, ",value=" + value);
+            rt.insert(rt.length() - 1, ",forceExpandIcon=" + forceExpandIcon);
             return rt;
         }
 

@@ -26,7 +26,7 @@ namespace android {
  */
 class HardwareRendererObserver : public uirenderer::FrameMetricsObserver {
 public:
-    HardwareRendererObserver(JavaVM *vm, jobject observer);
+    HardwareRendererObserver(JavaVM* vm, jobject observer, bool waitForPresentTime);
     ~HardwareRendererObserver();
 
     /**
@@ -63,7 +63,8 @@ private:
     };
 
     JavaVM* const mVm;
-    jweak mObserverWeak;
+    jobject mObserver;
+    bool mKeepListening = true;
 
     int mNextFree = 0;
     int mNextInQueue = 0;

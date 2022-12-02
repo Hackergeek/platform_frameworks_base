@@ -16,7 +16,6 @@
 package com.android.server.devicepolicy;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -32,7 +31,9 @@ import android.app.AppOpsManager;
 import android.app.IActivityManager;
 import android.app.IActivityTaskManager;
 import android.app.NotificationManager;
+import android.app.admin.DevicePolicyManager;
 import android.app.backup.IBackupManager;
+import android.app.role.RoleManager;
 import android.app.usage.UsageStatsManagerInternal;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -46,16 +47,19 @@ import android.content.pm.PackageManager;
 import android.content.pm.PackageManagerInternal;
 import android.content.pm.UserInfo;
 import android.database.Cursor;
+import android.hardware.usb.UsbManager;
+import android.location.LocationManager;
 import android.media.IAudioService;
+import android.net.ConnectivityManager;
 import android.net.IIpConnectivityMetrics;
 import android.net.Uri;
+import android.net.VpnManager;
 import android.net.wifi.WifiManager;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.os.PowerManagerInternal;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.os.UserManagerInternal;
 import android.permission.IPermissionManager;
 import android.provider.Settings;
 import android.security.KeyChain;
@@ -71,6 +75,7 @@ import com.android.internal.widget.LockPatternUtils;
 import com.android.internal.widget.LockSettingsInternal;
 import com.android.server.PersistentDataBlockManagerInternal;
 import com.android.server.net.NetworkPolicyManagerInternal;
+import com.android.server.pm.UserManagerInternal;
 import com.android.server.wm.ActivityTaskManagerInternal;
 
 import java.io.File;
@@ -78,6 +83,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -87,6 +93,7 @@ public class MockSystemServices {
     public final File systemUserDataDir;
     public final EnvironmentForMock environment;
     public final SystemPropertiesForMock systemProperties;
+    public final Executor executor;
     public final UserManager userManager;
     public final UserManagerInternal userManagerInternal;
     public final UsageStatsManagerInternal usageStatsManagerInternal;
@@ -114,16 +121,23 @@ public class MockSystemServices {
     public final SettingsForMock settings;
     public final MockContentResolver contentResolver;
     public final TelephonyManager telephonyManager;
+    public final ConnectivityManager connectivityManager;
     public final AccountManager accountManager;
     public final AlarmManager alarmManager;
     public final KeyChain.KeyChainConnection keyChainConnection;
     public final CrossProfileApps crossProfileApps;
     public final PersistentDataBlockManagerInternal persistentDataBlockManagerInternal;
     public final AppOpsManager appOpsManager;
+    public final UsbManager usbManager;
+    public final VpnManager vpnManager;
+    public final DevicePolicyManager devicePolicyManager;
+    public final LocationManager locationManager;
+    public final RoleManager roleManager;
     /** Note this is a partial mock, not a real mock. */
     public final PackageManager packageManager;
     public final BuildMock buildMock = new BuildMock();
     public final File dataDir;
+    public final PolicyPathProvider pathProvider;
 
     public MockSystemServices(Context realContext, String name) {
         dataDir = new File(realContext.getCacheDir(), name);
@@ -131,6 +145,7 @@ public class MockSystemServices {
 
         environment = mock(EnvironmentForMock.class);
         systemProperties = mock(SystemPropertiesForMock.class);
+        executor = mock(Executor.class);
         userManager = mock(UserManager.class);
         userManagerInternal = mock(UserManagerInternal.class);
         usageStatsManagerInternal = mock(UsageStatsManagerInternal.class);
@@ -158,12 +173,18 @@ public class MockSystemServices {
         wifiManager = mock(WifiManager.class);
         settings = mock(SettingsForMock.class);
         telephonyManager = mock(TelephonyManager.class);
+        connectivityManager = mock(ConnectivityManager.class);
         accountManager = mock(AccountManager.class);
         alarmManager = mock(AlarmManager.class);
         keyChainConnection = mock(KeyChain.KeyChainConnection.class, RETURNS_DEEP_STUBS);
         crossProfileApps = mock(CrossProfileApps.class);
         persistentDataBlockManagerInternal = mock(PersistentDataBlockManagerInternal.class);
         appOpsManager = mock(AppOpsManager.class);
+        usbManager = mock(UsbManager.class);
+        vpnManager = mock(VpnManager.class);
+        devicePolicyManager = mock(DevicePolicyManager.class);
+        locationManager = mock(LocationManager.class);
+        roleManager = realContext.getSystemService(RoleManager.class);
 
         // Package manager is huge, so we use a partial mock instead.
         packageManager = spy(realContext.getPackageManager());
@@ -197,6 +218,17 @@ public class MockSystemServices {
 
         // System user is always running.
         setUserRunning(UserHandle.USER_SYSTEM, true);
+        pathProvider = new PolicyPathProvider() {
+            @Override
+            public File getDataSystemDirectory() {
+                return new File(systemUserDataDir.getAbsolutePath());
+            }
+
+            @Override
+            public File getUserSystemDirectory(int userId) {
+                return environment.getUserSystemDirectory(userId);
+            }
+        };
     }
 
     /** Optional mapping of other user contexts for {@link #createPackageContextAsUser} to return */
@@ -236,7 +268,7 @@ public class MockSystemServices {
         }
         mUserInfos.add(uh);
         when(userManager.getUsers()).thenReturn(mUserInfos);
-        when(userManager.getUsers(anyBoolean())).thenReturn(mUserInfos);
+        when(userManager.getAliveUsers()).thenReturn(mUserInfos);
         when(userManager.isUserRunning(eq(new UserHandle(userId)))).thenReturn(true);
         when(userManager.getProfileParent(anyInt())).thenAnswer(
                 invocation -> {
@@ -393,8 +425,10 @@ public class MockSystemServices {
     }
 
     public static class RecoverySystemForMock {
-        public void rebootWipeUserData(boolean shutdown, String reason, boolean force,
-                boolean wipeEuicc) throws IOException {
+        public boolean rebootWipeUserData(boolean shutdown, String reason, boolean force,
+                boolean wipeEuicc, boolean wipeExtRequested, boolean wipeResetProtectionData)
+                        throws IOException {
+            return false;
         }
     }
 
@@ -420,7 +454,7 @@ public class MockSystemServices {
     }
 
     public static class UserManagerForMock {
-        public boolean isSplitSystemUser() {
+        public boolean isHeadlessSystemUserMode() {
             return false;
         }
     }
@@ -480,18 +514,6 @@ public class MockSystemServices {
 
     public static class StorageManagerForMock {
         public boolean isFileBasedEncryptionEnabled() {
-            return false;
-        }
-
-        public boolean isNonDefaultBlockEncrypted() {
-            return false;
-        }
-
-        public boolean isEncrypted() {
-            return false;
-        }
-
-        public boolean isEncryptable() {
             return false;
         }
     }

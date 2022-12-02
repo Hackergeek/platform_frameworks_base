@@ -24,25 +24,25 @@ import android.util.Log;
 
 import androidx.annotation.NonNull;
 
+import com.android.systemui.dagger.SysUISingleton;
 import com.android.systemui.plugins.statusbar.StatusBarStateController;
 import com.android.systemui.statusbar.NotificationListener;
 import com.android.systemui.statusbar.NotificationRemoteInputManager;
 import com.android.systemui.statusbar.notification.NotificationEntryManager;
-import com.android.systemui.statusbar.notification.VisualStabilityManager;
 import com.android.systemui.statusbar.notification.collection.NotificationEntry;
+import com.android.systemui.statusbar.notification.collection.legacy.VisualStabilityManager;
 import com.android.systemui.statusbar.notification.collection.notifcollection.NotifCollectionListener;
 import com.android.systemui.statusbar.policy.HeadsUpManager;
 import com.android.systemui.statusbar.policy.OnHeadsUpChangedListener;
 
 import javax.inject.Inject;
-import javax.inject.Singleton;
 
 /**
  * Controller class for old pipeline heads up logic. It listens to {@link NotificationEntryManager}
  * entry events and appropriately binds or unbinds the heads up view and promotes it to the top
  * of the screen.
  */
-@Singleton
+@SysUISingleton
 public class HeadsUpController {
     private final HeadsUpViewBinder mHeadsUpViewBinder;
     private final NotificationInterruptStateProvider mInterruptStateProvider;
@@ -124,7 +124,7 @@ public class HeadsUpController {
         if (wasHeadsUp) {
             if (shouldHeadsUp) {
                 mHeadsUpManager.updateNotification(entry.getKey(), hunAgain);
-            } else if (!mHeadsUpManager.isEntryAutoHeadsUpped(entry.getKey())) {
+            } else {
                 // We don't want this to be interrupting anymore, let's remove it
                 mHeadsUpManager.removeNotification(entry.getKey(), false /* removeImmediately */);
             }
@@ -152,7 +152,7 @@ public class HeadsUpController {
             // Also we should not defer the removal if reordering isn't allowed since otherwise
             // some notifications can't disappear before the panel is closed.
             boolean ignoreEarliestRemovalTime =
-                    mRemoteInputManager.getController().isSpinning(key)
+                    mRemoteInputManager.isSpinning(key)
                             && !FORCE_REMOTE_INPUT_HISTORY
                             || !mVisualStabilityManager.isReorderingAllowed();
             mHeadsUpManager.removeNotification(key, ignoreEarliestRemovalTime);

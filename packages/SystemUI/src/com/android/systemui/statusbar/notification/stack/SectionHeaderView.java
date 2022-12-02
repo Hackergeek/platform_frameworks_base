@@ -85,8 +85,12 @@ public class SectionHeaderView extends StackScrollerDecorView {
         return true;
     }
 
-    void setAreThereDismissableGentleNotifs(boolean areThereDismissableGentleNotifs) {
-        mClearAllButton.setVisibility(areThereDismissableGentleNotifs ? View.VISIBLE : View.GONE);
+    /**
+     * Show the clear section [X] button
+     * @param enabled
+     */
+    public void setClearSectionButtonEnabled(boolean enabled) {
+        mClearAllButton.setVisibility(enabled ? View.VISIBLE : View.GONE);
     }
 
     @Override
@@ -97,7 +101,7 @@ public class SectionHeaderView extends StackScrollerDecorView {
     /**
      * Fired whenever the user clicks on the body of the header (e.g. no sub-buttons or anything).
      */
-    void setOnHeaderClickListener(View.OnClickListener listener) {
+    public void setOnHeaderClickListener(View.OnClickListener listener) {
         mLabelClickListener = listener;
         mLabelView.setOnClickListener(listener);
     }
@@ -112,7 +116,7 @@ public class SectionHeaderView extends StackScrollerDecorView {
     }
 
     /** Fired when the user clicks on the "X" button on the far right of the header. */
-    void setOnClearAllClickListener(View.OnClickListener listener) {
+    public void setOnClearAllClickListener(View.OnClickListener listener) {
         mOnClearClickListener = listener;
         mClearAllButton.setOnClickListener(listener);
     }
@@ -122,7 +126,8 @@ public class SectionHeaderView extends StackScrollerDecorView {
         return true;
     }
 
-    void setHeaderText(@StringRes int resId) {
+    /** Sets text to be displayed in the header */
+    public void setHeaderText(@StringRes int resId) {
         mLabelTextId = resId;
         mLabelView.setText(resId);
     }

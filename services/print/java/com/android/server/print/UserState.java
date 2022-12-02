@@ -30,6 +30,7 @@ import static com.android.internal.util.function.pooled.PooledLambda.obtainMessa
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.UserIdInt;
 import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.Context;
@@ -62,7 +63,6 @@ import android.print.PrinterInfo;
 import android.printservice.PrintServiceInfo;
 import android.printservice.recommendation.IRecommendationsChangeListener;
 import android.printservice.recommendation.RecommendationInfo;
-import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.service.print.CachedPrintJobProto;
 import android.service.print.InstalledPrintServiceProto;
@@ -132,7 +132,7 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
 
     private final Context mContext;
 
-    private final int mUserId;
+    private final @UserIdInt int mUserId;
 
     private final RemotePrintSpooler mSpooler;
 
@@ -437,6 +437,15 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
         }
     }
 
+    public boolean isPrintServiceEnabled(@NonNull ComponentName serviceName) {
+        synchronized (mLock) {
+            if (mDisabledServices.contains(serviceName)) {
+                return false;
+            }
+            return true;
+        }
+    }
+
     /**
      * @return The currently known print service recommendations
      */
@@ -650,7 +659,7 @@ final class UserState implements PrintSpoolerCallbacks, PrintServiceCallbacks,
 
                 mPrintServiceRecommendationsService =
                         new RemotePrintServiceRecommendationService(mContext,
-                                UserHandle.getUserHandleForUid(mUserId), this);
+                                UserHandle.of(mUserId), this);
             }
             mPrintServiceRecommendationsChangeListenerRecords.add(
                     new ListenerRecord<IRecommendationsChangeListener>(listener) {

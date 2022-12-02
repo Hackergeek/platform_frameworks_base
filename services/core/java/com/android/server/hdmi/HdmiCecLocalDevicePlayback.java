@@ -16,14 +16,20 @@
 
 package com.android.server.hdmi;
 
+import android.annotation.CallSuper;
+import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
 import android.hardware.hdmi.HdmiControlManager;
 import android.hardware.hdmi.HdmiDeviceInfo;
 import android.hardware.hdmi.IHdmiControlCallback;
 import android.hardware.tv.cec.V1_0.SendMessageResult;
+import android.os.Binder;
+import android.os.Handler;
 import android.os.PowerManager;
 import android.os.PowerManager.WakeLock;
 import android.os.SystemProperties;
-import android.provider.Settings.Global;
 import android.sysprop.HdmiProperties;
 import android.util.Slog;
 
@@ -44,8 +50,9 @@ import java.util.Locale;
 public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
     private static final String TAG = "HdmiCecLocalDevicePlayback";
 
-    private static final boolean SET_MENU_LANGUAGE =
-            HdmiProperties.set_menu_language().orElse(false);
+    // How long to wait after hotplug out before possibly going to Standby.
+    @VisibleForTesting
+    static final long STANDBY_AFTER_HOTPLUG_OUT_DELAY_MS = 30_000;
 
     // Used to keep the device awake while it is the active source. For devices that
     // cannot wake up via CEC commands, this address the inconvenience of having to
@@ -55,38 +62,21 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
     // Lazily initialized - should call getWakeLock() to get the instance.
     private ActiveWakeLock mWakeLock;
 
-    // If true, turn off TV upon standby. False by default.
-    private boolean mAutoTvOff;
-
-    // Local active port number used for Routing Control.
-    // Default 0 means HOME is the current active path. Temp solution only.
-    // TODO(amyjojo): adding system constants for input ports to TIF mapping.
-    private int mLocalActivePath = 0;
+    // Handler for queueing a delayed Standby runnable after hotplug out.
+    private Handler mDelayedStandbyHandler;
 
     // Determines what action should be taken upon receiving Routing Control messages.
     @VisibleForTesting
-    protected String mPlaybackDeviceActionOnRoutingControl;
-
-    // Behaviour of the device when <Active Source> is lost in favor of another device.
-    @VisibleForTesting
-    protected String mPowerStateChangeOnActiveSourceLost;
+    protected HdmiProperties.playback_device_action_on_routing_control_values
+            mPlaybackDeviceActionOnRoutingControl = HdmiProperties
+                    .playback_device_action_on_routing_control()
+                    .orElse(HdmiProperties.playback_device_action_on_routing_control_values.NONE);
 
     HdmiCecLocalDevicePlayback(HdmiControlService service) {
         super(service, HdmiDeviceInfo.DEVICE_PLAYBACK);
 
-        mAutoTvOff = mService.readBooleanSetting(Global.HDMI_CONTROL_AUTO_DEVICE_OFF_ENABLED, false);
-
-        // The option is false by default. Update settings db as well to have the right
-        // initial setting on UI.
-        mService.writeBooleanSetting(Global.HDMI_CONTROL_AUTO_DEVICE_OFF_ENABLED, mAutoTvOff);
-
-        mPlaybackDeviceActionOnRoutingControl = SystemProperties.get(
-                Constants.PLAYBACK_DEVICE_ACTION_ON_ROUTING_CONTROL,
-                Constants.PLAYBACK_DEVICE_ACTION_ON_ROUTING_CONTROL_NONE);
-
-        mPowerStateChangeOnActiveSourceLost = SystemProperties.get(
-                Constants.POWER_STATE_CHANGE_ON_ACTIVE_SOURCE_LOST,
-                Constants.POWER_STATE_CHANGE_ON_ACTIVE_SOURCE_LOST_NONE);
+        mDelayedStandbyHandler = new Handler(service.getServiceLooper());
+        mStandbyHandler = new HdmiCecStandbyModeHandler(service, this);
     }
 
     @Override
@@ -95,12 +85,17 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
         assertRunOnServiceThread();
         if (reason == mService.INITIATED_BY_ENABLE_CEC) {
             mService.setAndBroadcastActiveSource(mService.getPhysicalAddress(),
-                    getDeviceInfo().getDeviceType(), Constants.ADDR_BROADCAST);
+                    getDeviceInfo().getDeviceType(), Constants.ADDR_BROADCAST,
+                    "HdmiCecLocalDevicePlayback#onAddressAllocated()");
         }
-        mService.sendCecCommand(HdmiCecMessageBuilder.buildReportPhysicalAddressCommand(
-                mAddress, mService.getPhysicalAddress(), mDeviceType));
-        mService.sendCecCommand(HdmiCecMessageBuilder.buildDeviceVendorIdCommand(
-                mAddress, mService.getVendorId()));
+        mService.sendCecCommand(
+                HdmiCecMessageBuilder.buildReportPhysicalAddressCommand(
+                        getDeviceInfo().getLogicalAddress(),
+                        mService.getPhysicalAddress(),
+                        mDeviceType));
+        mService.sendCecCommand(
+                HdmiCecMessageBuilder.buildDeviceVendorIdCommand(
+                        getDeviceInfo().getLogicalAddress(), mService.getVendorId()));
         // Actively send out an OSD name to the TV to update the TV panel in case the TV
         // does not query the OSD name on time. This is not a required behavior by the spec.
         // It is used for some TVs that need the OSD name update but don't query it themselves.
@@ -109,8 +104,10 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
             // If current device is not a functional audio system device,
             // send message to potential audio system device in the system to get the system
             // audio mode status. If no response, set to false.
-            mService.sendCecCommand(HdmiCecMessageBuilder.buildGiveSystemAudioModeStatus(
-                    mAddress, Constants.ADDR_AUDIO_SYSTEM), new SendMessageCallback() {
+            mService.sendCecCommand(
+                    HdmiCecMessageBuilder.buildGiveSystemAudioModeStatus(
+                            getDeviceInfo().getLogicalAddress(), Constants.ADDR_AUDIO_SYSTEM),
+                    new SendMessageCallback() {
                         @Override
                         public void onSendCompleted(int error) {
                             if (error != SendMessageResult.SUCCESS) {
@@ -121,7 +118,40 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
                         }
                     });
         }
+        launchDeviceDiscovery();
         startQueuedActions();
+    }
+
+    @ServiceThreadOnly
+    private void launchDeviceDiscovery() {
+        assertRunOnServiceThread();
+        clearDeviceInfoList();
+        DeviceDiscoveryAction action = new DeviceDiscoveryAction(this,
+                new DeviceDiscoveryAction.DeviceDiscoveryCallback() {
+                    @Override
+                    public void onDeviceDiscoveryDone(List<HdmiDeviceInfo> deviceInfos) {
+                        for (HdmiDeviceInfo info : deviceInfos) {
+                            mService.getHdmiCecNetwork().addCecDevice(info);
+                        }
+
+                        // Since we removed all devices when it starts and device discovery action
+                        // does not poll local devices, we should put device info of local device
+                        // manually here.
+                        for (HdmiCecLocalDevice device : mService.getAllLocalDevices()) {
+                            synchronized (device.mLock) {
+                                mService.getHdmiCecNetwork().addCecDevice(device.getDeviceInfo());
+                            }
+                        }
+
+                        List<HotplugDetectionAction> hotplugActions =
+                                getActions(HotplugDetectionAction.class);
+                        if (hotplugActions.isEmpty()) {
+                            addAndStartAction(
+                                    new HotplugDetectionAction(HdmiCecLocalDevicePlayback.this));
+                        }
+                    }
+                });
+        addAndStartAction(action);
     }
 
     @Override
@@ -140,23 +170,37 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
                 String.valueOf(addr));
     }
 
+    /**
+     * Performs the action 'device select' or 'one touch play' initiated by a Playback device.
+     *
+     * @param id id of HDMI device to select
+     * @param callback callback object to report the result with
+     */
     @ServiceThreadOnly
-    void queryDisplayStatus(IHdmiControlCallback callback) {
+    void deviceSelect(int id, IHdmiControlCallback callback) {
         assertRunOnServiceThread();
-        List<DevicePowerStatusAction> actions = getActions(DevicePowerStatusAction.class);
-        if (!actions.isEmpty()) {
-            Slog.i(TAG, "queryDisplayStatus already in progress");
-            actions.get(0).addCallback(callback);
+        synchronized (mLock) {
+            if (id == getDeviceInfo().getId()) {
+                mService.oneTouchPlay(callback);
+                return;
+            }
+        }
+        HdmiDeviceInfo targetDevice = mService.getHdmiCecNetwork().getDeviceInfo(id);
+        if (targetDevice == null) {
+            invokeCallback(callback, HdmiControlManager.RESULT_TARGET_NOT_AVAILABLE);
             return;
         }
-        DevicePowerStatusAction action = DevicePowerStatusAction.create(this, Constants.ADDR_TV,
-                callback);
-        if (action == null) {
-            Slog.w(TAG, "Cannot initiate queryDisplayStatus");
-            invokeCallback(callback, HdmiControlManager.RESULT_EXCEPTION);
+        int targetAddress = targetDevice.getLogicalAddress();
+        if (isAlreadyActiveSource(targetDevice, targetAddress, callback)) {
             return;
         }
-        addAndStartAction(action);
+        if (!mService.isControlEnabled()) {
+            setActiveSource(targetDevice, "HdmiCecLocalDevicePlayback#deviceSelect()");
+            invokeCallback(callback, HdmiControlManager.RESULT_INCORRECT_MODE);
+            return;
+        }
+        removeAction(DeviceSelectActionFromPlayback.class);
+        addAndStartAction(new DeviceSelectActionFromPlayback(this, targetDevice, callback));
     }
 
     @Override
@@ -164,9 +208,34 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
     void onHotplug(int portId, boolean connected) {
         assertRunOnServiceThread();
         mCecMessageCache.flushAll();
-        // We'll not clear mIsActiveSource on the hotplug event to pass CETC 11.2.2-2 ~ 3.
-        if (!connected) {
+
+        if (connected) {
+            mDelayedStandbyHandler.removeCallbacksAndMessages(null);
+        } else {
+            // We'll not invalidate the active source on the hotplug event to pass CETC 11.2.2-2 ~ 3
             getWakeLock().release();
+            mService.getHdmiCecNetwork().removeDevicesConnectedToPort(portId);
+
+            mDelayedStandbyHandler.removeCallbacksAndMessages(null);
+            mDelayedStandbyHandler.postDelayed(new DelayedStandbyRunnable(),
+                    STANDBY_AFTER_HOTPLUG_OUT_DELAY_MS);
+        }
+    }
+
+    /**
+     * Runnable for going to Standby if the device has been inactive for a certain amount of time.
+     * Posts a new instance of itself as a delayed message if the device was active.
+     */
+    private class DelayedStandbyRunnable implements Runnable {
+        @Override
+        public void run() {
+            if (mService.getPowerManagerInternal().wasDeviceIdleFor(
+                    STANDBY_AFTER_HOTPLUG_OUT_DELAY_MS)) {
+                mService.standby();
+            } else {
+                mDelayedStandbyHandler.postDelayed(new DelayedStandbyRunnable(),
+                        STANDBY_AFTER_HOTPLUG_OUT_DELAY_MS);
+            }
         }
     }
 
@@ -177,43 +246,86 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
         if (!mService.isControlEnabled()) {
             return;
         }
-        if (mIsActiveSource) {
-            mService.sendCecCommand(HdmiCecMessageBuilder.buildInactiveSource(
-                    mAddress, mService.getPhysicalAddress()));
+        boolean wasActiveSource = isActiveSource();
+        // Invalidate the internal active source record when going to standby
+        mService.setActiveSource(Constants.ADDR_INVALID, Constants.INVALID_PHYSICAL_ADDRESS,
+                "HdmiCecLocalDevicePlayback#onStandby()");
+        if (!wasActiveSource) {
+            return;
         }
-        boolean wasActiveSource = mIsActiveSource;
-        // Invalidate the internal active source record when goes to standby
-        // This set will also update mIsActiveSource
-        mService.setActiveSource(Constants.ADDR_INVALID, Constants.INVALID_PHYSICAL_ADDRESS);
-        if (initiatedByCec || !mAutoTvOff || !wasActiveSource) {
+        if (initiatedByCec) {
+            mService.sendCecCommand(
+                    HdmiCecMessageBuilder.buildInactiveSource(
+                            getDeviceInfo().getLogicalAddress(), mService.getPhysicalAddress()));
             return;
         }
         switch (standbyAction) {
             case HdmiControlService.STANDBY_SCREEN_OFF:
-                mService.sendCecCommand(
-                        HdmiCecMessageBuilder.buildStandby(mAddress, Constants.ADDR_TV));
+                // Get latest setting value
+                @HdmiControlManager.PowerControlMode
+                String powerControlMode = mService.getHdmiCecConfig().getStringValue(
+                        HdmiControlManager.CEC_SETTING_NAME_POWER_CONTROL_MODE);
+                switch (powerControlMode) {
+                    case HdmiControlManager.POWER_CONTROL_MODE_TV:
+                        mService.sendCecCommand(
+                                HdmiCecMessageBuilder.buildStandby(
+                                        getDeviceInfo().getLogicalAddress(), Constants.ADDR_TV));
+                        break;
+                    case HdmiControlManager.POWER_CONTROL_MODE_TV_AND_AUDIO_SYSTEM:
+                        mService.sendCecCommand(
+                                HdmiCecMessageBuilder.buildStandby(
+                                        getDeviceInfo().getLogicalAddress(), Constants.ADDR_TV));
+                        mService.sendCecCommand(
+                                HdmiCecMessageBuilder.buildStandby(
+                                        getDeviceInfo().getLogicalAddress(),
+                                        Constants.ADDR_AUDIO_SYSTEM));
+                        break;
+                    case HdmiControlManager.POWER_CONTROL_MODE_BROADCAST:
+                        mService.sendCecCommand(
+                                HdmiCecMessageBuilder.buildStandby(
+                                        getDeviceInfo().getLogicalAddress(),
+                                        Constants.ADDR_BROADCAST));
+                        break;
+                    case HdmiControlManager.POWER_CONTROL_MODE_NONE:
+                        mService.sendCecCommand(
+                                HdmiCecMessageBuilder.buildInactiveSource(
+                                        getDeviceInfo().getLogicalAddress(),
+                                        mService.getPhysicalAddress()));
+                        break;
+                }
                 break;
             case HdmiControlService.STANDBY_SHUTDOWN:
                 // ACTION_SHUTDOWN is taken as a signal to power off all the devices.
                 mService.sendCecCommand(
-                        HdmiCecMessageBuilder.buildStandby(mAddress, Constants.ADDR_BROADCAST));
+                        HdmiCecMessageBuilder.buildStandby(
+                                getDeviceInfo().getLogicalAddress(), Constants.ADDR_BROADCAST));
                 break;
         }
     }
 
     @Override
     @ServiceThreadOnly
-    void setAutoDeviceOff(boolean enabled) {
-        assertRunOnServiceThread();
-        mAutoTvOff = enabled;
+    protected void onInitializeCecComplete(int initiatedBy) {
+        if (initiatedBy == HdmiControlService.INITIATED_BY_SCREEN_ON) {
+            oneTouchPlay(new IHdmiControlCallback.Stub() {
+                @Override
+                public void onComplete(int result) {
+                    if (result != HdmiControlManager.RESULT_SUCCESS) {
+                        Slog.w(TAG, "Failed to complete One Touch Play. result=" + result);
+                    }
+                }
+            });
+        }
     }
 
+    @Override
+    @CallSuper
     @ServiceThreadOnly
     @VisibleForTesting
-    void setIsActiveSource(boolean on) {
+    protected void setActiveSource(int logicalAddress, int physicalAddress, String caller) {
         assertRunOnServiceThread();
-        mIsActiveSource = on;
-        if (on) {
+        super.setActiveSource(logicalAddress, physicalAddress, caller);
+        if (isActiveSource()) {
             getWakeLock().acquire();
         } else {
             getWakeLock().release();
@@ -250,60 +362,47 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
 
     @Override
     @ServiceThreadOnly
-    protected boolean handleActiveSource(HdmiCecMessage message) {
-        super.handleActiveSource(message);
-        if (mIsActiveSource) {
-            return true;
-        }
-        switch (mPowerStateChangeOnActiveSourceLost) {
-            case Constants.POWER_STATE_CHANGE_ON_ACTIVE_SOURCE_LOST_STANDBY_NOW:
+    protected void onActiveSourceLost() {
+        assertRunOnServiceThread();
+        mService.pauseActiveMediaSessions();
+        switch (mService.getHdmiCecConfig().getStringValue(
+                    HdmiControlManager.CEC_SETTING_NAME_POWER_STATE_CHANGE_ON_ACTIVE_SOURCE_LOST)) {
+            case HdmiControlManager.POWER_STATE_CHANGE_ON_ACTIVE_SOURCE_LOST_STANDBY_NOW:
                 mService.standby();
-                return true;
-            case Constants.POWER_STATE_CHANGE_ON_ACTIVE_SOURCE_LOST_NONE:
-                return true;
-            default:
-                Slog.w(TAG, "Invalid property '"
-                        + Constants.POWER_STATE_CHANGE_ON_ACTIVE_SOURCE_LOST
-                        + "' value: "
-                        + mPowerStateChangeOnActiveSourceLost);
-                return true;
+                return;
+            case HdmiControlManager.POWER_STATE_CHANGE_ON_ACTIVE_SOURCE_LOST_NONE:
+                return;
         }
     }
 
     @ServiceThreadOnly
-    protected boolean handleUserControlPressed(HdmiCecMessage message) {
+    @Constants.HandleMessageResult
+    protected int handleUserControlPressed(HdmiCecMessage message) {
         assertRunOnServiceThread();
         wakeUpIfActiveSource();
         return super.handleUserControlPressed(message);
     }
 
-    @Override
-    protected void wakeUpIfActiveSource() {
-        if (!mIsActiveSource) {
-            return;
-        }
-        // Wake up the device if the power is in standby mode, or its screen is off -
-        // which can happen if the device is holding a partial lock.
-        if (mService.isPowerStandbyOrTransient() || !mService.getPowerManager().isScreenOn()) {
-            mService.wakeUp();
-        }
-    }
-
     @ServiceThreadOnly
-    protected boolean handleSetMenuLanguage(HdmiCecMessage message) {
+    @Constants.HandleMessageResult
+    protected int handleSetMenuLanguage(HdmiCecMessage message) {
         assertRunOnServiceThread();
-        if (!SET_MENU_LANGUAGE) {
-            return false;
+        if (mService.getHdmiCecConfig().getIntValue(
+                HdmiControlManager.CEC_SETTING_NAME_SET_MENU_LANGUAGE)
+                    == HdmiControlManager.SET_MENU_LANGUAGE_DISABLED) {
+            return Constants.ABORT_UNRECOGNIZED_OPCODE;
         }
 
         try {
             String iso3Language = new String(message.getParams(), 0, 3, "US-ASCII");
             Locale currentLocale = mService.getContext().getResources().getConfiguration().locale;
-            if (currentLocale.getISO3Language().equals(iso3Language)) {
+            String curIso3Language = mService.localeToMenuLanguage(currentLocale);
+            HdmiLogger.debug("handleSetMenuLanguage " + iso3Language + " cur:" + curIso3Language);
+            if (curIso3Language.equals(iso3Language)) {
                 // Do not switch language if the new language is the same as the current one.
                 // This helps avoid accidental country variant switching from en_US to en_AU
                 // due to the limitation of CEC. See the warning below.
-                return true;
+                return Constants.HANDLED;
             }
 
             // Don't use Locale.getAvailableLocales() since it returns a locale
@@ -311,92 +410,119 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
             final List<LocaleInfo> localeInfos = LocalePicker.getAllAssetLocales(
                     mService.getContext(), false);
             for (LocaleInfo localeInfo : localeInfos) {
-                if (localeInfo.getLocale().getISO3Language().equals(iso3Language)) {
+                if (mService.localeToMenuLanguage(localeInfo.getLocale()).equals(iso3Language)) {
                     // WARNING: CEC adopts ISO/FDIS-2 for language code, while Android requires
                     // additional country variant to pinpoint the locale. This keeps the right
                     // locale from being chosen. 'eng' in the CEC command, for instance,
                     // will always be mapped to en-AU among other variants like en-US, en-GB,
                     // an en-IN, which may not be the expected one.
-                    LocalePicker.updateLocale(localeInfo.getLocale());
-                    return true;
+                    startSetMenuLanguageActivity(localeInfo.getLocale());
+                    return Constants.HANDLED;
                 }
             }
             Slog.w(TAG, "Can't handle <Set Menu Language> of " + iso3Language);
-            return false;
+            return Constants.ABORT_INVALID_OPERAND;
         } catch (UnsupportedEncodingException e) {
             Slog.w(TAG, "Can't handle <Set Menu Language>", e);
-            return false;
+            return Constants.ABORT_INVALID_OPERAND;
+        }
+    }
+
+    private void startSetMenuLanguageActivity(Locale locale) {
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            Context context = mService.getContext();
+            Intent intent = new Intent();
+            intent.putExtra(HdmiControlManager.EXTRA_LOCALE, locale.toLanguageTag());
+            intent.setComponent(
+                    ComponentName.unflattenFromString(context.getResources().getString(
+                            com.android.internal.R.string.config_hdmiCecSetMenuLanguageActivity)));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivityAsUser(intent, context.getUser());
+        } catch (ActivityNotFoundException e) {
+            Slog.e(TAG, "unable to start HdmiCecSetMenuLanguageActivity");
+        } finally {
+            Binder.restoreCallingIdentity(identity);
         }
     }
 
     @Override
-    protected boolean handleSetSystemAudioMode(HdmiCecMessage message) {
+    @Constants.HandleMessageResult
+    protected int handleSetSystemAudioMode(HdmiCecMessage message) {
         // System Audio Mode only turns on/off when Audio System broadcasts on/off message.
         // For device with type 4 and 5, it can set system audio mode on/off
         // when there is another audio system device connected into the system first.
         if (message.getDestination() != Constants.ADDR_BROADCAST
                 || message.getSource() != Constants.ADDR_AUDIO_SYSTEM
                 || mService.audioSystem() != null) {
-            return true;
+            return Constants.HANDLED;
         }
         boolean setSystemAudioModeOn = HdmiUtils.parseCommandParamSystemAudioStatus(message);
         if (mService.isSystemAudioActivated() != setSystemAudioModeOn) {
             mService.setSystemAudioActivated(setSystemAudioModeOn);
         }
-        return true;
+        return Constants.HANDLED;
     }
 
     @Override
-    protected boolean handleSystemAudioModeStatus(HdmiCecMessage message) {
+    @Constants.HandleMessageResult
+    protected int handleSystemAudioModeStatus(HdmiCecMessage message) {
         // Only directly addressed System Audio Mode Status message can change internal
         // system audio mode status.
-        if (message.getDestination() == mAddress
+        if (message.getDestination() == getDeviceInfo().getLogicalAddress()
                 && message.getSource() == Constants.ADDR_AUDIO_SYSTEM) {
             boolean setSystemAudioModeOn = HdmiUtils.parseCommandParamSystemAudioStatus(message);
             if (mService.isSystemAudioActivated() != setSystemAudioModeOn) {
                 mService.setSystemAudioActivated(setSystemAudioModeOn);
             }
         }
-        return true;
+        return Constants.HANDLED;
     }
 
     @Override
     @ServiceThreadOnly
-    protected boolean handleRoutingChange(HdmiCecMessage message) {
+    @Constants.HandleMessageResult
+    protected int handleRoutingChange(HdmiCecMessage message) {
         assertRunOnServiceThread();
         int physicalAddress = HdmiUtils.twoBytesToInt(message.getParams(), 2);
         handleRoutingChangeAndInformation(physicalAddress, message);
-        return true;
+        return Constants.HANDLED;
     }
 
     @Override
     @ServiceThreadOnly
-    protected boolean handleRoutingInformation(HdmiCecMessage message) {
+    @Constants.HandleMessageResult
+    protected int handleRoutingInformation(HdmiCecMessage message) {
         assertRunOnServiceThread();
         int physicalAddress = HdmiUtils.twoBytesToInt(message.getParams());
         handleRoutingChangeAndInformation(physicalAddress, message);
-        return true;
+        return Constants.HANDLED;
     }
 
     @Override
+    @ServiceThreadOnly
     protected void handleRoutingChangeAndInformation(int physicalAddress, HdmiCecMessage message) {
+        assertRunOnServiceThread();
         if (physicalAddress != mService.getPhysicalAddress()) {
-            return; // Do nothing.
+            setActiveSource(physicalAddress,
+                    "HdmiCecLocalDevicePlayback#handleRoutingChangeAndInformation()");
+            return;
+        }
+        if (!isActiveSource()) {
+            // If routing is changed to the device while Active Source, don't invalidate the
+            // Active Source
+            setActiveSource(physicalAddress,
+                    "HdmiCecLocalDevicePlayback#handleRoutingChangeAndInformation()");
         }
         switch (mPlaybackDeviceActionOnRoutingControl) {
-            case Constants.PLAYBACK_DEVICE_ACTION_ON_ROUTING_CONTROL_WAKE_UP_AND_SEND_ACTIVE_SOURCE:
-                setAndBroadcastActiveSource(message, physicalAddress);
+            case WAKE_UP_AND_SEND_ACTIVE_SOURCE:
+                setAndBroadcastActiveSource(message, physicalAddress,
+                        "HdmiCecLocalDevicePlayback#handleRoutingChangeAndInformation()");
                 break;
-            case Constants.PLAYBACK_DEVICE_ACTION_ON_ROUTING_CONTROL_WAKE_UP_ONLY:
+            case WAKE_UP_ONLY:
                 mService.wakeUp();
                 break;
-            case Constants.PLAYBACK_DEVICE_ACTION_ON_ROUTING_CONTROL_NONE:
-                break;
-            default:
-                Slog.w(TAG, "Invalid property '"
-                        + Constants.PLAYBACK_DEVICE_ACTION_ON_ROUTING_CONTROL
-                        + "' value: "
-                        + mPlaybackDeviceActionOnRoutingControl);
+            case NONE:
                 break;
         }
     }
@@ -417,27 +543,19 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
     @Override
     @ServiceThreadOnly
     protected void disableDevice(boolean initiatedByCec, PendingActionClearedCallback callback) {
-        super.disableDevice(initiatedByCec, callback);
-
         assertRunOnServiceThread();
+        removeAction(DeviceDiscoveryAction.class);
+        removeAction(HotplugDetectionAction.class);
+        removeAction(NewDeviceAction.class);
+        super.disableDevice(initiatedByCec, callback);
+        clearDeviceInfoList();
         checkIfPendingActionsCleared();
-    }
-
-    private void routeToPort(int portId) {
-        // TODO(AMYJOJO): route to specific input of the port
-        mLocalActivePath = portId;
-    }
-
-    @VisibleForTesting
-    protected int getLocalActivePath() {
-        return mLocalActivePath;
     }
 
     @Override
     protected void dump(final IndentingPrintWriter pw) {
         super.dump(pw);
-        pw.println("mIsActiveSource: " + mIsActiveSource);
-        pw.println("mAutoTvOff:" + mAutoTvOff);
+        pw.println("isActiveSource(): " + isActiveSource());
     }
 
     // Wrapper interface over PowerManager.WakeLock
@@ -457,7 +575,7 @@ public class HdmiCecLocalDevicePlayback extends HdmiCecLocalDeviceSource {
         @Override
         public void acquire() {
             mWakeLock.acquire();
-            HdmiLogger.debug("active source: %b. Wake lock acquired", mIsActiveSource);
+            HdmiLogger.debug("active source: %b. Wake lock acquired", isActiveSource());
         }
 
         @Override

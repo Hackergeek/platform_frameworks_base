@@ -1,26 +1,27 @@
 {
   "presubmit": [
     {
-      "name": "GtsMediaTestCases",
+      "name": "CtsCameraTestCases",
       "options" : [
         {
-	  "include-annotation": "android.platform.test.annotations.Presubmit"
-        },
-        {
-          "include-filter": "com.google.android.media.gts.WidevineGenericOpsTests"
+          "include-filter": "android.hardware.camera2.cts.ImageReaderTest#testP010"
         }
       ]
     },
     {
-      "name": "GtsExoPlayerTestCases",
+      "name": "GtsMediaTestCases",
       "options" : [
         {
-	  "include-annotation": "android.platform.test.annotations.SocPresubmit"
+          "include-annotation": "android.platform.test.annotations.Presubmit"
         },
         {
-          "include-filter": "com.google.android.exoplayer.gts.DashTest#testWidevine23FpsH264Fixed"
+          "include-filter": "com.google.android.media.gts.WidevineGenericOpsTests"
+        },
+        {
+          "include-filter": "com.google.android.media.gts.WidevineH264PlaybackTests"
         }
-      ]
+      ],
+      "file_patterns": ["(?i)drm|crypto"]
     }
   ],
   "imports": [

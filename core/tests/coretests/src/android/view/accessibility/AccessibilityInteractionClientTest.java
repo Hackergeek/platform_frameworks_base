@@ -17,6 +17,9 @@
 package android.view.accessibility;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.MockitoAnnotations.initMocks;
 
@@ -33,9 +36,6 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
 
-import java.util.Arrays;
-import java.util.List;
-
 /**
  * Tests for AccessibilityInteractionClient
  */
@@ -43,6 +43,8 @@ import java.util.List;
 @RunWith(AndroidJUnit4.class)
 public class AccessibilityInteractionClientTest {
     private static final int MOCK_CONNECTION_ID = 0xabcd;
+    private static final int MOCK_CONNECTION_OTHER_ID = 0xabce;
+
 
     private MockConnection mMockConnection = new MockConnection();
     @Mock private AccessibilityCache mMockCache;
@@ -50,8 +52,8 @@ public class AccessibilityInteractionClientTest {
     @Before
     public void setUp() {
         initMocks(this);
-        AccessibilityInteractionClient.setCache(mMockCache);
-        AccessibilityInteractionClient.addConnection(MOCK_CONNECTION_ID, mMockConnection);
+        AccessibilityInteractionClient.addConnection(
+                MOCK_CONNECTION_ID, mMockConnection, /*initializeCache=*/true);
     }
 
     /**
@@ -61,11 +63,12 @@ public class AccessibilityInteractionClientTest {
      */
     @Test
     public void findA11yNodeInfoByA11yId_whenBypassingCache_doesntTouchCache() {
+        AccessibilityInteractionClient.setCache(MOCK_CONNECTION_ID, mMockCache);
         final int windowId = 0x1234;
         final long accessibilityNodeId = 0x4321L;
         AccessibilityNodeInfo nodeFromConnection = AccessibilityNodeInfo.obtain();
         nodeFromConnection.setSourceNodeId(accessibilityNodeId, windowId);
-        mMockConnection.mInfosToReturn = Arrays.asList(nodeFromConnection);
+        mMockConnection.mInfoToReturn = nodeFromConnection;
         AccessibilityInteractionClient client = AccessibilityInteractionClient.getInstance();
         AccessibilityNodeInfo node = client.findAccessibilityNodeInfoByAccessibilityId(
                 MOCK_CONNECTION_ID, windowId, accessibilityNodeId, true, 0, null);
@@ -74,8 +77,44 @@ public class AccessibilityInteractionClientTest {
         verifyZeroInteractions(mMockCache);
     }
 
+    @Test
+    public void getCache_differentConnections_returnsDifferentCaches() {
+        MockConnection mOtherMockConnection = new MockConnection();
+        AccessibilityInteractionClient.addConnection(
+                MOCK_CONNECTION_OTHER_ID, mOtherMockConnection, /*initializeCache=*/true);
+
+        AccessibilityCache firstCache = AccessibilityInteractionClient.getCache(MOCK_CONNECTION_ID);
+        AccessibilityCache secondCache = AccessibilityInteractionClient.getCache(
+                MOCK_CONNECTION_OTHER_ID);
+        assertNotEquals(firstCache, secondCache);
+    }
+
+    @Test
+    public void getCache_addConnectionWithoutCache_returnsNullCache() {
+        // Need to first remove from process cache
+        AccessibilityInteractionClient.removeConnection(MOCK_CONNECTION_OTHER_ID);
+
+        MockConnection mOtherMockConnection = new MockConnection();
+        AccessibilityInteractionClient.addConnection(
+                MOCK_CONNECTION_OTHER_ID, mOtherMockConnection, /*initializeCache=*/false);
+
+        AccessibilityCache cache = AccessibilityInteractionClient.getCache(
+                MOCK_CONNECTION_OTHER_ID);
+        assertNull(cache);
+    }
+
+    @Test
+    public void getCache_removeConnection_returnsNull() {
+        AccessibilityCache cache = AccessibilityInteractionClient.getCache(MOCK_CONNECTION_ID);
+        assertNotNull(cache);
+
+        AccessibilityInteractionClient.removeConnection(MOCK_CONNECTION_ID);
+        cache = AccessibilityInteractionClient.getCache(MOCK_CONNECTION_ID);
+        assertNull(cache);
+    }
+
     private static class MockConnection extends AccessibilityServiceConnectionImpl {
-        List<AccessibilityNodeInfo> mInfosToReturn;
+        AccessibilityNodeInfo mInfoToReturn;
 
         @Override
         public String[] findAccessibilityNodeInfoByAccessibilityId(int accessibilityWindowId,
@@ -83,7 +122,7 @@ public class AccessibilityInteractionClientTest {
                 IAccessibilityInteractionConnectionCallback callback, int flags, long threadId,
                 Bundle arguments) {
             try {
-                callback.setFindAccessibilityNodeInfosResult(mInfosToReturn, interactionId);
+                callback.setFindAccessibilityNodeInfoResult(mInfoToReturn, interactionId);
             } catch (RemoteException e) {
                 throw new RuntimeException(e);
             }

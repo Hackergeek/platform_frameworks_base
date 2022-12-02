@@ -18,6 +18,7 @@ package android.os;
 
 import android.Manifest;
 import android.annotation.NonNull;
+import android.annotation.SuppressLint;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
 import android.app.AppGlobals;
@@ -28,7 +29,7 @@ import android.compat.annotation.ChangeId;
 import android.compat.annotation.Disabled;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
-import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.os.storage.StorageManager;
 import android.os.storage.StorageVolume;
@@ -73,15 +74,33 @@ public class Environment {
     private static final String DIR_FILES = "files";
     private static final String DIR_CACHE = "cache";
 
+    /**
+     * The folder name prefix for the user credential protected data directory. This is exposed for
+     * use in string path caching for {@link ApplicationInfo} objects, and should not be accessed
+     * directly otherwise. Prefer {@link #getDataUserCeDirectory(String, int)}.
+     * {@hide}
+     */
+    public static final String DIR_USER_CE = "user";
+
+    /**
+     * The folder name prefix for the user device protected data directory. This is exposed for use
+     * in string path caching for {@link ApplicationInfo} objects, and should not be accessed
+     * directly otherwise. Prefer {@link #getDataUserDeDirectory(String, int)}.
+     * {@hide}
+     */
+    public static final String DIR_USER_DE = "user_de";
+
     /** {@hide} */
     @Deprecated
     public static final String DIRECTORY_ANDROID = DIR_ANDROID;
 
     private static final File DIR_ANDROID_ROOT = getDirectory(ENV_ANDROID_ROOT, "/system");
-    private static final File DIR_ANDROID_DATA = getDirectory(ENV_ANDROID_DATA, "/data");
+    private static final String DIR_ANDROID_DATA_PATH = getDirectoryPath(ENV_ANDROID_DATA, "/data");
+    private static final File DIR_ANDROID_DATA = new File(DIR_ANDROID_DATA_PATH);
     private static final File DIR_ANDROID_EXPAND = getDirectory(ENV_ANDROID_EXPAND, "/mnt/expand");
     private static final File DIR_ANDROID_STORAGE = getDirectory(ENV_ANDROID_STORAGE, "/storage");
     private static final File DIR_DOWNLOAD_CACHE = getDirectory(ENV_DOWNLOAD_CACHE, "/cache");
+    private static final File DIR_METADATA = new File("/metadata");
     private static final File DIR_OEM_ROOT = getDirectory(ENV_OEM_ROOT, "/oem");
     private static final File DIR_ODM_ROOT = getDirectory(ENV_ODM_ROOT, "/odm");
     private static final File DIR_VENDOR_ROOT = getDirectory(ENV_VENDOR_ROOT, "/vendor");
@@ -113,6 +132,9 @@ public class Environment {
     @ChangeId
     private static final long DEFAULT_SCOPED_STORAGE = 149924527L;
 
+    /**
+     * See definition in com.android.providers.media.LocalCallingIdentity
+     */
     /**
      * Setting this flag strictly enforces Scoped Storage regardless of:
      * <ul>
@@ -167,13 +189,11 @@ public class Environment {
         }
 
         @UnsupportedAppUsage
-        @Deprecated
         public File getExternalStorageDirectory() {
             return getExternalDirs()[0];
         }
 
         @UnsupportedAppUsage
-        @Deprecated
         public File getExternalStoragePublicDirectory(String type) {
             return buildExternalStoragePublicDirs(type)[0];
         }
@@ -235,7 +255,6 @@ public class Environment {
      * @hide
      */
     @SystemApi
-    @TestApi
     public static @NonNull File getOemDirectory() {
         return DIR_OEM_ROOT;
     }
@@ -247,7 +266,6 @@ public class Environment {
      * @hide
      */
     @SystemApi
-    @TestApi
     public static @NonNull File getOdmDirectory() {
         return DIR_ODM_ROOT;
     }
@@ -258,7 +276,6 @@ public class Environment {
      * @hide
      */
     @SystemApi
-    @TestApi
     public static @NonNull File getVendorDirectory() {
         return DIR_VENDOR_ROOT;
     }
@@ -270,7 +287,6 @@ public class Environment {
      * @hide
      */
     @SystemApi
-    @TestApi
     public static @NonNull File getProductDirectory() {
         return DIR_PRODUCT_ROOT;
     }
@@ -297,7 +313,6 @@ public class Environment {
      * @hide
      */
     @SystemApi
-    @TestApi
     public static @NonNull File getSystemExtDirectory() {
         return DIR_SYSTEM_EXT_ROOT;
     }
@@ -354,12 +369,29 @@ public class Environment {
         return DIR_ANDROID_DATA;
     }
 
+    /**
+     * @see #getDataDirectory()
+     * @hide
+     */
+    public static String getDataDirectoryPath() {
+        return DIR_ANDROID_DATA_PATH;
+    }
+
     /** {@hide} */
     public static File getDataDirectory(String volumeUuid) {
         if (TextUtils.isEmpty(volumeUuid)) {
             return DIR_ANDROID_DATA;
         } else {
             return new File("/mnt/expand/" + volumeUuid);
+        }
+    }
+
+    /** @hide */
+    public static String getDataDirectoryPath(String volumeUuid) {
+        if (TextUtils.isEmpty(volumeUuid)) {
+            return DIR_ANDROID_DATA_PATH;
+        } else {
+            return getExpandDirectory().getAbsolutePath() + File.separator + volumeUuid;
         }
     }
 
@@ -446,8 +478,32 @@ public class Environment {
     }
 
     /** {@hide} */
+    private static File getDataMiscCeDirectory(String volumeUuid, int userId) {
+        return buildPath(getDataDirectory(volumeUuid), "misc_ce", String.valueOf(userId));
+    }
+
+    /** {@hide} */
+    public static File getDataMiscCeSharedSdkSandboxDirectory(String volumeUuid, int userId,
+            String packageName) {
+        return buildPath(getDataMiscCeDirectory(volumeUuid, userId), "sdksandbox",
+                packageName, "shared");
+    }
+
+    /** {@hide} */
     public static File getDataMiscDeDirectory(int userId) {
         return buildPath(getDataDirectory(), "misc_de", String.valueOf(userId));
+    }
+
+    /** {@hide} */
+    private static File getDataMiscDeDirectory(String volumeUuid, int userId) {
+        return buildPath(getDataDirectory(volumeUuid), "misc_de", String.valueOf(userId));
+    }
+
+    /** {@hide} */
+    public static File getDataMiscDeSharedSdkSandboxDirectory(String volumeUuid, int userId,
+            String packageName) {
+        return buildPath(getDataMiscDeDirectory(volumeUuid, userId), "sdksandbox",
+                packageName, "shared");
     }
 
     private static File getDataProfilesDeDirectory(int userId) {
@@ -486,7 +542,7 @@ public class Environment {
 
     /** {@hide} */
     public static File getDataUserCeDirectory(String volumeUuid) {
-        return new File(getDataDirectory(volumeUuid), "user");
+        return new File(getDataDirectory(volumeUuid), DIR_USER_CE);
     }
 
     /** {@hide} */
@@ -503,7 +559,7 @@ public class Environment {
 
     /** {@hide} */
     public static File getDataUserDeDirectory(String volumeUuid) {
-        return new File(getDataDirectory(volumeUuid), "user_de");
+        return new File(getDataDirectory(volumeUuid), DIR_USER_DE);
     }
 
     /** {@hide} */
@@ -661,19 +717,13 @@ public class Environment {
      * <p>
      * {@sample development/samples/ApiDemos/src/com/example/android/apis/content/ExternalStorage.java
      * monitor_storage}
+     * <p>
+     * Note that alternatives such as {@link Context#getExternalFilesDir(String)} or
+     * {@link MediaStore} offer better performance.
      *
      * @see #getExternalStorageState()
      * @see #isExternalStorageRemovable()
-     * @deprecated To improve user privacy, direct access to shared/external
-     *             storage devices is deprecated. When an app targets
-     *             {@link android.os.Build.VERSION_CODES#Q}, the path returned
-     *             from this method is no longer directly accessible to apps.
-     *             Apps can continue to access content stored on shared/external
-     *             storage by migrating to alternatives such as
-     *             {@link Context#getExternalFilesDir(String)},
-     *             {@link MediaStore}, or {@link Intent#ACTION_OPEN_DOCUMENT}.
      */
-    @Deprecated
     public static File getExternalStorageDirectory() {
         throwIfUserRequired();
         return sCurrentUser.getExternalDirs()[0];
@@ -686,7 +736,7 @@ public class Environment {
     }
 
     /** {@hide} */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static File getLegacyExternalStorageObbDirectory() {
         return buildPath(getLegacyExternalStorageDirectory(), DIR_ANDROID, DIR_OBB);
     }
@@ -694,11 +744,11 @@ public class Environment {
     /**
      * Standard directory in which to place any audio files that should be
      * in the regular list of music for the user.
-     * This may be combined with
+     * This may be combined with {@link #DIRECTORY_AUDIOBOOKS},
      * {@link #DIRECTORY_PODCASTS}, {@link #DIRECTORY_NOTIFICATIONS},
-     * {@link #DIRECTORY_ALARMS}, and {@link #DIRECTORY_RINGTONES} as a series
-     * of directories to categories a particular audio file as more than one
-     * type.
+     * {@link #DIRECTORY_ALARMS}, {@link #DIRECTORY_RINGTONES}, and
+     * {@link #DIRECTORY_RECORDINGS} as a series of directories to
+     * categorize a particular audio file as more than one type.
      */
     public static String DIRECTORY_MUSIC = "Music";
 
@@ -707,10 +757,10 @@ public class Environment {
      * in the list of podcasts that the user can select (not as regular
      * music).
      * This may be combined with {@link #DIRECTORY_MUSIC},
-     * {@link #DIRECTORY_NOTIFICATIONS},
-     * {@link #DIRECTORY_ALARMS}, and {@link #DIRECTORY_RINGTONES} as a series
-     * of directories to categories a particular audio file as more than one
-     * type.
+     * {@link #DIRECTORY_AUDIOBOOKS}, {@link #DIRECTORY_NOTIFICATIONS},
+     * {@link #DIRECTORY_ALARMS}, {@link #DIRECTORY_RINGTONES}, and
+     * {@link #DIRECTORY_RECORDINGS} as a series of directories to
+     * categorize a particular audio file as more than one type.
      */
     public static String DIRECTORY_PODCASTS = "Podcasts";
 
@@ -719,10 +769,10 @@ public class Environment {
      * in the list of ringtones that the user can select (not as regular
      * music).
      * This may be combined with {@link #DIRECTORY_MUSIC},
-     * {@link #DIRECTORY_PODCASTS}, {@link #DIRECTORY_NOTIFICATIONS}, and
-     * {@link #DIRECTORY_ALARMS} as a series
-     * of directories to categories a particular audio file as more than one
-     * type.
+     * {@link #DIRECTORY_AUDIOBOOKS}, {@link #DIRECTORY_PODCASTS},
+     * {@link #DIRECTORY_NOTIFICATIONS}, {@link #DIRECTORY_ALARMS},
+     * and {@link #DIRECTORY_RECORDINGS} as a series of directories
+     * to categorize a particular audio file as more than one type.
      */
     public static String DIRECTORY_RINGTONES = "Ringtones";
 
@@ -731,10 +781,10 @@ public class Environment {
      * in the list of alarms that the user can select (not as regular
      * music).
      * This may be combined with {@link #DIRECTORY_MUSIC},
-     * {@link #DIRECTORY_PODCASTS}, {@link #DIRECTORY_NOTIFICATIONS},
-     * and {@link #DIRECTORY_RINGTONES} as a series
-     * of directories to categories a particular audio file as more than one
-     * type.
+     * {@link #DIRECTORY_AUDIOBOOKS}, {@link #DIRECTORY_PODCASTS},
+     * {@link #DIRECTORY_NOTIFICATIONS}, {@link #DIRECTORY_RINGTONES},
+     * and {@link #DIRECTORY_RECORDINGS} as a series of directories
+     * to categorize a particular audio file as more than one type.
      */
     public static String DIRECTORY_ALARMS = "Alarms";
 
@@ -743,10 +793,10 @@ public class Environment {
      * in the list of notifications that the user can select (not as regular
      * music).
      * This may be combined with {@link #DIRECTORY_MUSIC},
-     * {@link #DIRECTORY_PODCASTS},
-     * {@link #DIRECTORY_ALARMS}, and {@link #DIRECTORY_RINGTONES} as a series
-     * of directories to categories a particular audio file as more than one
-     * type.
+     * {@link #DIRECTORY_AUDIOBOOKS}, {@link #DIRECTORY_PODCASTS},
+     * {@link #DIRECTORY_ALARMS}, {@link #DIRECTORY_RINGTONES}, and
+     * {@link #DIRECTORY_RECORDINGS} as a series of directories to
+     * categorize a particular audio file as more than one type.
      */
     public static String DIRECTORY_NOTIFICATIONS = "Notifications";
 
@@ -797,10 +847,37 @@ public class Environment {
     public static String DIRECTORY_SCREENSHOTS = "Screenshots";
 
     /**
-     * Standard directory in which to place any audio files which are
-     * audiobooks.
+     * Standard directory in which to place any audio files that should be
+     * in the list of audiobooks that the user can select (not as regular
+     * music).
+     * This may be combined with {@link #DIRECTORY_MUSIC},
+     * {@link #DIRECTORY_PODCASTS}, {@link #DIRECTORY_NOTIFICATIONS},
+     * {@link #DIRECTORY_ALARMS}, {@link #DIRECTORY_RINGTONES},
+     * and {@link #DIRECTORY_RECORDINGS} as a series of directories
+     * to categorize a particular audio file as more than one type.
      */
     public static String DIRECTORY_AUDIOBOOKS = "Audiobooks";
+
+    /**
+     * Standard directory in which to place any audio files that should be
+     * in the list of voice recordings recorded by voice recorder apps that
+     * the user can select (not as regular music).
+     * This may be combined with {@link #DIRECTORY_MUSIC},
+     * {@link #DIRECTORY_AUDIOBOOKS}, {@link #DIRECTORY_PODCASTS},
+     * {@link #DIRECTORY_NOTIFICATIONS}, {@link #DIRECTORY_ALARMS},
+     * and {@link #DIRECTORY_RINGTONES} as a series of directories
+     * to categorize a particular audio file as more than one type.
+     */
+    @NonNull
+    // The better way is that expose a static method getRecordingDirectories.
+    // But since it's an existing API surface and developers already
+    // used to DIRECTORY_* constants, we should keep using this pattern
+    // for consistency. We use SuppressLint here to avoid exposing a final
+    // field. A final field will prevent us from ever changing the value of
+    // DIRECTORY_RECORDINGS. Not that it's likely that we will ever need to
+    // change it, but it's better to have such option.
+    @SuppressLint({"MutableBareField", "AllUpper"})
+    public static String DIRECTORY_RECORDINGS = "Recordings";
 
     /**
      * List of standard storage directories.
@@ -818,6 +895,7 @@ public class Environment {
      *   <li>{@link #DIRECTORY_DCIM}
      *   <li>{@link #DIRECTORY_DOCUMENTS}
      *   <li>{@link #DIRECTORY_AUDIOBOOKS}
+     *   <li>{@link #DIRECTORY_RECORDINGS}
      * </ul>
      * @hide
      */
@@ -833,6 +911,7 @@ public class Environment {
             DIRECTORY_DCIM,
             DIRECTORY_DOCUMENTS,
             DIRECTORY_AUDIOBOOKS,
+            DIRECTORY_RECORDINGS,
     };
 
     /**
@@ -858,6 +937,7 @@ public class Environment {
     /** {@hide} */ public static final int HAS_DCIM = 1 << 8;
     /** {@hide} */ public static final int HAS_DOCUMENTS = 1 << 9;
     /** {@hide} */ public static final int HAS_AUDIOBOOKS = 1 << 10;
+    /** {@hide} */ public static final int HAS_RECORDINGS = 1 << 11;
 
     /** {@hide} */ public static final int HAS_ANDROID = 1 << 16;
     /** {@hide} */ public static final int HAS_OTHER = 1 << 17;
@@ -888,6 +968,7 @@ public class Environment {
                 else if (DIRECTORY_DCIM.equals(name)) res |= HAS_DCIM;
                 else if (DIRECTORY_DOCUMENTS.equals(name)) res |= HAS_DOCUMENTS;
                 else if (DIRECTORY_AUDIOBOOKS.equals(name)) res |= HAS_AUDIOBOOKS;
+                else if (DIRECTORY_RECORDINGS.equals(name)) res |= HAS_RECORDINGS;
                 else if (DIRECTORY_ANDROID.equals(name)) res |= HAS_ANDROID;
                 else res |= HAS_OTHER;
             }
@@ -939,6 +1020,9 @@ public class Environment {
      * </p>
      * {@sample development/samples/ApiDemos/src/com/example/android/apis/content/ExternalStorage.java
      * public_picture}
+     * <p>
+     * Note that alternatives such as {@link Context#getExternalFilesDir(String)} or
+     * {@link MediaStore} offer better performance.
      *
      * @param type The type of storage directory to return. Should be one of
      *            {@link #DIRECTORY_MUSIC}, {@link #DIRECTORY_PODCASTS},
@@ -949,16 +1033,7 @@ public class Environment {
      * @return Returns the File path for the directory. Note that this directory
      *         may not yet exist, so you must make sure it exists before using
      *         it such as with {@link File#mkdirs File.mkdirs()}.
-     * @deprecated To improve user privacy, direct access to shared/external
-     *             storage devices is deprecated. When an app targets
-     *             {@link android.os.Build.VERSION_CODES#Q}, the path returned
-     *             from this method is no longer directly accessible to apps.
-     *             Apps can continue to access content stored on shared/external
-     *             storage by migrating to alternatives such as
-     *             {@link Context#getExternalFilesDir(String)},
-     *             {@link MediaStore}, or {@link Intent#ACTION_OPEN_DOCUMENT}.
      */
-    @Deprecated
     public static File getExternalStoragePublicDirectory(String type) {
         throwIfUserRequired();
         return sCurrentUser.buildExternalStoragePublicDirs(type)[0];
@@ -1007,7 +1082,7 @@ public class Environment {
      * Generates the raw path to an application's OBB files
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static File[] buildExternalStorageAppObbDirs(String packageName) {
         throwIfUserRequired();
         return sCurrentUser.buildExternalStorageAppObbDirs(packageName);
@@ -1044,6 +1119,15 @@ public class Environment {
      */
     public static File getDownloadCacheDirectory() {
         return DIR_DOWNLOAD_CACHE;
+    }
+
+    /**
+     * Return the metadata directory.
+     *
+     * @hide
+     */
+    public static @NonNull File getMetadataDirectory() {
+        return DIR_METADATA;
     }
 
     /**
@@ -1282,13 +1366,25 @@ public class Environment {
         final Context context = AppGlobals.getInitialApplication();
         final int uid = context.getApplicationInfo().uid;
         // Isolated processes and Instant apps are never allowed to be in scoped storage
-        if (Process.isIsolated(uid)) {
+        if (Process.isIsolated(uid) || Process.isSdkSandboxUid(uid)) {
             return false;
         }
 
         final PackageManager packageManager = context.getPackageManager();
         if (packageManager.isInstantApp()) {
             return false;
+        }
+
+        // Apps with PROPERTY_NO_APP_DATA_STORAGE should not be allowed in scoped storage
+        final String packageName = AppGlobals.getInitialPackage();
+        try {
+            final PackageManager.Property noAppStorageProp = packageManager.getProperty(
+                    PackageManager.PROPERTY_NO_APP_DATA_STORAGE, packageName);
+            if (noAppStorageProp != null && noAppStorageProp.getBoolean()) {
+                return false;
+            }
+        } catch (PackageManager.NameNotFoundException ignore) {
+            // Property not defined for the package
         }
 
         boolean defaultScopedStorage = Compatibility.isChangeEnabled(DEFAULT_SCOPED_STORAGE);
@@ -1306,8 +1402,27 @@ public class Environment {
         }
 
         final AppOpsManager appOps = context.getSystemService(AppOpsManager.class);
-        return appOps.checkOpNoThrow(AppOpsManager.OP_LEGACY_STORAGE,
-                uid, context.getOpPackageName()) == AppOpsManager.MODE_ALLOWED;
+        final String opPackageName = context.getOpPackageName();
+
+        if (appOps.noteOpNoThrow(AppOpsManager.OP_LEGACY_STORAGE, uid,
+                opPackageName) == AppOpsManager.MODE_ALLOWED) {
+            return true;
+        }
+
+        // Legacy external storage access is granted to instrumentations invoked with
+        // "--no-isolated-storage" flag.
+        return appOps.noteOpNoThrow(AppOpsManager.OP_NO_ISOLATED_STORAGE, uid,
+                opPackageName) == AppOpsManager.MODE_ALLOWED;
+    }
+
+    private static boolean isScopedStorageEnforced(boolean defaultScopedStorage,
+            boolean forceEnableScopedStorage) {
+        return defaultScopedStorage && forceEnableScopedStorage;
+    }
+
+    private static boolean isScopedStorageDisabled(boolean defaultScopedStorage,
+            boolean forceEnableScopedStorage) {
+        return !defaultScopedStorage && !forceEnableScopedStorage;
     }
 
     /**
@@ -1354,19 +1469,15 @@ public class Environment {
         }
     }
 
-    private static boolean isScopedStorageEnforced(boolean defaultScopedStorage,
-            boolean forceEnableScopedStorage) {
-        return defaultScopedStorage && forceEnableScopedStorage;
-    }
-
-    private static boolean isScopedStorageDisabled(boolean defaultScopedStorage,
-            boolean forceEnableScopedStorage) {
-        return !defaultScopedStorage && !forceEnableScopedStorage;
-    }
-
     static File getDirectory(String variableName, String defaultPath) {
         String path = System.getenv(variableName);
         return path == null ? new File(defaultPath) : new File(path);
+    }
+
+    @NonNull
+    static String getDirectoryPath(@NonNull String variableName, @NonNull String defaultPath) {
+        String path = System.getenv(variableName);
+        return path == null ? defaultPath : path;
     }
 
     /** {@hide} */

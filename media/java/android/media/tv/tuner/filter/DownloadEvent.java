@@ -16,6 +16,7 @@
 
 package android.media.tv.tuner.filter;
 
+import android.annotation.IntRange;
 import android.annotation.SystemApi;
 
 /**
@@ -26,15 +27,17 @@ import android.annotation.SystemApi;
 @SystemApi
 public class DownloadEvent extends FilterEvent {
     private final int mItemId;
+    private final int mDownloadId;
     private final int mMpuSequenceNumber;
     private final int mItemFragmentIndex;
     private final int mLastItemFragmentIndex;
     private final int mDataLength;
 
     // This constructor is used by JNI code only
-    private DownloadEvent(int itemId, int mpuSequenceNumber, int itemFragmentIndex,
+    private DownloadEvent(int itemId, int downloadId, int mpuSequenceNumber, int itemFragmentIndex,
             int lastItemFragmentIndex, int dataLength) {
         mItemId = itemId;
+        mDownloadId = downloadId;
         mMpuSequenceNumber = mpuSequenceNumber;
         mItemFragmentIndex = itemFragmentIndex;
         mLastItemFragmentIndex = lastItemFragmentIndex;
@@ -49,8 +52,18 @@ public class DownloadEvent extends FilterEvent {
     }
 
     /**
+     * Gets download ID.
+     *
+     * <p>This query is only supported in Tuner 2.0 or higher version. Unsupported version will
+     * return {@code -1}.
+     * Use {@link TunerVersionChecker#getTunerVersion()} to get the version information.
+     */
+    public int getDownloadId() { return mDownloadId; }
+
+    /**
      * Gets MPU sequence number of filtered data.
      */
+    @IntRange(from = 0)
     public int getMpuSequenceNumber() {
         return mMpuSequenceNumber;
     }
@@ -78,4 +91,3 @@ public class DownloadEvent extends FilterEvent {
         return mDataLength;
     }
 }
-

@@ -19,7 +19,7 @@
 
 #include <string>
 
-#include <input/InputApplication.h>
+#include <gui/InputApplication.h>
 
 #include <nativehelper/JNIHelp.h>
 #include "jni.h"
@@ -29,19 +29,21 @@ namespace android {
 class NativeInputApplicationHandle : public InputApplicationHandle {
 public:
     explicit NativeInputApplicationHandle(jweak objWeak);
-    virtual ~NativeInputApplicationHandle();
+    ~NativeInputApplicationHandle() override;
 
     jobject getInputApplicationHandleObjLocalRef(JNIEnv* env);
 
-    virtual bool updateInfo();
+    bool updateInfo() override;
 
 private:
     jweak mObjWeak;
 };
 
-
-extern sp<InputApplicationHandle> android_view_InputApplicationHandle_getHandle(
+extern std::shared_ptr<InputApplicationHandle> android_view_InputApplicationHandle_getHandle(
         JNIEnv* env, jobject inputApplicationHandleObj);
+
+extern jobject android_view_InputApplicationHandle_fromInputApplicationInfo(
+        JNIEnv* env, gui::InputApplicationInfo inputApplicationInfo);
 
 } // namespace android
 

@@ -82,13 +82,6 @@ public class ZygoteProcess {
     private static final String LOG_TAG = "ZygoteProcess";
 
     /**
-     * The default value for enabling the unspecialized app process (USAP) pool.  This value will
-     * not be used if the devices has a DeviceConfig profile pushed to it that contains a value for
-     * this key.
-     */
-    private static final String USAP_POOL_ENABLED_DEFAULT = "false";
-
-    /**
      * The name of the socket used to communicate with the primary zygote.
      */
     private final LocalSocketAddress mZygoteSocketAddress;
@@ -333,7 +326,7 @@ public class ZygoteProcess {
      *                             started.
      * @param pkgDataInfoMap Map from related package names to private data directory
      *                       volume UUID and inode number.
-     * @param whitelistedDataInfoMap Map from allowlisted package names to private data directory
+     * @param allowlistedDataInfoList Map from allowlisted package names to private data directory
      *                       volume UUID and inode number.
      * @param bindMountAppsData whether zygote needs to mount CE and DE data.
      * @param bindMountAppStorageDirs whether zygote needs to mount Android/obb and Android/data.
@@ -359,7 +352,7 @@ public class ZygoteProcess {
                                                   @Nullable Map<String, Pair<String, Long>>
                                                           pkgDataInfoMap,
                                                   @Nullable Map<String, Pair<String, Long>>
-                                                          whitelistedDataInfoMap,
+                                                          allowlistedDataInfoList,
                                                   boolean bindMountAppsData,
                                                   boolean bindMountAppStorageDirs,
                                                   @Nullable String[] zygoteArgs) {
@@ -373,7 +366,7 @@ public class ZygoteProcess {
                     runtimeFlags, mountExternal, targetSdkVersion, seInfo,
                     abi, instructionSet, appDataDir, invokeWith, /*startChildZygote=*/ false,
                     packageName, zygotePolicyFlags, isTopApp, disabledCompatChanges,
-                    pkgDataInfoMap, whitelistedDataInfoMap, bindMountAppsData,
+                    pkgDataInfoMap, allowlistedDataInfoList, bindMountAppsData,
                     bindMountAppStorageDirs, zygoteArgs);
         } catch (ZygoteStartFailedEx ex) {
             Log.e(LOG_TAG,
@@ -426,7 +419,7 @@ public class ZygoteProcess {
         // avoid writing a partial response to the zygote.
         for (String arg : args) {
             // Making two indexOf calls here is faster than running a manually fused loop due
-            // to the fact that indexOf is a optimized intrinsic.
+            // to the fact that indexOf is an optimized intrinsic.
             if (arg.indexOf('\n') >= 0) {
                 throw new ZygoteStartFailedEx("Embedded newlines not allowed");
             } else if (arg.indexOf('\r') >= 0) {
@@ -615,7 +608,7 @@ public class ZygoteProcess {
      * @param disabledCompatChanges a list of disabled compat changes for the process being started.
      * @param pkgDataInfoMap Map from related package names to private data directory volume UUID
      *                       and inode number.
-     * @param whitelistedDataInfoMap Map from allowlisted package names to private data directory
+     * @param allowlistedDataInfoList Map from allowlisted package names to private data directory
      *                       volume UUID and inode number.
      * @param bindMountAppsData whether zygote needs to mount CE and DE data.
      * @param bindMountAppStorageDirs whether zygote needs to mount Android/obb and Android/data.
@@ -642,7 +635,7 @@ public class ZygoteProcess {
                                                       @Nullable Map<String, Pair<String, Long>>
                                                               pkgDataInfoMap,
                                                       @Nullable Map<String, Pair<String, Long>>
-                                                              whitelistedDataInfoMap,
+                                                              allowlistedDataInfoList,
                                                       boolean bindMountAppsData,
                                                       boolean bindMountAppStorageDirs,
                                                       @Nullable String[] extraArgs)
@@ -657,16 +650,8 @@ public class ZygoteProcess {
         argsForZygote.add("--runtime-flags=" + runtimeFlags);
         if (mountExternal == Zygote.MOUNT_EXTERNAL_DEFAULT) {
             argsForZygote.add("--mount-external-default");
-        } else if (mountExternal == Zygote.MOUNT_EXTERNAL_READ) {
-            argsForZygote.add("--mount-external-read");
-        } else if (mountExternal == Zygote.MOUNT_EXTERNAL_WRITE) {
-            argsForZygote.add("--mount-external-write");
-        } else if (mountExternal == Zygote.MOUNT_EXTERNAL_FULL) {
-            argsForZygote.add("--mount-external-full");
         } else if (mountExternal == Zygote.MOUNT_EXTERNAL_INSTALLER) {
             argsForZygote.add("--mount-external-installer");
-        } else if (mountExternal == Zygote.MOUNT_EXTERNAL_LEGACY) {
-            argsForZygote.add("--mount-external-legacy");
         } else if (mountExternal == Zygote.MOUNT_EXTERNAL_PASS_THROUGH) {
             argsForZygote.add("--mount-external-pass-through");
         } else if (mountExternal == Zygote.MOUNT_EXTERNAL_ANDROID_WRITABLE) {
@@ -741,12 +726,12 @@ public class ZygoteProcess {
             }
             argsForZygote.add(sb.toString());
         }
-        if (whitelistedDataInfoMap != null && whitelistedDataInfoMap.size() > 0) {
+        if (allowlistedDataInfoList != null && allowlistedDataInfoList.size() > 0) {
             StringBuilder sb = new StringBuilder();
-            sb.append(Zygote.WHITELISTED_DATA_INFO_MAP);
+            sb.append(Zygote.ALLOWLISTED_DATA_INFO_MAP);
             sb.append("=");
             boolean started = false;
-            for (Map.Entry<String, Pair<String, Long>> entry : whitelistedDataInfoMap.entrySet()) {
+            for (Map.Entry<String, Pair<String, Long>> entry : allowlistedDataInfoList.entrySet()) {
                 if (started) {
                     sb.append(',');
                 }
@@ -801,14 +786,8 @@ public class ZygoteProcess {
     private boolean fetchUsapPoolEnabledProp() {
         boolean origVal = mUsapPoolEnabled;
 
-        final String propertyString = Zygote.getConfigurationProperty(
-                ZygoteConfig.USAP_POOL_ENABLED, USAP_POOL_ENABLED_DEFAULT);
-
-        if (!propertyString.isEmpty()) {
-            mUsapPoolEnabled = Zygote.getConfigurationPropertyBoolean(
-                  ZygoteConfig.USAP_POOL_ENABLED,
-                  Boolean.parseBoolean(USAP_POOL_ENABLED_DEFAULT));
-        }
+        mUsapPoolEnabled = ZygoteConfig.getBool(
+            ZygoteConfig.USAP_POOL_ENABLED, ZygoteConfig.USAP_POOL_ENABLED_DEFAULT);
 
         boolean valueChanged = origVal != mUsapPoolEnabled;
 
@@ -922,13 +901,13 @@ public class ZygoteProcess {
     }
 
     /**
-     * Push hidden API denylisting exemptions into the zygote process(es).
+     * Push hidden API deny-listing exemptions into the zygote process(es).
      *
      * <p>The list of exemptions will take affect for all new processes forked from the zygote after
      * this call.
      *
      * @param exemptions List of hidden API exemption prefixes. Any matching members are treated as
-     *        allowlisted/public APIs (i.e. allowed, no logging of usage).
+     *        allowed/public APIs (i.e. allowed, no logging of usage).
      */
     public boolean setApiDenylistExemptions(List<String> exemptions) {
         synchronized (mLock) {
@@ -1326,7 +1305,7 @@ public class ZygoteProcess {
                     true /* startChildZygote */, null /* packageName */,
                     ZYGOTE_POLICY_FLAG_SYSTEM_PROCESS /* zygotePolicyFlags */, false /* isTopApp */,
                     null /* disabledCompatChanges */, null /* pkgDataInfoMap */,
-                    null /* whitelistedDataInfoMap */, true /* bindMountAppsData*/,
+                    null /* allowlistedDataInfoList */, true /* bindMountAppsData*/,
                     /* bindMountAppStorageDirs */ false, extraArgs);
 
         } catch (ZygoteStartFailedEx ex) {

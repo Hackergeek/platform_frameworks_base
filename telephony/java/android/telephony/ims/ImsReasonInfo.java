@@ -891,6 +891,12 @@ public final class ImsReasonInfo implements Parcelable {
     public static final int CODE_WFC_SERVICE_NOT_AVAILABLE_IN_THIS_LOCATION = 1623;
 
     /**
+     * Call failed because of network congestion, resource is not available,
+     * or no circuit or channel available, etc.
+     */
+    public static final int CODE_NETWORK_CONGESTION = 1624;
+
+    /**
      * The dialed RTT call should be retried without RTT
      * @hide
      */
@@ -1076,6 +1082,7 @@ public final class ImsReasonInfo implements Parcelable {
             CODE_REJECT_VT_AVPF_NOT_ALLOWED,
             CODE_REJECT_ONGOING_ENCRYPTED_CALL,
             CODE_REJECT_ONGOING_CS_CALL,
+            CODE_NETWORK_CONGESTION,
             CODE_RETRY_ON_IMS_WITHOUT_RTT,
             CODE_OEM_CAUSE_1,
             CODE_OEM_CAUSE_2,
@@ -1268,6 +1275,7 @@ public final class ImsReasonInfo implements Parcelable {
         sImsCodeMap.put(CODE_REJECT_VT_AVPF_NOT_ALLOWED, "CODE_REJECT_VT_AVPF_NOT_ALLOWED");
         sImsCodeMap.put(CODE_REJECT_ONGOING_ENCRYPTED_CALL, "CODE_REJECT_ONGOING_ENCRYPTED_CALL");
         sImsCodeMap.put(CODE_REJECT_ONGOING_CS_CALL, "CODE_REJECT_ONGOING_CS_CALL");
+        sImsCodeMap.put(CODE_NETWORK_CONGESTION, "CODE_NETWORK_CONGESTION");
         sImsCodeMap.put(CODE_RETRY_ON_IMS_WITHOUT_RTT, "CODE_RETRY_ON_IMS_WITHOUT_RTT");
         sImsCodeMap.put(CODE_OEM_CAUSE_1, "CODE_OEM_CAUSE_1");
         sImsCodeMap.put(CODE_OEM_CAUSE_2, "CODE_OEM_CAUSE_2");
@@ -1322,6 +1330,13 @@ public final class ImsReasonInfo implements Parcelable {
      */
     public static final int EXTRA_CODE_CALL_RETRY_BY_SETTINGS = 3;
 
+    /**
+     * An extra that may be populated when the {@link #CODE_LOCAL_CALL_CS_RETRY_REQUIRED} result has
+     * been returned.
+     * <p>
+     * Try to connect the call using CS as emergency
+     */
+    public static final int EXTRA_CODE_CALL_RETRY_EMERGENCY = 4;
 
     // For main reason code
     /** @hide */
@@ -1353,7 +1368,7 @@ public final class ImsReasonInfo implements Parcelable {
     }
 
     /** @hide */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public ImsReasonInfo(int code, int extraCode) {
         mCode = code;
         mExtraCode = extraCode;

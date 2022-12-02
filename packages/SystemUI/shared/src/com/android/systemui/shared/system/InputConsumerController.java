@@ -17,7 +17,6 @@
 package com.android.systemui.shared.system;
 
 import static android.view.Display.DEFAULT_DISPLAY;
-import static android.view.WindowManager.INPUT_CONSUMER_PIP;
 import static android.view.WindowManager.INPUT_CONSUMER_RECENTS_ANIMATION;
 
 import android.os.Binder;
@@ -36,6 +35,7 @@ import java.io.PrintWriter;
 
 /**
  * Manages the input consumer that allows the SystemUI to directly receive input.
+ * TODO: Refactor this for the gesture nav case
  */
 public class InputConsumerController {
 
@@ -99,14 +99,6 @@ public class InputConsumerController {
     }
 
     /**
-     * @return A controller for the pip input consumer.
-     */
-    public static InputConsumerController getPipInputConsumer() {
-        return new InputConsumerController(WindowManagerGlobal.getWindowManagerService(),
-                INPUT_CONSUMER_PIP);
-    }
-
-    /**
      * @return A controller for the recents animation input consumer.
      */
     public static InputConsumerController getRecentsAnimationInputConsumer() {
@@ -144,25 +136,16 @@ public class InputConsumerController {
      * Registers the input consumer.
      */
     public void registerInputConsumer() {
-        registerInputConsumer(false);
-    }
-
-    /**
-     * Registers the input consumer.
-     * @param withSfVsync the flag set using sf vsync signal or no
-     */
-    public void registerInputConsumer(boolean withSfVsync) {
         if (mInputEventReceiver == null) {
             final InputChannel inputChannel = new InputChannel();
             try {
-                // TODO(b/113087003): Support Picture-in-picture in multi-display.
                 mWindowManager.destroyInputConsumer(mName, DEFAULT_DISPLAY);
                 mWindowManager.createInputConsumer(mToken, mName, DEFAULT_DISPLAY, inputChannel);
             } catch (RemoteException e) {
                 Log.e(TAG, "Failed to create input consumer", e);
             }
             mInputEventReceiver = new InputEventReceiver(inputChannel, Looper.myLooper(),
-                    withSfVsync ? Choreographer.getSfInstance() : Choreographer.getInstance());
+                    Choreographer.getInstance());
             if (mRegistrationListener != null) {
                 mRegistrationListener.onRegistrationChanged(true /* isRegistered */);
             }
@@ -175,7 +158,6 @@ public class InputConsumerController {
     public void unregisterInputConsumer() {
         if (mInputEventReceiver != null) {
             try {
-                // TODO(b/113087003): Support Picture-in-picture in multi-display.
                 mWindowManager.destroyInputConsumer(mName, DEFAULT_DISPLAY);
             } catch (RemoteException e) {
                 Log.e(TAG, "Failed to destroy input consumer", e);

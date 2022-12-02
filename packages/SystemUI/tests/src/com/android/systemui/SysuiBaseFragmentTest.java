@@ -29,8 +29,10 @@ import com.android.systemui.utils.leaks.LeakCheckedTest;
 import com.android.systemui.utils.leaks.LeakCheckedTest.SysuiLeakCheck;
 
 import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Rule;
+import org.mockito.Mockito;
 
 public abstract class SysuiBaseFragmentTest extends BaseFragmentTest {
 
@@ -53,8 +55,11 @@ public abstract class SysuiBaseFragmentTest extends BaseFragmentTest {
 
     @Before
     public void SysuiSetup() {
-        SystemUIFactory.createFromConfig(mContext);
-        mDependency = new TestableDependency(mContext);
+        SystemUIFactory.createFromConfig(mContext, true);
+        mDependency = new TestableDependency(
+                SystemUIFactory.getInstance().getSysUIComponent().createDependency());
+        Dependency.setInstance(mDependency);
+
         // TODO: Figure out another way to give reference to a SysuiTestableContext.
         mSysuiContext = (SysuiTestableContext) mContext;
 
@@ -73,6 +78,11 @@ public abstract class SysuiBaseFragmentTest extends BaseFragmentTest {
         InstrumentationRegistry.registerInstance(mRealInstrumentation,
                 InstrumentationRegistry.getArguments());
         SystemUIFactory.cleanup();
+    }
+
+    @AfterClass
+    public static void mockitoTeardown() {
+        Mockito.framework().clearInlineMocks();
     }
 
     @Override

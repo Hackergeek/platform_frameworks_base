@@ -16,11 +16,17 @@
 
 package com.android.server.accessibility;
 
+import static android.accessibilityservice.AccessibilityService.SoftKeyboardController.ENABLE_IME_FAIL_BY_ADMIN;
+import static android.accessibilityservice.AccessibilityService.SoftKeyboardController.ENABLE_IME_SUCCESS;
+
 import android.Manifest;
+import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.UserIdInt;
 import android.app.AppOpsManager;
+import android.app.admin.DevicePolicyManager;
 import android.appwidget.AppWidgetManagerInternal;
 import android.content.ComponentName;
 import android.content.Context;
@@ -36,27 +42,27 @@ import android.os.UserManager;
 import android.util.ArraySet;
 import android.util.Slog;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.inputmethod.InputMethodInfo;
 
 import com.android.internal.util.ArrayUtils;
-import com.android.server.LocalServices;
-import com.android.server.wm.ActivityTaskManagerInternal;
+import com.android.server.inputmethod.InputMethodManagerInternal;
+import com.android.settingslib.RestrictedLockUtils;
 
 import libcore.util.EmptyArray;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
 /**
  * This class provides APIs of accessibility security policies for accessibility manager
- * to grant accessibility capabilities or events access right to accessibility service.
+ * to grant accessibility capabilities or events access right to accessibility services. And also
+ * monitors the current bound accessibility services to prompt permission warnings for
+ * not accessibility-categorized ones.
  */
 public class AccessibilitySecurityPolicy {
     private static final int OWN_PROCESS_ID = android.os.Process.myPid();
     private static final String LOG_TAG = "AccessibilitySecurityPolicy";
-
-    private final Context mContext;
-    private final PackageManager mPackageManager;
-    private final UserManager mUserManager;
-    private final AppOpsManager mAppOpsManager;
-
-    private AppWidgetManagerInternal mAppWidgetService;
 
     private static final int KEEP_SOURCE_EVENT_TYPES = AccessibilityEvent.TYPE_VIEW_CLICKED
             | AccessibilityEvent.TYPE_VIEW_FOCUSED
@@ -86,21 +92,51 @@ public class AccessibilitySecurityPolicy {
         // TODO: Should include resolveProfileParentLocked, but that was already in SecurityPolicy
     }
 
+    private final Context mContext;
+    private final PackageManager mPackageManager;
+    private final UserManager mUserManager;
+    private final AppOpsManager mAppOpsManager;
     private final AccessibilityUserManager mAccessibilityUserManager;
+    private final PolicyWarningUIController mPolicyWarningUIController;
+    /** All bound accessibility services which don't belong to accessibility category. */
+    private final ArraySet<ComponentName> mNonA11yCategoryServices = new ArraySet<>();
+
+    private AppWidgetManagerInternal mAppWidgetService;
     private AccessibilityWindowManager mAccessibilityWindowManager;
-    private final ActivityTaskManagerInternal mAtmInternal;
+    private int mCurrentUserId = UserHandle.USER_NULL;
+    private boolean mSendNonA11yToolNotificationEnabled = false;
 
     /**
      * Constructor for AccessibilityManagerService.
      */
-    public AccessibilitySecurityPolicy(@NonNull Context context,
+    public AccessibilitySecurityPolicy(PolicyWarningUIController policyWarningUIController,
+            @NonNull Context context,
             @NonNull AccessibilityUserManager a11yUserManager) {
         mContext = context;
         mAccessibilityUserManager = a11yUserManager;
         mPackageManager = mContext.getPackageManager();
         mUserManager = (UserManager) mContext.getSystemService(Context.USER_SERVICE);
         mAppOpsManager = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
-        mAtmInternal = LocalServices.getService(ActivityTaskManagerInternal.class);
+        mPolicyWarningUIController = policyWarningUIController;
+    }
+
+    /**
+     * Enables sending the notification for non-AccessibilityTool services with the given state.
+     *
+     */
+    public void setSendingNonA11yToolNotificationLocked(boolean enable) {
+        if (enable == mSendNonA11yToolNotificationEnabled) {
+            return;
+        }
+
+        mSendNonA11yToolNotificationEnabled = enable;
+        mPolicyWarningUIController.enableSendingNonA11yToolNotification(enable);
+        if (enable) {
+            for (int i = 0; i < mNonA11yCategoryServices.size(); i++) {
+                final ComponentName service = mNonA11yCategoryServices.valueAt(i);
+                mPolicyWarningUIController.onNonA11yCategoryServiceBound(mCurrentUserId, service);
+            }
+        }
     }
 
     /**
@@ -349,6 +385,115 @@ public class AccessibilitySecurityPolicy {
     }
 
     /**
+     * Check whether the input method can be enabled or disabled by the accessibility service.
+     *
+     * @param imeId The id of the input method.
+     * @param service The accessibility service connection.
+     * @return Whether the input method can be enabled/disabled or the reason why it can't be
+     *         enabled/disabled.
+     * @throws SecurityException if the input method is not in the same package as the service.
+     */
+    @AccessibilityService.SoftKeyboardController.EnableImeResult
+    int canEnableDisableInputMethod(String imeId, AbstractAccessibilityServiceConnection service)
+            throws SecurityException {
+        final String servicePackageName = service.getComponentName().getPackageName();
+        final int callingUserId = UserHandle.getCallingUserId();
+
+        InputMethodInfo inputMethodInfo = null;
+        List<InputMethodInfo> inputMethodInfoList =
+                InputMethodManagerInternal.get().getInputMethodListAsUser(callingUserId);
+        if (inputMethodInfoList != null) {
+            for (InputMethodInfo info : inputMethodInfoList) {
+                if (info.getId().equals(imeId)) {
+                    inputMethodInfo = info;
+                    break;
+                }
+            }
+        }
+
+        if (inputMethodInfo == null
+                || !inputMethodInfo.getPackageName().equals(servicePackageName)) {
+            throw new SecurityException("The input method is in a different package with the "
+                    + "accessibility service");
+        }
+
+        // TODO(b/207697949, b/208872785): Add cts test for managed device.
+        //  Use RestrictedLockUtilsInternal in AccessibilitySecurityPolicy
+        if (checkIfInputMethodDisallowed(
+                mContext, inputMethodInfo.getPackageName(), callingUserId) != null) {
+            return ENABLE_IME_FAIL_BY_ADMIN;
+        }
+
+        return ENABLE_IME_SUCCESS;
+    }
+
+    /**
+     * @return the UserHandle for a userId. Return null for USER_NULL
+     */
+    private static UserHandle getUserHandleOf(@UserIdInt int userId) {
+        if (userId == UserHandle.USER_NULL) {
+            return null;
+        } else {
+            return UserHandle.of(userId);
+        }
+    }
+
+    private static int getManagedProfileId(Context context, int userId) {
+        UserManager um = context.getSystemService(UserManager.class);
+        List<UserInfo> userProfiles = um.getProfiles(userId);
+        for (UserInfo uInfo : userProfiles) {
+            if (uInfo.id == userId) {
+                continue;
+            }
+            if (uInfo.isManagedProfile()) {
+                return uInfo.id;
+            }
+        }
+        return UserHandle.USER_NULL;
+    }
+
+    private static RestrictedLockUtils.EnforcedAdmin checkIfInputMethodDisallowed(Context context,
+            String packageName, int userId) {
+        DevicePolicyManager dpm = context.getSystemService(DevicePolicyManager.class);
+        if (dpm == null) {
+            return null;
+        }
+        RestrictedLockUtils.EnforcedAdmin admin =
+                RestrictedLockUtils.getProfileOrDeviceOwner(context, getUserHandleOf(userId));
+        boolean permitted = true;
+        if (admin != null) {
+            permitted = dpm.isInputMethodPermittedByAdmin(admin.component,
+                    packageName, userId);
+        }
+
+        boolean permittedByParentAdmin = true;
+        RestrictedLockUtils.EnforcedAdmin profileAdmin = null;
+        int managedProfileId = getManagedProfileId(context, userId);
+        if (managedProfileId != UserHandle.USER_NULL) {
+            profileAdmin = RestrictedLockUtils.getProfileOrDeviceOwner(
+                    context, getUserHandleOf(managedProfileId));
+            // If the device is an organization-owned device with a managed profile, the
+            // managedProfileId will be used instead of the affected userId. This is because
+            // isInputMethodPermittedByAdmin is called on the parent DPM instance, which will
+            // return results affecting the personal profile.
+            if (profileAdmin != null && dpm.isOrganizationOwnedDeviceWithManagedProfile()) {
+                DevicePolicyManager parentDpm = dpm.getParentProfileInstance(
+                        UserManager.get(context).getUserInfo(managedProfileId));
+                permittedByParentAdmin = parentDpm.isInputMethodPermittedByAdmin(
+                        profileAdmin.component, packageName, managedProfileId);
+            }
+        }
+        if (!permitted && !permittedByParentAdmin) {
+            return RestrictedLockUtils.EnforcedAdmin.MULTIPLE_ENFORCED_ADMIN;
+        } else if (!permitted) {
+            return admin;
+        } else if (!permittedByParentAdmin) {
+            return profileAdmin;
+        }
+        return null;
+    }
+
+    /**
      * Returns the parent userId of the profile according to the specified userId.
      *
      * @param userId The userId to check
@@ -429,8 +574,10 @@ public class AccessibilitySecurityPolicy {
     private boolean isValidPackageForUid(String packageName, int uid) {
         final long token = Binder.clearCallingIdentity();
         try {
+            // Since we treat calls from a profile as if made by its parent, using
+            // MATCH_ANY_USER to query the uid of the given package name.
             return uid == mPackageManager.getPackageUidAsUser(
-                    packageName, UserHandle.getUserId(uid));
+                    packageName, PackageManager.MATCH_ANY_USER, UserHandle.getUserId(uid));
         } catch (PackageManager.NameNotFoundException e) {
             return false;
         } finally {
@@ -456,7 +603,7 @@ public class AccessibilitySecurityPolicy {
     }
 
     private boolean isShellAllowedToRetrieveWindowLocked(int userId, int windowId) {
-        long token = Binder.clearCallingIdentity();
+        final long token = Binder.clearCallingIdentity();
         try {
             IBinder windowToken = mAccessibilityWindowManager
                     .getWindowTokenForUserAndWindowIdLocked(userId, windowId);
@@ -517,9 +664,18 @@ public class AccessibilitySecurityPolicy {
             return false;
         }
 
+        if ((serviceInfo.flags & ServiceInfo.FLAG_EXTERNAL_SERVICE) != 0) {
+            Slog.w(LOG_TAG, "Skipping accessibility service " + new ComponentName(
+                    serviceInfo.packageName, serviceInfo.name).flattenToShortString()
+                    + ": the service is the external one and doesn't allow to register as "
+                    + "an accessibility service ");
+            return false;
+        }
+
         int servicePackageUid = serviceInfo.applicationInfo.uid;
         if (mAppOpsManager.noteOpNoThrow(AppOpsManager.OPSTR_BIND_ACCESSIBILITY_SERVICE,
-                servicePackageUid, serviceInfo.packageName) != AppOpsManager.MODE_ALLOWED) {
+                servicePackageUid, serviceInfo.packageName, null, null)
+                != AppOpsManager.MODE_ALLOWED) {
             Slog.w(LOG_TAG, "Skipping accessibility service " + new ComponentName(
                     serviceInfo.packageName, serviceInfo.name).flattenToShortString()
                     + ": disallowed by AppOps");
@@ -544,17 +700,21 @@ public class AccessibilitySecurityPolicy {
             return true;
         }
 
-        final int uid = resolveInfo.serviceInfo.applicationInfo.uid;
+        final int servicePackageUid = resolveInfo.serviceInfo.applicationInfo.uid;
+        final int callingPid = Binder.getCallingPid();
         final long identityToken = Binder.clearCallingIdentity();
+        final String attributionTag = service.getAttributionTag();
         try {
             // For the caller is system, just block the data to a11y services.
-            if (OWN_PROCESS_ID == Binder.getCallingPid()) {
+            if (OWN_PROCESS_ID == callingPid) {
                 return mAppOpsManager.noteOpNoThrow(AppOpsManager.OPSTR_ACCESS_ACCESSIBILITY,
-                        uid, packageName) == AppOpsManager.MODE_ALLOWED;
+                        servicePackageUid, packageName, attributionTag, null)
+                        == AppOpsManager.MODE_ALLOWED;
             }
 
             return mAppOpsManager.noteOp(AppOpsManager.OPSTR_ACCESS_ACCESSIBILITY,
-                    uid, packageName) == AppOpsManager.MODE_ALLOWED;
+                    servicePackageUid, packageName, attributionTag, null)
+                    == AppOpsManager.MODE_ALLOWED;
         } finally {
             Binder.restoreCallingIdentity(identityToken);
         }
@@ -574,11 +734,76 @@ public class AccessibilitySecurityPolicy {
     }
 
     /**
-     * Enforcing permission check to IPC caller or grant it if it's recents.
+     * Called after a service was bound or unbound. Checks the current bound accessibility
+     * services and updates alarms.
      *
-     * @param permission The permission to check
+     * @param userId        The user id
+     * @param boundServices The bound services
      */
-    public void enforceCallerIsRecentsOrHasPermission(@NonNull String permission, String func) {
-        mAtmInternal.enforceCallerIsRecentsOrHasPermission(permission, func);
+    public void onBoundServicesChangedLocked(int userId,
+            ArrayList<AccessibilityServiceConnection> boundServices) {
+        if (mAccessibilityUserManager.getCurrentUserIdLocked() != userId) {
+            return;
+        }
+
+        ArraySet<ComponentName> tempNonA11yCategoryServices = new ArraySet<>();
+        for (int i = 0; i < boundServices.size(); i++) {
+            final AccessibilityServiceInfo a11yServiceInfo = boundServices.get(
+                    i).getServiceInfo();
+            final ComponentName service = a11yServiceInfo.getComponentName().clone();
+            if (!a11yServiceInfo.isAccessibilityTool()) {
+                tempNonA11yCategoryServices.add(service);
+                if (mNonA11yCategoryServices.contains(service)) {
+                    mNonA11yCategoryServices.remove(service);
+                } else {
+                    if (mSendNonA11yToolNotificationEnabled) {
+                        mPolicyWarningUIController.onNonA11yCategoryServiceBound(userId, service);
+                    }
+                }
+            }
+        }
+
+        for (int i = 0; i < mNonA11yCategoryServices.size(); i++) {
+            final ComponentName service = mNonA11yCategoryServices.valueAt(i);
+            mPolicyWarningUIController.onNonA11yCategoryServiceUnbound(userId, service);
+        }
+        mNonA11yCategoryServices.clear();
+        mNonA11yCategoryServices.addAll(tempNonA11yCategoryServices);
+    }
+
+    /**
+     * Called after switching to another user. Resets data and cancels old alarms after
+     * switching to another user.
+     *
+     * @param userId          The user id
+     * @param enabledServices The enabled services
+     */
+    public void onSwitchUserLocked(int userId, Set<ComponentName> enabledServices) {
+        if (mCurrentUserId == userId) {
+            return;
+        }
+        mPolicyWarningUIController.onSwitchUser(userId,
+                new ArraySet<>(enabledServices));
+
+        for (int i = 0; i < mNonA11yCategoryServices.size(); i++) {
+            mPolicyWarningUIController.onNonA11yCategoryServiceUnbound(mCurrentUserId,
+                    mNonA11yCategoryServices.valueAt(i));
+        }
+        mNonA11yCategoryServices.clear();
+        mCurrentUserId = userId;
+    }
+
+    /**
+     * Called after the enabled accessibility services changed.
+     *
+     * @param userId          The user id
+     * @param enabledServices The enabled services
+     */
+    public void onEnabledServicesChangedLocked(int userId, Set<ComponentName> enabledServices) {
+        if (mAccessibilityUserManager.getCurrentUserIdLocked() != userId) {
+            return;
+        }
+        mPolicyWarningUIController.onEnabledServicesChanged(userId,
+                new ArraySet<>(enabledServices));
     }
 }

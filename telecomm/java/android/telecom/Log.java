@@ -76,6 +76,11 @@ public class Log {
     private static boolean sIsUserExtendedLoggingEnabled = false;
 
     /**
+     *  Enabled in telecom testing to help gate log statements causing log spew.
+     */
+    private static boolean sIsUnitTestingEnabled = false;
+
+    /**
      * The time when user-activated extended logging should be ended.  Used to determine when
      * extended logging should automatically be disabled.
      */
@@ -102,7 +107,7 @@ public class Log {
         }
     }
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static void i(String prefix, String format, Object... args) {
         if (INFO) {
             android.util.Slog.i(TAG, buildMessage(prefix, format, args));
@@ -133,7 +138,7 @@ public class Log {
         }
     }
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static void w(String prefix, String format, Object... args) {
         if (WARN) {
             android.util.Slog.w(TAG, buildMessage(prefix, format, args));
@@ -330,6 +335,20 @@ public class Log {
         }
     }
 
+    /**
+     * Enabled when tests are running to help gate log statements causing log spew.
+     *
+     *  @param isEnabled {@code true} if running unit tests. false otherwise.
+     *
+     */
+    public static void setUnitTestingEnabled(boolean isEnabled) {
+        sIsUnitTestingEnabled = isEnabled;
+    }
+
+    public static boolean isUnitTestingEnabled() {
+        return sIsUnitTestingEnabled;
+    }
+
     private static EventManager getEventManager() {
         // Checking for null again outside of synchronization because we only need to synchronize
         // during the lazy loading of the events logger. We don't need to synchronize elsewhere.
@@ -522,7 +541,7 @@ public class Log {
             return "";
         }
         return Arrays.stream(packageName.split("\\."))
-                .map(s -> s.substring(0,1))
+                .map(s -> s.length() == 0 ? "" : s.substring(0, 1))
                 .collect(Collectors.joining(""));
     }
 }

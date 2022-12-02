@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <resources xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="keyguard_description" msgid="8582605799129954556">"Pon o teu contrasinal e vai a Dynamic System Updates"</string>
+    <string name="keyguard_description" msgid="8582605799129954556">"Pon o teu contrasinal e vai a Actualizacións dinámicas do sistema"</string>
     <string name="notification_install_completed" msgid="6252047868415172643">"O sistema dinámico está listo. Para utilizalo, reinicia o dispositivo."</string>
     <string name="notification_install_inprogress" msgid="7383334330065065017">"Instalación en curso"</string>
     <string name="notification_install_failed" msgid="4066039210317521404">"Produciuse un erro durante a instalación"</string>
@@ -13,4 +13,5 @@
     <string name="notification_action_reboot_to_origin" msgid="4013901243271889897">"Reiniciar"</string>
     <string name="toast_dynsystem_discarded" msgid="1733249860276017050">"Descartouse o sistema dinámico"</string>
     <string name="toast_failed_to_reboot_to_dynsystem" msgid="6336737274625452067">"Non se puido reiniciar nin cargar o sistema dinámico"</string>
+    <string name="toast_failed_to_disable_dynsystem" msgid="3285742944977744413">"Produciuse un erro ao desactivar o sistema dinámico"</string>
 </resources>

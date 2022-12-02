@@ -37,18 +37,21 @@ import android.os.UserHandle;
 import android.provider.MediaStore;
 import android.util.Log;
 
-import com.android.systemui.SystemUI;
+import com.android.systemui.CoreStartable;
+import com.android.systemui.dagger.SysUISingleton;
 
-import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.HashMap;
+
+import javax.inject.Inject;
 
 /**
  * Service that offers to play ringtones by {@link Uri}, since our process has
  * {@link android.Manifest.permission#READ_EXTERNAL_STORAGE}.
  */
-public class RingtonePlayer extends SystemUI {
+@SysUISingleton
+public class RingtonePlayer extends CoreStartable {
     private static final String TAG = "RingtonePlayer";
     private static final boolean LOGD = false;
 
@@ -59,6 +62,7 @@ public class RingtonePlayer extends SystemUI {
     private final NotificationPlayer mAsyncPlayer = new NotificationPlayer(TAG);
     private final HashMap<IBinder, Client> mClients = new HashMap<IBinder, Client>();
 
+    @Inject
     public RingtonePlayer(Context context) {
         super(context);
     }
@@ -163,7 +167,8 @@ public class RingtonePlayer extends SystemUI {
         }
 
         @Override
-        public void setPlaybackProperties(IBinder token, float volume, boolean looping) {
+        public void setPlaybackProperties(IBinder token, float volume, boolean looping,
+                boolean hapticGeneratorEnabled) {
             Client client;
             synchronized (mClients) {
                 client = mClients.get(token);
@@ -171,6 +176,7 @@ public class RingtonePlayer extends SystemUI {
             if (client != null) {
                 client.mRingtone.setVolume(volume);
                 client.mRingtone.setLooping(looping);
+                client.mRingtone.setHapticGeneratorEnabled(hapticGeneratorEnabled);
             }
             // else no client for token when setting playback properties but will be set at play()
         }
@@ -241,7 +247,7 @@ public class RingtonePlayer extends SystemUI {
     }
 
     @Override
-    public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+    public void dump(PrintWriter pw, String[] args) {
         pw.println("Clients:");
         synchronized (mClients) {
             for (Client client : mClients.values()) {

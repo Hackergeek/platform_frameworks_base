@@ -24,7 +24,6 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.SystemClock;
@@ -137,7 +136,6 @@ public abstract class Conference extends Conferenceable {
      * @hide
      */
     @SystemApi
-    @TestApi
     public final @NonNull String getTelecomCallId() {
         return mTelecomCallId;
     }
@@ -340,7 +338,7 @@ public abstract class Conference extends Conferenceable {
      *
      * @param videoState The video state in which to answer the connection.
      */
-    public void onAnswer(int videoState) {}
+    public void onAnswer(@VideoProfile.VideoState int videoState) {}
 
     /**
      * Notifies this Conference, which is in {@code STATE_RINGING}, of
@@ -609,7 +607,6 @@ public abstract class Conference extends Conferenceable {
      * @return The primary connection.
      * @hide
      */
-    @TestApi
     @SystemApi
     public Connection getPrimaryConnection() {
         if (mUnmodifiableChildConnections == null || mUnmodifiableChildConnections.isEmpty()) {
@@ -1012,7 +1009,6 @@ public abstract class Conference extends Conferenceable {
      * @hide
      */
     @SystemApi
-    @TestApi
     @RequiresPermission(MODIFY_PHONE_STATE)
     public void setConferenceState(boolean isConference) {
         mIsMultiparty = isConference;
@@ -1067,7 +1063,6 @@ public abstract class Conference extends Conferenceable {
      * @hide
      */
     @SystemApi
-    @TestApi
     @RequiresPermission(MODIFY_PHONE_STATE)
     public final void setAddress(@NonNull Uri address,
             @TelecomManager.Presentation int presentation) {
@@ -1155,7 +1150,6 @@ public abstract class Conference extends Conferenceable {
      * @hide
      */
     @SystemApi
-    @TestApi
     public final void setCallerDisplayName(@NonNull String callerDisplayName,
             @TelecomManager.Presentation int presentation) {
         Log.d(this, "setCallerDisplayName %s", callerDisplayName);

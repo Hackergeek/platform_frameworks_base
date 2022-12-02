@@ -46,8 +46,8 @@ import android.widget.TextView;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
-import com.android.systemui.Interpolators;
 import com.android.systemui.R;
+import com.android.systemui.animation.Interpolators;
 import com.android.systemui.plugins.statusbar.NotificationSwipeActionHelper;
 import com.android.systemui.plugins.statusbar.NotificationSwipeActionHelper.SnoozeOption;
 
@@ -146,6 +146,7 @@ public class NotificationSnooze extends LinearLayout
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
         logOptionSelection(MetricsEvent.NOTIFICATION_SNOOZE_CLICKED, mDefaultOption);
+        dispatchConfigurationChanged(getResources().getConfiguration());
     }
 
     @Override
@@ -254,7 +255,7 @@ public class NotificationSnooze extends LinearLayout
             return new NotificationSnoozeOption(null, minutes, description, resultText, action);
         }
         SpannableString string = new SpannableString(resultText);
-        string.setSpan(new StyleSpan(Typeface.BOLD),
+        string.setSpan(new StyleSpan(Typeface.BOLD, res.getConfiguration().fontWeightAdjustment),
                 index, index + description.length(), 0 /* flags */);
         return new NotificationSnoozeOption(null, minutes, description, string,
                 action);

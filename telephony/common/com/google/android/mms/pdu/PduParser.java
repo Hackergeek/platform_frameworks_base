@@ -793,7 +793,7 @@ public class PduParser {
                         try {
                             if (LOCAL_LOGV) {
                                 Log.v(LOG_TAG, "parseHeaders: CONTENT_TYPE: " + headerField +
-                                        contentType.toString());
+                                        Arrays.toString(contentType));
                             }
                             headers.setTextString(contentType, PduHeaders.CONTENT_TYPE);
                         } catch(NullPointerException e) {
@@ -1550,6 +1550,11 @@ public class PduParser {
         if (cur < TEXT_MIN) {
             int length = parseValueLength(pduDataStream);
             int startPos = pduDataStream.available();
+            if (length > startPos) {
+                Log.e(LOG_TAG, "parseContentType: Invalid length " + length
+                        + " when available bytes are " + startPos);
+                return (PduContentTypes.contentTypes[0]).getBytes(); //"*/*"
+            }
             pduDataStream.mark(1);
             temp = pduDataStream.read();
             assert(-1 != temp);

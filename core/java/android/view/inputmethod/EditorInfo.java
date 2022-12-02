@@ -17,24 +17,35 @@
 package android.view.inputmethod;
 
 import static android.Manifest.permission.INTERACT_ACROSS_USERS_FULL;
+import static android.view.inputmethod.EditorInfoProto.FIELD_ID;
+import static android.view.inputmethod.EditorInfoProto.IME_OPTIONS;
+import static android.view.inputmethod.EditorInfoProto.INPUT_TYPE;
+import static android.view.inputmethod.EditorInfoProto.PACKAGE_NAME;
+import static android.view.inputmethod.EditorInfoProto.PRIVATE_IME_OPTIONS;
+import static android.view.inputmethod.EditorInfoProto.TARGET_INPUT_METHOD_USER_ID;
 
 import android.annotation.IntDef;
+import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
+import android.content.res.Configuration;
+import android.os.Build.VERSION_CODES;
 import android.os.Bundle;
 import android.os.LocaleList;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.UserHandle;
-import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.util.Printer;
+import android.util.proto.ProtoOutputStream;
 import android.view.View;
 import android.view.autofill.AutofillId;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.util.ArrayUtils;
+import com.android.internal.util.Preconditions;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -81,6 +92,7 @@ public class EditorInfo implements InputType, Parcelable {
      *                1                  TYPE_TEXT_FLAG_MULTI_LINE
      *               1                   TYPE_TEXT_FLAG_IME_MULTI_LINE
      *              1                    TYPE_TEXT_FLAG_NO_SUGGESTIONS
+     *             1                     TYPE_TEXT_FLAG_ENABLE_TEXT_CONVERSION_SUGGESTIONS
      * |-------|-------|-------|-------|
      *                                1  TYPE_CLASS_NUMBER
      *                             1     TYPE_NUMBER_VARIATION_PASSWORD
@@ -285,6 +297,13 @@ public class EditorInfo implements InputType, Parcelable {
     public static final int IME_FLAG_FORCE_ASCII = 0x80000000;
 
     /**
+     * Flag of {@link #internalImeOptions}: flag is set when app window containing this
+     * {@link EditorInfo} is using {@link Configuration#ORIENTATION_PORTRAIT} mode.
+     * @hide
+     */
+    public static final int IME_INTERNAL_FLAG_APP_WINDOW_PORTRAIT = 0x00000001;
+
+    /**
      * Generic unspecified type for {@link #imeOptions}.
      */
     public static final int IME_NULL = 0x00000000;
@@ -333,6 +352,20 @@ public class EditorInfo implements InputType, Parcelable {
      * attribute of a TextView.
      */
     public String privateImeOptions = null;
+
+    /**
+     * Masks for {@link internalImeOptions}
+     *
+     * <pre>
+     *                                 1 IME_INTERNAL_FLAG_APP_WINDOW_PORTRAIT
+     * |-------|-------|-------|-------|</pre>
+     */
+
+    /**
+     * Same as {@link android.R.attr#imeOptions} but for framework's internal-use only.
+     * @hide
+     */
+    public int internalImeOptions = IME_NULL;
 
     /**
      * In some cases an IME may be able to display an arbitrary label for
@@ -497,10 +530,6 @@ public class EditorInfo implements InputType, Parcelable {
      * If not {@code null}, this editor needs to talk to IMEs that run for the specified user, no
      * matter what user ID the calling process has.
      *
-     * <p>Note: This field will be silently ignored when
-     * {@link com.android.server.inputmethod.InputMethodSystemProperty#MULTI_CLIENT_IME_ENABLED} is
-     * {@code true}.</p>
-     *
      * <p>Note also that pseudo handles such as {@link UserHandle#ALL} are not supported.</p>
      *
      * @hide
@@ -532,8 +561,9 @@ public class EditorInfo implements InputType, Parcelable {
     @VisibleForTesting
     static final int MAX_INITIAL_SELECTION_LENGTH =  MEMORY_EFFICIENT_TEXT_LENGTH / 2;
 
-    @NonNull
-    private InitialSurroundingText mInitialSurroundingText = new InitialSurroundingText();
+    @Nullable
+    private SurroundingText mInitialSurroundingText = null;
+
 
     /**
      * Editors may use this method to provide initial input text to IMEs. As the surrounding text
@@ -542,6 +572,9 @@ public class EditorInfo implements InputType, Parcelable {
      * The supplied text will then be processed to serve {@code #getInitialTextBeforeCursor},
      * {@code #getInitialSelectedText}, and {@code #getInitialTextBeforeCursor}. System is allowed
      * to trim {@code sourceText} for various reasons while keeping the most valuable data to IMEs.
+     *
+     * Starting from {@link VERSION_CODES#S}, spans that do not implement {@link Parcelable} will
+     * be automatically dropped.
      *
      * <p><strong>Editor authors: </strong>Providing the initial input text helps reducing IPC calls
      * for IMEs to provide many modern features right after the connection setup. We recommend
@@ -554,6 +587,16 @@ public class EditorInfo implements InputType, Parcelable {
     }
 
     /**
+     * An internal variant of {@link #setInitialSurroundingText(CharSequence)}.
+     *
+     * @param surroundingText {@link SurroundingText} to be set.
+     * @hide
+     */
+    public final void setInitialSurroundingTextInternal(@NonNull SurroundingText surroundingText) {
+        mInitialSurroundingText = surroundingText;
+    }
+
+    /**
      * Editors may use this method to provide initial input text to IMEs. As the surrounding text
      * could be used to provide various input assistance, we recommend editors to provide the
      * complete initial input text in its {@link View#onCreateInputConnection(EditorInfo)} callback.
@@ -562,14 +605,22 @@ public class EditorInfo implements InputType, Parcelable {
      * try to include the selected text within {@code subText} to give the system best flexibility
      * to choose where and how to trim {@code subText} when necessary.
      *
+     * Starting from {@link VERSION_CODES#S}, spans that do not implement {@link Parcelable} will
+     * be automatically dropped.
+     *
      * @param subText The input text. When it was trimmed, {@code subTextStart} must be provided
      *                correctly.
      * @param subTextStart  The position that the input text got trimmed. For example, when the
      *                      editor wants to trim out the first 10 chars, subTextStart should be 10.
      */
     public void setInitialSurroundingSubText(@NonNull CharSequence subText, int subTextStart) {
-        CharSequence newSubText = Editable.Factory.getInstance().newEditable(subText);
-        Objects.requireNonNull(newSubText);
+        Objects.requireNonNull(subText);
+
+        // For privacy protection reason, we don't carry password inputs to IMEs.
+        if (isPasswordInputType(inputType)) {
+            mInitialSurroundingText = null;
+            return;
+        }
 
         // Swap selection start and end if necessary.
         final int subTextSelStart = initialSelStart > initialSelEnd
@@ -577,26 +628,20 @@ public class EditorInfo implements InputType, Parcelable {
         final int subTextSelEnd = initialSelStart > initialSelEnd
                 ? initialSelStart - subTextStart : initialSelEnd - subTextStart;
 
-        final int subTextLength = newSubText.length();
+        final int subTextLength = subText.length();
         // Unknown or invalid selection.
         if (subTextStart < 0 || subTextSelStart < 0 || subTextSelEnd > subTextLength) {
-            mInitialSurroundingText = new InitialSurroundingText();
-            return;
-        }
-
-        // For privacy protection reason, we don't carry password inputs to IMEs.
-        if (isPasswordInputType(inputType)) {
-            mInitialSurroundingText = new InitialSurroundingText();
+            mInitialSurroundingText = null;
             return;
         }
 
         if (subTextLength <= MEMORY_EFFICIENT_TEXT_LENGTH) {
-            mInitialSurroundingText = new InitialSurroundingText(newSubText, subTextSelStart,
-                    subTextSelEnd);
+            mInitialSurroundingText = new SurroundingText(subText, subTextSelStart,
+                    subTextSelEnd, subTextStart);
             return;
         }
 
-        trimLongSurroundingText(newSubText, subTextSelStart, subTextSelEnd);
+        trimLongSurroundingText(subText, subTextSelStart, subTextSelEnd, subTextStart);
     }
 
     /**
@@ -615,8 +660,10 @@ public class EditorInfo implements InputType, Parcelable {
      * @param subText The long text that needs to be trimmed.
      * @param selStart The text offset of the start of the selection.
      * @param selEnd The text offset of the end of the selection
+     * @param subTextStart The position that the input text got trimmed.
      */
-    private void trimLongSurroundingText(CharSequence subText, int selStart, int selEnd) {
+    private void trimLongSurroundingText(CharSequence subText, int selStart, int selEnd,
+            int subTextStart) {
         final int sourceSelLength = selEnd - selStart;
         // When the selected text is too long, drop it.
         final int newSelLength = (sourceSelLength > MAX_INITIAL_SELECTION_LENGTH)
@@ -666,9 +713,12 @@ public class EditorInfo implements InputType, Parcelable {
         // obj.
         newBeforeCursorHead = 0;
         final int newSelHead = newBeforeCursorHead + newBeforeCursorLength;
-        mInitialSurroundingText = new InitialSurroundingText(
-                newInitialSurroundingText, newSelHead, newSelHead + newSelLength);
+        final int newOffset = subTextStart + selStart - newSelHead;
+        mInitialSurroundingText = new SurroundingText(
+                newInitialSurroundingText, newSelHead, newSelHead + newSelLength,
+                newOffset);
     }
+
 
     /**
      * Get <var>length</var> characters of text before the current cursor position. May be
@@ -683,8 +733,19 @@ public class EditorInfo implements InputType, Parcelable {
      * protocol.
      */
     @Nullable
-    public CharSequence getInitialTextBeforeCursor(int length, int flags) {
-        return mInitialSurroundingText.getInitialTextBeforeCursor(length, flags);
+    public CharSequence getInitialTextBeforeCursor(
+            @IntRange(from = 0) int length, @InputConnection.GetTextType int flags) {
+        if (mInitialSurroundingText == null) {
+            return null;
+        }
+
+        int selStart = Math.min(mInitialSurroundingText.getSelectionStart(),
+                mInitialSurroundingText.getSelectionEnd());
+        int n = Math.min(length, selStart);
+        return ((flags & InputConnection.GET_TEXT_WITH_STYLES) != 0)
+                ? mInitialSurroundingText.getText().subSequence(selStart - n, selStart)
+                : TextUtils.substring(mInitialSurroundingText.getText(), selStart - n,
+                        selStart);
     }
 
     /**
@@ -698,7 +759,11 @@ public class EditorInfo implements InputType, Parcelable {
      * this protocol is not supported.
      */
     @Nullable
-    public CharSequence getInitialSelectedText(int flags) {
+    public CharSequence getInitialSelectedText(@InputConnection.GetTextType int flags) {
+        if (mInitialSurroundingText == null) {
+            return null;
+        }
+
         // Swap selection start and end if necessary.
         final int correctedTextSelStart = initialSelStart > initialSelEnd
                 ? initialSelEnd : initialSelStart;
@@ -706,11 +771,21 @@ public class EditorInfo implements InputType, Parcelable {
                 ? initialSelStart : initialSelEnd;
 
         final int sourceSelLength = correctedTextSelEnd - correctedTextSelStart;
-        if (initialSelStart < 0 || initialSelEnd < 0
-                || mInitialSurroundingText.getSelectionLength() != sourceSelLength) {
+        int selStart = mInitialSurroundingText.getSelectionStart();
+        int selEnd = mInitialSurroundingText.getSelectionEnd();
+        if (selStart > selEnd) {
+            int tmp = selStart;
+            selStart = selEnd;
+            selEnd = tmp;
+        }
+        final int selLength = selEnd - selStart;
+        if (initialSelStart < 0 || initialSelEnd < 0 || selLength != sourceSelLength) {
             return null;
         }
-        return mInitialSurroundingText.getInitialSelectedText(flags);
+
+        return ((flags & InputConnection.GET_TEXT_WITH_STYLES) != 0)
+                ? mInitialSurroundingText.getText().subSequence(selStart, selEnd)
+                : TextUtils.substring(mInitialSurroundingText.getText(), selStart, selEnd);
     }
 
     /**
@@ -726,8 +801,81 @@ public class EditorInfo implements InputType, Parcelable {
      * protocol.
      */
     @Nullable
-    public CharSequence getInitialTextAfterCursor(int length, int flags) {
-        return mInitialSurroundingText.getInitialTextAfterCursor(length, flags);
+    public CharSequence getInitialTextAfterCursor(
+            @IntRange(from = 0) int length, @InputConnection.GetTextType  int flags) {
+        if (mInitialSurroundingText == null) {
+            return null;
+        }
+
+        int surroundingTextLength = mInitialSurroundingText.getText().length();
+        int selEnd = Math.max(mInitialSurroundingText.getSelectionStart(),
+                mInitialSurroundingText.getSelectionEnd());
+        int n = Math.min(length, surroundingTextLength - selEnd);
+        return ((flags & InputConnection.GET_TEXT_WITH_STYLES) != 0)
+                ? mInitialSurroundingText.getText().subSequence(selEnd, selEnd + n)
+                : TextUtils.substring(mInitialSurroundingText.getText(), selEnd, selEnd + n);
+    }
+
+    /**
+     * Gets the surrounding text around the current cursor, with <var>beforeLength</var> characters
+     * of text before the cursor (start of the selection), <var>afterLength</var> characters of text
+     * after the cursor (end of the selection), and all of the selected text.
+     *
+     * <p>The initial surrounding text for return could be trimmed if oversize. Fundamental trimming
+     * rules are:</p>
+     * <ul>
+     *     <li>The text before the cursor is the most important information to IMEs.</li>
+     *     <li>The text after the cursor is the second important information to IMEs.</li>
+     *     <li>The selected text is the least important information but it shall NEVER be truncated.
+     *     When it is too long, just drop it.</li>
+     * </ul>
+     *
+     * <p>For example, the subText can be viewed as TextBeforeCursor + Selection + TextAfterCursor.
+     * The result could be:</p>
+     * <ol>
+     *     <li>(maybeTrimmedAtHead)TextBeforeCursor + Selection
+     *     + TextAfterCursor(maybeTrimmedAtTail)</li>
+     *     <li>(maybeTrimmedAtHead)TextBeforeCursor + TextAfterCursor(maybeTrimmedAtTail)</li>
+     * </ol>
+     *
+     * @param beforeLength The expected length of the text before the cursor.
+     * @param afterLength The expected length of the text after the cursor.
+     * @param flags Supplies additional options controlling how the text is returned. May be either
+     * {@code 0} or {@link InputConnection#GET_TEXT_WITH_STYLES}.
+     * @return an {@link android.view.inputmethod.SurroundingText} object describing the surrounding
+     * text and state of selection, or  {@code null} if the editor or system could not support this
+     * protocol.
+     * @throws IllegalArgumentException if {@code beforeLength} or {@code afterLength} is negative.
+     */
+    @Nullable
+    public SurroundingText getInitialSurroundingText(
+            @IntRange(from = 0) int beforeLength, @IntRange(from = 0)  int afterLength,
+            @InputConnection.GetTextType int flags) {
+        Preconditions.checkArgumentNonnegative(beforeLength);
+        Preconditions.checkArgumentNonnegative(afterLength);
+
+        if (mInitialSurroundingText == null) {
+            return null;
+        }
+
+        int length = mInitialSurroundingText.getText().length();
+        int selStart = mInitialSurroundingText.getSelectionStart();
+        int selEnd = mInitialSurroundingText.getSelectionEnd();
+        if (selStart > selEnd) {
+            int tmp = selStart;
+            selStart = selEnd;
+            selEnd = tmp;
+        }
+
+        int before = Math.min(beforeLength, selStart);
+        int after = Math.min(selEnd + afterLength, length);
+        int offset = selStart - before;
+        CharSequence newText = ((flags & InputConnection.GET_TEXT_WITH_STYLES) != 0)
+                ? mInitialSurroundingText.getText().subSequence(offset, after)
+                : TextUtils.substring(mInitialSurroundingText.getText(), offset, after);
+        int newSelEnd = Math.min(selEnd - offset, length);
+        return new SurroundingText(newText, before, newSelEnd,
+                mInitialSurroundingText.getOffset() + offset);
     }
 
     private static boolean isCutOnSurrogate(CharSequence sourceText, int cutPosition,
@@ -789,6 +937,26 @@ public class EditorInfo implements InputType, Parcelable {
     }
 
     /**
+     * Export the state of {@link EditorInfo} into a protocol buffer output stream.
+     *
+     * @param proto Stream to write the state to
+     * @param fieldId FieldId of ViewRootImpl as defined in the parent message
+     * @hide
+     */
+    public void dumpDebug(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        proto.write(INPUT_TYPE, inputType);
+        proto.write(IME_OPTIONS, imeOptions);
+        proto.write(PRIVATE_IME_OPTIONS, privateImeOptions);
+        proto.write(PACKAGE_NAME, packageName);
+        proto.write(FIELD_ID, this.fieldId);
+        if (targetInputMethodUser != null) {
+            proto.write(TARGET_INPUT_METHOD_USER_ID, targetInputMethodUser.getIdentifier());
+        }
+        proto.end(token);
+    }
+
+    /**
      * Write debug output of this object.
      */
     public void dump(Printer pw, String prefix) {
@@ -816,6 +984,35 @@ public class EditorInfo implements InputType, Parcelable {
     }
 
     /**
+     * @return A deep copy of {@link EditorInfo}.
+     * @hide
+     */
+    @NonNull
+    public final EditorInfo createCopyInternal() {
+        final EditorInfo newEditorInfo = new EditorInfo();
+        newEditorInfo.inputType = inputType;
+        newEditorInfo.imeOptions = imeOptions;
+        newEditorInfo.privateImeOptions = privateImeOptions;
+        newEditorInfo.internalImeOptions = internalImeOptions;
+        newEditorInfo.actionLabel = TextUtils.stringOrSpannedString(actionLabel);
+        newEditorInfo.actionId = actionId;
+        newEditorInfo.initialSelStart = initialSelStart;
+        newEditorInfo.initialSelEnd = initialSelEnd;
+        newEditorInfo.initialCapsMode = initialCapsMode;
+        newEditorInfo.hintText = TextUtils.stringOrSpannedString(hintText);
+        newEditorInfo.label = TextUtils.stringOrSpannedString(label);
+        newEditorInfo.packageName = packageName;
+        newEditorInfo.autofillId = autofillId;
+        newEditorInfo.fieldId = fieldId;
+        newEditorInfo.fieldName = fieldName;
+        newEditorInfo.extras = extras != null ? extras.deepCopy() : null;
+        newEditorInfo.mInitialSurroundingText = mInitialSurroundingText;
+        newEditorInfo.hintLocales = hintLocales;
+        newEditorInfo.contentMimeTypes = ArrayUtils.cloneOrNull(contentMimeTypes);
+        return newEditorInfo;
+    }
+
+    /**
      * Used to package this object into a {@link Parcel}.
      *
      * @param dest The {@link Parcel} to be written.
@@ -825,6 +1022,7 @@ public class EditorInfo implements InputType, Parcelable {
         dest.writeInt(inputType);
         dest.writeInt(imeOptions);
         dest.writeString(privateImeOptions);
+        dest.writeInt(internalImeOptions);
         TextUtils.writeToParcel(actionLabel, dest, flags);
         dest.writeInt(actionId);
         dest.writeInt(initialSelStart);
@@ -837,7 +1035,10 @@ public class EditorInfo implements InputType, Parcelable {
         dest.writeInt(fieldId);
         dest.writeString(fieldName);
         dest.writeBundle(extras);
-        mInitialSurroundingText.writeToParcel(dest, flags);
+        dest.writeBoolean(mInitialSurroundingText != null);
+        if (mInitialSurroundingText != null) {
+            mInitialSurroundingText.writeToParcel(dest, flags);
+        }
         if (hintLocales != null) {
             hintLocales.writeToParcel(dest, flags);
         } else {
@@ -857,6 +1058,7 @@ public class EditorInfo implements InputType, Parcelable {
                     res.inputType = source.readInt();
                     res.imeOptions = source.readInt();
                     res.privateImeOptions = source.readString();
+                    res.internalImeOptions = source.readInt();
                     res.actionLabel = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(source);
                     res.actionId = source.readInt();
                     res.initialSelStart = source.readInt();
@@ -865,13 +1067,15 @@ public class EditorInfo implements InputType, Parcelable {
                     res.hintText = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(source);
                     res.label = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(source);
                     res.packageName = source.readString();
-                    res.autofillId = source.readParcelable(AutofillId.class.getClassLoader());
+                    res.autofillId = source.readParcelable(AutofillId.class.getClassLoader(), android.view.autofill.AutofillId.class);
                     res.fieldId = source.readInt();
                     res.fieldName = source.readString();
                     res.extras = source.readBundle();
-                    InitialSurroundingText initialSurroundingText =
-                            InitialSurroundingText.CREATOR.createFromParcel(source);
-                    res.mInitialSurroundingText = initialSurroundingText;
+                    boolean hasInitialSurroundingText = source.readBoolean();
+                    if (hasInitialSurroundingText) {
+                        res.mInitialSurroundingText =
+                                SurroundingText.CREATOR.createFromParcel(source);
+                    }
                     LocaleList hintLocales = LocaleList.CREATOR.createFromParcel(source);
                     res.hintLocales = hintLocales.isEmpty() ? null : hintLocales;
                     res.contentMimeTypes = source.readStringArray();
@@ -886,94 +1090,5 @@ public class EditorInfo implements InputType, Parcelable {
 
     public int describeContents() {
         return 0;
-    }
-
-    static final class InitialSurroundingText implements Parcelable {
-        @Nullable final CharSequence mSurroundingText;
-        final int mSelectionHead;
-        final int mSelectionEnd;
-
-        InitialSurroundingText() {
-            mSurroundingText = null;
-            mSelectionHead = 0;
-            mSelectionEnd = 0;
-        }
-
-        InitialSurroundingText(@Nullable CharSequence surroundingText, int selectionHead,
-                int selectionEnd) {
-            mSurroundingText = surroundingText;
-            mSelectionHead = selectionHead;
-            mSelectionEnd = selectionEnd;
-        }
-
-        @Nullable
-        private CharSequence getInitialTextBeforeCursor(int n, int flags) {
-            if (mSurroundingText == null) {
-                return null;
-            }
-
-            final int length = Math.min(n, mSelectionHead);
-            return ((flags & InputConnection.GET_TEXT_WITH_STYLES) != 0)
-                    ? mSurroundingText.subSequence(mSelectionHead - length, mSelectionHead)
-                    : TextUtils.substring(mSurroundingText, mSelectionHead - length,
-                            mSelectionHead);
-        }
-
-        @Nullable
-        private CharSequence getInitialSelectedText(int flags) {
-            if (mSurroundingText == null) {
-                return null;
-            }
-
-            return ((flags & InputConnection.GET_TEXT_WITH_STYLES) != 0)
-                    ? mSurroundingText.subSequence(mSelectionHead, mSelectionEnd)
-                    : TextUtils.substring(mSurroundingText, mSelectionHead, mSelectionEnd);
-        }
-
-        @Nullable
-        private CharSequence getInitialTextAfterCursor(int n, int flags) {
-            if (mSurroundingText == null) {
-                return null;
-            }
-
-            final int length = Math.min(n, mSurroundingText.length() - mSelectionEnd);
-            return ((flags & InputConnection.GET_TEXT_WITH_STYLES) != 0)
-                    ? mSurroundingText.subSequence(mSelectionEnd, mSelectionEnd + length)
-                    : TextUtils.substring(mSurroundingText, mSelectionEnd, mSelectionEnd + length);
-        }
-
-        private int getSelectionLength() {
-            return mSelectionEnd - mSelectionHead;
-        }
-
-        @Override
-        public int describeContents() {
-            return 0;
-        }
-
-        @Override
-        public void writeToParcel(Parcel dest, int flags) {
-            TextUtils.writeToParcel(mSurroundingText, dest, flags);
-            dest.writeInt(mSelectionHead);
-            dest.writeInt(mSelectionEnd);
-        }
-
-        public static final @android.annotation.NonNull Parcelable.Creator<InitialSurroundingText>
-                CREATOR = new Parcelable.Creator<InitialSurroundingText>() {
-                    @Override
-                    public InitialSurroundingText createFromParcel(Parcel source) {
-                        final CharSequence initialText =
-                                TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(source);
-                        final int selectionHead = source.readInt();
-                        final int selectionEnd = source.readInt();
-
-                        return new InitialSurroundingText(initialText, selectionHead, selectionEnd);
-                    }
-
-                    @Override
-                    public InitialSurroundingText[] newArray(int size) {
-                        return new InitialSurroundingText[size];
-                    }
-                };
     }
 }

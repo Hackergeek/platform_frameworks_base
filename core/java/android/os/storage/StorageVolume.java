@@ -18,6 +18,7 @@ package android.os.storage;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.SuppressLint;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
 import android.compat.annotation.UnsupportedAppUsage;
@@ -38,6 +39,7 @@ import com.android.internal.util.Preconditions;
 import java.io.CharArrayWriter;
 import java.io.File;
 import java.util.Locale;
+import java.util.UUID;
 
 /**
  * Information about a shared/external storage volume for a specific user.
@@ -95,9 +97,11 @@ public final class StorageVolume implements Parcelable {
     @UnsupportedAppUsage
     private final boolean mRemovable;
     private final boolean mEmulated;
+    private final boolean mExternallyManaged;
     private final boolean mAllowMassStorage;
     private final long mMaxFileSize;
     private final UserHandle mOwner;
+    private final UUID mUuid;
     private final String mFsUuid;
     private final String mState;
 
@@ -132,8 +136,9 @@ public final class StorageVolume implements Parcelable {
 
     /** {@hide} */
     public StorageVolume(String id, File path, File internalPath, String description,
-            boolean primary, boolean removable, boolean emulated, boolean allowMassStorage,
-            long maxFileSize, UserHandle owner, String fsUuid, String state) {
+            boolean primary, boolean removable, boolean emulated, boolean externallyManaged,
+            boolean allowMassStorage, long maxFileSize, UserHandle owner, UUID uuid, String fsUuid,
+            String state) {
         mId = Preconditions.checkNotNull(id);
         mPath = Preconditions.checkNotNull(path);
         mInternalPath = Preconditions.checkNotNull(internalPath);
@@ -141,9 +146,11 @@ public final class StorageVolume implements Parcelable {
         mPrimary = primary;
         mRemovable = removable;
         mEmulated = emulated;
+        mExternallyManaged = externallyManaged;
         mAllowMassStorage = allowMassStorage;
         mMaxFileSize = maxFileSize;
         mOwner = Preconditions.checkNotNull(owner);
+        mUuid = uuid;
         mFsUuid = fsUuid;
         mState = Preconditions.checkNotNull(state);
     }
@@ -156,9 +163,15 @@ public final class StorageVolume implements Parcelable {
         mPrimary = in.readInt() != 0;
         mRemovable = in.readInt() != 0;
         mEmulated = in.readInt() != 0;
+        mExternallyManaged = in.readInt() != 0;
         mAllowMassStorage = in.readInt() != 0;
         mMaxFileSize = in.readLong();
-        mOwner = in.readParcelable(null);
+        mOwner = in.readParcelable(null, android.os.UserHandle.class);
+        if (in.readInt() != 0) {
+            mUuid = StorageManager.convert(in.readString8());
+        } else {
+            mUuid = null;
+        }
         mFsUuid = in.readString8();
         mState = in.readString8();
     }
@@ -253,10 +266,20 @@ public final class StorageVolume implements Parcelable {
     /**
      * Returns true if the volume is emulated.
      *
-     * @return is removable
+     * @return is emulated
      */
     public boolean isEmulated() {
         return mEmulated;
+    }
+
+    /**
+     * Returns true if the volume is managed from outside Android.
+     *
+     * @hide
+     */
+    @SystemApi
+    public boolean isExternallyManaged() {
+        return mExternallyManaged;
     }
 
     /**
@@ -281,10 +304,27 @@ public final class StorageVolume implements Parcelable {
         return mMaxFileSize;
     }
 
-    /** {@hide} */
-    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
-    public UserHandle getOwner() {
+    /**
+     * Returns the user that owns this volume
+     */
+    // TODO(b/193460475) : Android Lint handle API change from systemApi to public Api incorrectly
+    @SuppressLint("NewApi")
+    public @NonNull UserHandle getOwner() {
         return mOwner;
+    }
+
+    /**
+     * Gets the converted volume UUID. If a valid UUID is returned, it is compatible with other
+     * APIs that make use of {@link UUID} like {@link StorageManager#allocateBytes} and
+     * {@link android.content.pm.ApplicationInfo#storageUuid}
+     *
+     * @return the UUID for the volume or {@code null} for "portable" storage devices which haven't
+     * been adopted.
+     *
+     * @see <a href="https://source.android.com/devices/storage/adoptable">Adoptable storage</a>
+     */
+    public @Nullable UUID getStorageUuid() {
+        return mUuid;
     }
 
     /**
@@ -327,7 +367,7 @@ public final class StorageVolume implements Parcelable {
      * parse or UUID is unknown.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public int getFatVolumeId() {
         if (mFsUuid == null || mFsUuid.length() != 9) {
             return -1;
@@ -435,7 +475,7 @@ public final class StorageVolume implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object obj) {
+    public boolean equals(@Nullable Object obj) {
         if (obj instanceof StorageVolume && mPath != null) {
             StorageVolume volume = (StorageVolume)obj;
             return (mPath.equals(volume.mPath));
@@ -476,6 +516,7 @@ public final class StorageVolume implements Parcelable {
         pw.printPair("mPrimary", mPrimary);
         pw.printPair("mRemovable", mRemovable);
         pw.printPair("mEmulated", mEmulated);
+        pw.printPair("mExternallyManaged", mExternallyManaged);
         pw.printPair("mAllowMassStorage", mAllowMassStorage);
         pw.printPair("mMaxFileSize", mMaxFileSize);
         pw.printPair("mOwner", mOwner);
@@ -510,10 +551,96 @@ public final class StorageVolume implements Parcelable {
         parcel.writeInt(mPrimary ? 1 : 0);
         parcel.writeInt(mRemovable ? 1 : 0);
         parcel.writeInt(mEmulated ? 1 : 0);
+        parcel.writeInt(mExternallyManaged ? 1 : 0);
         parcel.writeInt(mAllowMassStorage ? 1 : 0);
         parcel.writeLong(mMaxFileSize);
         parcel.writeParcelable(mOwner, flags);
+        if (mUuid != null) {
+            parcel.writeInt(1);
+            parcel.writeString8(StorageManager.convert(mUuid));
+        } else {
+            parcel.writeInt(0);
+        }
         parcel.writeString8(mFsUuid);
         parcel.writeString8(mState);
     }
+
+    /** @hide */
+    // This class is used by the mainline test suite, so we have to keep these APIs around across
+    // releases. Consider making this class public to help external developers to write tests as
+    // well.
+    @TestApi
+    public static final class Builder {
+        private String mId;
+        private File mPath;
+        private String mDescription;
+        private boolean mPrimary;
+        private boolean mRemovable;
+        private boolean mEmulated;
+        private UserHandle mOwner;
+        private UUID mStorageUuid;
+        private String mUuid;
+        private String mState;
+
+        @SuppressLint("StreamFiles")
+        public Builder(
+                @NonNull String id, @NonNull File path, @NonNull String description,
+                @NonNull UserHandle owner, @NonNull String state) {
+            mId = id;
+            mPath = path;
+            mDescription = description;
+            mOwner = owner;
+            mState = state;
+        }
+
+        @NonNull
+        public Builder setStorageUuid(@Nullable UUID storageUuid) {
+            mStorageUuid = storageUuid;
+            return this;
+        }
+
+        @NonNull
+        public Builder setUuid(@Nullable String uuid) {
+            mUuid = uuid;
+            return this;
+        }
+
+        @NonNull
+        public Builder setPrimary(boolean primary) {
+            mPrimary = primary;
+            return this;
+        }
+
+        @NonNull
+        public Builder setRemovable(boolean removable) {
+            mRemovable = removable;
+            return this;
+        }
+
+        @NonNull
+        public Builder setEmulated(boolean emulated) {
+            mEmulated = emulated;
+            return this;
+        }
+
+        @NonNull
+        public StorageVolume build() {
+            return new StorageVolume(
+                    mId,
+                    mPath,
+                    /* internalPath= */ mPath,
+                    mDescription,
+                    mPrimary,
+                    mRemovable,
+                    mEmulated,
+                    /* externallyManaged= */ false,
+                    /* allowMassStorage= */ false,
+                    /* maxFileSize= */ 0,
+                    mOwner,
+                    mStorageUuid,
+                    mUuid,
+                    mState);
+        }
+    }
+
 }

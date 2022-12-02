@@ -18,13 +18,12 @@ package com.android.systemui
 
 import android.util.Log
 import com.android.internal.annotations.GuardedBy
+import com.android.systemui.dagger.SysUISingleton
 import com.android.systemui.dump.DumpManager
-import java.io.FileDescriptor
 import java.io.PrintWriter
 import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
-import javax.inject.Singleton
 
 /**
  * Caches whether the device has reached [SystemService.PHASE_BOOT_COMPLETED].
@@ -32,7 +31,7 @@ import javax.inject.Singleton
  * This class is constructed and set by [SystemUIApplication] and will notify all listeners when
  * boot is completed.
  */
-@Singleton
+@SysUISingleton
 class BootCompleteCacheImpl @Inject constructor(dumpManager: DumpManager) :
         BootCompleteCache, Dumpable {
 
@@ -102,7 +101,7 @@ class BootCompleteCacheImpl @Inject constructor(dumpManager: DumpManager) :
         }
     }
 
-    override fun dump(fd: FileDescriptor, pw: PrintWriter, args: Array<out String>) {
+    override fun dump(pw: PrintWriter, args: Array<out String>) {
         pw.println("BootCompleteCache state:")
         pw.println("  boot complete: ${isBootComplete()}")
         if (!isBootComplete()) {

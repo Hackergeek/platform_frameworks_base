@@ -16,8 +16,10 @@
 
 package android.os.storage;
 
+import android.annotation.Nullable;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
+import android.os.Build;
 import android.os.Environment;
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -59,7 +61,7 @@ public class VolumeRecord implements Parcelable {
         this.fsUuid = Preconditions.checkNotNull(fsUuid);
     }
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public VolumeRecord(Parcel parcel) {
         type = parcel.readInt();
         fsUuid = parcel.readString();
@@ -103,6 +105,7 @@ public class VolumeRecord implements Parcelable {
         final boolean primary = false;
         final boolean removable = true;
         final boolean emulated = false;
+        final boolean externallyManaged = false;
         final boolean allowMassStorage = false;
         final long maxFileSize = 0;
         final UserHandle user = new UserHandle(UserHandle.USER_NULL);
@@ -114,7 +117,8 @@ public class VolumeRecord implements Parcelable {
         }
 
         return new StorageVolume(id, userPath, internalPath, description, primary, removable,
-                emulated, allowMassStorage, maxFileSize, user, fsUuid, envState);
+                emulated, externallyManaged, allowMassStorage, maxFileSize, user, null /* uuid */,
+                fsUuid, envState);
     }
 
     public void dump(IndentingPrintWriter pw) {
@@ -149,7 +153,7 @@ public class VolumeRecord implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (o instanceof VolumeRecord) {
             return Objects.equals(fsUuid, ((VolumeRecord) o).fsUuid);
         } else {
@@ -162,7 +166,7 @@ public class VolumeRecord implements Parcelable {
         return fsUuid.hashCode();
     }
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static final @android.annotation.NonNull Creator<VolumeRecord> CREATOR = new Creator<VolumeRecord>() {
         @Override
         public VolumeRecord createFromParcel(Parcel in) {

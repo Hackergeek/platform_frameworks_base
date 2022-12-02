@@ -17,6 +17,8 @@
 package com.android.systemui.statusbar.notification.collection.notifcollection;
 
 import android.annotation.NonNull;
+import android.app.NotificationChannel;
+import android.os.UserHandle;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 
@@ -56,8 +58,19 @@ public interface NotifCollectionListener {
     /**
      * Called whenever a notification with the same key as an existing notification is posted. By
      * the time this listener is called, the entry's SBN and Ranking will already have been updated.
+     * This delegates to {@link #onEntryUpdated(NotificationEntry)} by default.
+     * @param fromSystem If true, this update came from the NotificationManagerService.
+     *                   If false, the notification update is an internal change within systemui.
      */
-    default void onEntryUpdated(NotificationEntry entry) {
+    default void onEntryUpdated(@NonNull NotificationEntry entry, boolean fromSystem) {
+        onEntryUpdated(entry);
+    }
+
+    /**
+     * Called whenever a notification with the same key as an existing notification is posted. By
+     * the time this listener is called, the entry's SBN and Ranking will already have been updated.
+     */
+    default void onEntryUpdated(@NonNull NotificationEntry entry) {
     }
 
     /**
@@ -103,5 +116,21 @@ public interface NotifCollectionListener {
      * @deprecated Use {@link #onRankingApplied()} instead.
      */
     default void onRankingUpdate(NotificationListenerService.RankingMap rankingMap) {
+    }
+
+    /**
+     * Called when a notification channel is modified, in response to
+     * {@link NotificationListenerService#onNotificationChannelModified}.
+     *
+     * @param pkgName the package the notification channel belongs to.
+     * @param user the user the notification channel belongs to.
+     * @param channel the channel being modified.
+     * @param modificationType the type of modification that occurred to the channel.
+     */
+    default void onNotificationChannelModified(
+            String pkgName,
+            UserHandle user,
+            NotificationChannel channel,
+            int modificationType) {
     }
 }

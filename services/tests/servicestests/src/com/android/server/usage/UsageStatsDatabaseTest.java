@@ -67,9 +67,10 @@ public class UsageStatsDatabaseTest {
     private static final UsageStatsDatabase.StatCombiner<IntervalStats> mIntervalStatsVerifier =
             new UsageStatsDatabase.StatCombiner<IntervalStats>() {
                 @Override
-                public void combine(IntervalStats stats, boolean mutable,
+                public boolean combine(IntervalStats stats, boolean mutable,
                         List<IntervalStats> accResult) {
                     accResult.add(stats);
+                    return true;
                 }
             };
 
@@ -261,6 +262,7 @@ public class UsageStatsDatabaseTest {
         // mEndTimeStamp is based on the enclosing IntervalStats, don't bother checking
         assertEquals(us1.mLastTimeUsed, us2.mLastTimeUsed);
         assertEquals(us1.mLastTimeVisible, us2.mLastTimeVisible);
+        assertEquals(us1.mLastTimeComponentUsed, us2.mLastTimeComponentUsed);
         assertEquals(us1.mTotalTimeInForeground, us2.mTotalTimeInForeground);
         assertEquals(us1.mTotalTimeVisible, us2.mTotalTimeVisible);
         assertEquals(us1.mLastTimeForegroundServiceUsed, us2.mLastTimeForegroundServiceUsed);

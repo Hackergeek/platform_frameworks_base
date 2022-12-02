@@ -16,16 +16,12 @@
 
 package com.android.server.rollback;
 
-import static com.android.internal.util.FrameworkStatsLog.WATCHDOG_ROLLBACK_OCCURRED__ROLLBACK_REASON__REASON_UNKNOWN;
-
+import android.annotation.AnyThread;
 import android.annotation.Nullable;
-import android.content.BroadcastReceiver;
+import android.annotation.WorkerThread;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
-import android.content.pm.PackageManagerInternal;
 import android.content.pm.VersionedPackage;
 import android.content.rollback.PackageRollbackInfo;
 import android.content.rollback.RollbackInfo;
@@ -40,18 +36,17 @@ import android.util.ArraySet;
 import android.util.Slog;
 import android.util.SparseArray;
 
-import com.android.internal.annotations.GuardedBy;
 import com.android.internal.util.FrameworkStatsLog;
-import com.android.server.LocalServices;
+import com.android.internal.util.Preconditions;
 import com.android.server.PackageWatchdog;
 import com.android.server.PackageWatchdog.FailureReasons;
 import com.android.server.PackageWatchdog.PackageHealthObserver;
 import com.android.server.PackageWatchdog.PackageHealthObserverImpact;
 import com.android.server.pm.ApexManager;
-import com.android.server.pm.parsing.pkg.AndroidPackage;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
@@ -59,6 +54,7 @@ import java.io.PrintWriter;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * {@link PackageHealthObserver} for {@link RollbackManagerService}.
@@ -67,7 +63,7 @@ import java.util.Set;
  *
  * @hide
  */
-public final class RollbackPackageHealthObserver implements PackageHealthObserver {
+final class RollbackPackageHealthObserver implements PackageHealthObserver {
     private static final String TAG = "RollbackPackageHealthObserver";
     private static final String NAME = "rollback-observer";
 
@@ -75,25 +71,38 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
     private final Handler mHandler;
     private final ApexManager mApexManager;
     private final File mLastStagedRollbackIdsFile;
+    private final File mTwoPhaseRollbackEnabledFile;
     // Staged rollback ids that have been committed but their session is not yet ready
-    @GuardedBy("mPendingStagedRollbackIds")
     private final Set<Integer> mPendingStagedRollbackIds = new ArraySet<>();
+    // True if needing to roll back only rebootless apexes when native crash happens
+    private boolean mTwoPhaseRollbackEnabled;
 
     RollbackPackageHealthObserver(Context context) {
         mContext = context;
         HandlerThread handlerThread = new HandlerThread("RollbackPackageHealthObserver");
         handlerThread.start();
-        mHandler = handlerThread.getThreadHandler();
+        mHandler = new Handler(handlerThread.getLooper());
         File dataDir = new File(Environment.getDataDirectory(), "rollback-observer");
         dataDir.mkdirs();
         mLastStagedRollbackIdsFile = new File(dataDir, "last-staged-rollback-ids");
+        mTwoPhaseRollbackEnabledFile = new File(dataDir, "two-phase-rollback-enabled");
         PackageWatchdog.getInstance(mContext).registerHealthObserver(this);
         mApexManager = ApexManager.getInstance();
+
+        if (SystemProperties.getBoolean("sys.boot_completed", false)) {
+            // Load the value from the file if system server has crashed and restarted
+            mTwoPhaseRollbackEnabled = readBoolean(mTwoPhaseRollbackEnabledFile);
+        } else {
+            // Disable two-phase rollback for a normal reboot. We assume the rebootless apex
+            // installed before reboot is stable if native crash didn't happen.
+            mTwoPhaseRollbackEnabled = false;
+            writeBoolean(mTwoPhaseRollbackEnabledFile, false);
+        }
     }
 
     @Override
     public int onHealthCheckFailed(@Nullable VersionedPackage failedPackage,
-            @FailureReasons int failureReason) {
+            @FailureReasons int failureReason, int mitigationCount) {
         // For native crashes, we will roll back any available rollbacks
         if (failureReason == PackageWatchdog.FAILURE_REASON_NATIVE_CRASH
                 && !mContext.getSystemService(RollbackManager.class)
@@ -111,9 +120,9 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
 
     @Override
     public boolean execute(@Nullable VersionedPackage failedPackage,
-            @FailureReasons int rollbackReason) {
+            @FailureReasons int rollbackReason, int mitigationCount) {
         if (rollbackReason == PackageWatchdog.FAILURE_REASON_NATIVE_CRASH) {
-            rollbackAll();
+            mHandler.post(() -> rollbackAll());
             return true;
         }
 
@@ -122,7 +131,7 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
             Slog.w(TAG, "Expected rollback but no valid rollback found for " + failedPackage);
             return false;
         }
-        rollbackPackage(rollback, failedPackage, rollbackReason);
+        mHandler.post(() -> rollbackPackage(rollback, failedPackage, rollbackReason));
         // Assume rollback executed successfully
         return true;
     }
@@ -132,22 +141,56 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
         return NAME;
     }
 
+    private void assertInWorkerThread() {
+        Preconditions.checkState(mHandler.getLooper().isCurrentThread());
+    }
+
     /**
      * Start observing health of {@code packages} for {@code durationMs}.
      * This may cause {@code packages} to be rolled back if they crash too freqeuntly.
      */
-    public void startObservingHealth(List<String> packages, long durationMs) {
+    @AnyThread
+    void startObservingHealth(List<String> packages, long durationMs) {
         PackageWatchdog.getInstance(mContext).startObservingHealth(this, packages, durationMs);
+    }
+
+    @AnyThread
+    void notifyRollbackAvailable(RollbackInfo rollback) {
+        mHandler.post(() -> {
+            // Enable two-phase rollback when a rebootless apex rollback is made available.
+            // We assume the rebootless apex is stable and is less likely to be the cause
+            // if native crash doesn't happen before reboot. So we will clear the flag and disable
+            // two-phase rollback after reboot.
+            if (isRebootlessApex(rollback)) {
+                mTwoPhaseRollbackEnabled = true;
+                writeBoolean(mTwoPhaseRollbackEnabledFile, true);
+            }
+        });
+    }
+
+    private static boolean isRebootlessApex(RollbackInfo rollback) {
+        if (!rollback.isStaged()) {
+            for (PackageRollbackInfo info : rollback.getPackages()) {
+                if (info.isApex()) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** Verifies the rollback state after a reboot and schedules polling for sometime after reboot
      * to check for native crashes and mitigate them if needed.
      */
-    public void onBootCompletedAsync() {
+    @AnyThread
+    void onBootCompletedAsync() {
         mHandler.post(()->onBootCompleted());
     }
 
+    @WorkerThread
     private void onBootCompleted() {
+        assertInWorkerThread();
+
         RollbackManager rollbackManager = mContext.getSystemService(RollbackManager.class);
         if (!rollbackManager.getAvailableRollbacks().isEmpty()) {
             // TODO(gavincorkery): Call into Package Watchdog from outside the observer
@@ -162,6 +205,7 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
         }
     }
 
+    @AnyThread
     private RollbackInfo getAvailableRollback(VersionedPackage failedPackage) {
         RollbackManager rollbackManager = mContext.getSystemService(RollbackManager.class);
         for (RollbackInfo rollback : rollbackManager.getAvailableRollbacks()) {
@@ -191,81 +235,46 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
         return null;
     }
 
-    private BroadcastReceiver listenForStagedSessionReady(RollbackManager rollbackManager,
-            int rollbackId, @Nullable VersionedPackage logPackage) {
-        BroadcastReceiver sessionUpdatedReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                handleStagedSessionChange(rollbackManager,
-                        rollbackId, this /* BroadcastReceiver */, logPackage);
-            }
-        };
-        IntentFilter sessionUpdatedFilter =
-                new IntentFilter(PackageInstaller.ACTION_SESSION_UPDATED);
-        mContext.registerReceiver(sessionUpdatedReceiver, sessionUpdatedFilter);
-        return sessionUpdatedReceiver;
-    }
-
-    private void handleStagedSessionChange(RollbackManager rollbackManager, int rollbackId,
-            BroadcastReceiver listener, @Nullable VersionedPackage logPackage) {
-        PackageInstaller packageInstaller =
-                mContext.getPackageManager().getPackageInstaller();
-        List<RollbackInfo> recentRollbacks =
-                rollbackManager.getRecentlyCommittedRollbacks();
-        for (int i = 0; i < recentRollbacks.size(); i++) {
-            RollbackInfo recentRollback = recentRollbacks.get(i);
-            int sessionId = recentRollback.getCommittedSessionId();
-            if ((rollbackId == recentRollback.getRollbackId())
-                    && (sessionId != PackageInstaller.SessionInfo.INVALID_ID)) {
-                PackageInstaller.SessionInfo sessionInfo =
-                        packageInstaller.getSessionInfo(sessionId);
-                if (sessionInfo.isStagedSessionReady() && markStagedSessionHandled(rollbackId)) {
-                    mContext.unregisterReceiver(listener);
-                    saveStagedRollbackId(rollbackId, logPackage);
-                    WatchdogRollbackLogger.logEvent(logPackage,
-                            FrameworkStatsLog
-                            .WATCHDOG_ROLLBACK_OCCURRED__ROLLBACK_TYPE__ROLLBACK_BOOT_TRIGGERED,
-                            WATCHDOG_ROLLBACK_OCCURRED__ROLLBACK_REASON__REASON_UNKNOWN,
-                            "");
-                } else if (sessionInfo.isStagedSessionFailed()
-                        && markStagedSessionHandled(rollbackId)) {
-                    WatchdogRollbackLogger.logEvent(logPackage,
-                            FrameworkStatsLog
-                                    .WATCHDOG_ROLLBACK_OCCURRED__ROLLBACK_TYPE__ROLLBACK_FAILURE,
-                            WATCHDOG_ROLLBACK_OCCURRED__ROLLBACK_REASON__REASON_UNKNOWN,
-                            "");
-                    mContext.unregisterReceiver(listener);
-                }
-            }
-        }
-
-        // Wait for all pending staged sessions to get handled before rebooting.
-        if (isPendingStagedSessionsEmpty()) {
-            mContext.getSystemService(PowerManager.class).reboot("Rollback staged install");
-        }
-    }
-
     /**
      * Returns {@code true} if staged session associated with {@code rollbackId} was marked
      * as handled, {@code false} if already handled.
      */
+    @WorkerThread
     private boolean markStagedSessionHandled(int rollbackId) {
-        synchronized (mPendingStagedRollbackIds) {
-            return mPendingStagedRollbackIds.remove(rollbackId);
-        }
+        assertInWorkerThread();
+        return mPendingStagedRollbackIds.remove(rollbackId);
     }
 
     /**
      * Returns {@code true} if all pending staged rollback sessions were marked as handled,
      * {@code false} if there is any left.
      */
+    @WorkerThread
     private boolean isPendingStagedSessionsEmpty() {
-        synchronized (mPendingStagedRollbackIds) {
-            return mPendingStagedRollbackIds.isEmpty();
+        assertInWorkerThread();
+        return mPendingStagedRollbackIds.isEmpty();
+    }
+
+    private static boolean readBoolean(File file) {
+        try (FileInputStream fis = new FileInputStream(file)) {
+            return fis.read() == 1;
+        } catch (IOException ignore) {
+            return false;
         }
     }
 
+    private static void writeBoolean(File file, boolean value) {
+        try (FileOutputStream fos = new FileOutputStream(file)) {
+            fos.write(value ? 1 : 0);
+            fos.flush();
+            FileUtils.sync(fos);
+        } catch (IOException ignore) {
+        }
+    }
+
+    @WorkerThread
     private void saveStagedRollbackId(int stagedRollbackId, @Nullable VersionedPackage logPackage) {
+        assertInWorkerThread();
         writeStagedRollbackId(mLastStagedRollbackIdsFile, stagedRollbackId, logPackage);
     }
 
@@ -286,7 +295,9 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
         }
     }
 
+    @WorkerThread
     private SparseArray<String> popLastStagedRollbackIds() {
+        assertInWorkerThread();
         try {
             return readStagedRollbackIds(mLastStagedRollbackIdsFile);
         } finally {
@@ -319,17 +330,14 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
     /**
      * Returns true if the package name is the name of a module.
      */
+    @AnyThread
     private boolean isModule(String packageName) {
         // Check if the package is an APK inside an APEX. If it is, use the parent APEX package when
         // querying PackageManager.
-        PackageManagerInternal pmi = LocalServices.getService(PackageManagerInternal.class);
-        AndroidPackage apkPackage = pmi.getPackage(packageName);
-        if (apkPackage != null) {
-            String apexPackageName = mApexManager.getActiveApexPackageNameContainingPackage(
-                    apkPackage);
-            if (apexPackageName != null) {
-                packageName = apexPackageName;
-            }
+        String apexPackageName = mApexManager.getActiveApexPackageNameContainingPackage(
+                packageName);
+        if (apexPackageName != null) {
+            packageName = apexPackageName;
         }
 
         PackageManager pm = mContext.getPackageManager();
@@ -346,8 +354,10 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
      * @param rollback {@code rollbackInfo} of the {@code failedPackage}
      * @param failedPackage the package that needs to be rolled back
      */
+    @WorkerThread
     private void rollbackPackage(RollbackInfo rollback, VersionedPackage failedPackage,
             @FailureReasons int rollbackReason) {
+        assertInWorkerThread();
         final RollbackManager rollbackManager = mContext.getSystemService(RollbackManager.class);
         int reasonToLog = WatchdogRollbackLogger.mapFailureReasonToMetric(rollbackReason);
         final String failedPackageToLog;
@@ -366,20 +376,20 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
         WatchdogRollbackLogger.logEvent(logPackage,
                 FrameworkStatsLog.WATCHDOG_ROLLBACK_OCCURRED__ROLLBACK_TYPE__ROLLBACK_INITIATE,
                 reasonToLog, failedPackageToLog);
-        final LocalIntentReceiver rollbackReceiver = new LocalIntentReceiver((Intent result) -> {
+
+        Consumer<Intent> onResult = result -> {
+            assertInWorkerThread();
             int status = result.getIntExtra(RollbackManager.EXTRA_STATUS,
                     RollbackManager.STATUS_FAILURE);
             if (status == RollbackManager.STATUS_SUCCESS) {
                 if (rollback.isStaged()) {
                     int rollbackId = rollback.getRollbackId();
-                    synchronized (mPendingStagedRollbackIds) {
-                        mPendingStagedRollbackIds.add(rollbackId);
-                    }
-                    BroadcastReceiver listener =
-                            listenForStagedSessionReady(rollbackManager, rollbackId,
-                                    logPackage);
-                    handleStagedSessionChange(rollbackManager, rollbackId, listener,
-                            logPackage);
+                    saveStagedRollbackId(rollbackId, logPackage);
+                    WatchdogRollbackLogger.logEvent(logPackage,
+                            FrameworkStatsLog
+                            .WATCHDOG_ROLLBACK_OCCURRED__ROLLBACK_TYPE__ROLLBACK_BOOT_TRIGGERED,
+                            reasonToLog, failedPackageToLog);
+
                 } else {
                     WatchdogRollbackLogger.logEvent(logPackage,
                             FrameworkStatsLog
@@ -387,34 +397,71 @@ public final class RollbackPackageHealthObserver implements PackageHealthObserve
                             reasonToLog, failedPackageToLog);
                 }
             } else {
-                if (rollback.isStaged()) {
-                    markStagedSessionHandled(rollback.getRollbackId());
-                }
                 WatchdogRollbackLogger.logEvent(logPackage,
                         FrameworkStatsLog
                                 .WATCHDOG_ROLLBACK_OCCURRED__ROLLBACK_TYPE__ROLLBACK_FAILURE,
                         reasonToLog, failedPackageToLog);
             }
+            if (rollback.isStaged()) {
+                markStagedSessionHandled(rollback.getRollbackId());
+                // Wait for all pending staged sessions to get handled before rebooting.
+                if (isPendingStagedSessionsEmpty()) {
+                    mContext.getSystemService(PowerManager.class).reboot("Rollback staged install");
+                }
+            }
+        };
+
+        final LocalIntentReceiver rollbackReceiver = new LocalIntentReceiver(result -> {
+            mHandler.post(() -> onResult.accept(result));
         });
 
-        mHandler.post(() ->
-                rollbackManager.commitRollback(rollback.getRollbackId(),
-                        Collections.singletonList(failedPackage),
-                        rollbackReceiver.getIntentSender()));
+        rollbackManager.commitRollback(rollback.getRollbackId(),
+                Collections.singletonList(failedPackage), rollbackReceiver.getIntentSender());
     }
 
+    /**
+     * Two-phase rollback:
+     * 1. roll back rebootless apexes first
+     * 2. roll back all remaining rollbacks if native crash doesn't stop after (1) is done
+     *
+     * This approach gives us a better chance to correctly attribute native crash to rebootless
+     * apex update without rolling back Mainline updates which might contains critical security
+     * fixes.
+     */
+    @WorkerThread
+    private boolean useTwoPhaseRollback(List<RollbackInfo> rollbacks) {
+        assertInWorkerThread();
+        if (!mTwoPhaseRollbackEnabled) {
+            return false;
+        }
+
+        Slog.i(TAG, "Rolling back all rebootless APEX rollbacks");
+        boolean found = false;
+        for (RollbackInfo rollback : rollbacks) {
+            if (isRebootlessApex(rollback)) {
+                VersionedPackage sample = rollback.getPackages().get(0).getVersionRolledBackFrom();
+                rollbackPackage(rollback, sample, PackageWatchdog.FAILURE_REASON_NATIVE_CRASH);
+                found = true;
+            }
+        }
+        return found;
+    }
+
+    @WorkerThread
     private void rollbackAll() {
-        Slog.i(TAG, "Rolling back all available rollbacks");
+        assertInWorkerThread();
         RollbackManager rollbackManager = mContext.getSystemService(RollbackManager.class);
         List<RollbackInfo> rollbacks = rollbackManager.getAvailableRollbacks();
+        if (useTwoPhaseRollback(rollbacks)) {
+            return;
+        }
 
+        Slog.i(TAG, "Rolling back all available rollbacks");
         // Add all rollback ids to mPendingStagedRollbackIds, so that we do not reboot before all
         // pending staged rollbacks are handled.
-        synchronized (mPendingStagedRollbackIds) {
-            for (RollbackInfo rollback : rollbacks) {
-                if (rollback.isStaged()) {
-                    mPendingStagedRollbackIds.add(rollback.getRollbackId());
-                }
+        for (RollbackInfo rollback : rollbacks) {
+            if (rollback.isStaged()) {
+                mPendingStagedRollbackIds.add(rollback.getRollbackId());
             }
         }
 

@@ -17,6 +17,7 @@
 package android.print;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ComponentName;
 import android.os.Parcel;
@@ -47,7 +48,7 @@ public final class PrinterId implements Parcelable {
     }
 
     private PrinterId(@NonNull Parcel parcel) {
-        mServiceName = Preconditions.checkNotNull((ComponentName) parcel.readParcelable(null));
+        mServiceName = Preconditions.checkNotNull((ComponentName) parcel.readParcelable(null, android.content.ComponentName.class));
         mLocalId = Preconditions.checkNotNull(parcel.readString());
     }
 
@@ -85,7 +86,7 @@ public final class PrinterId implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object object) {
+    public boolean equals(@Nullable Object object) {
         if (this == object) {
             return true;
         }

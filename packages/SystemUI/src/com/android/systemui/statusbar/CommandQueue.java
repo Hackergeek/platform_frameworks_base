@@ -23,7 +23,7 @@ import static android.inputmethodservice.InputMethodService.IME_INVISIBLE;
 import static android.view.Display.DEFAULT_DISPLAY;
 import static android.view.Display.INVALID_DISPLAY;
 
-import static com.android.systemui.statusbar.phone.StatusBar.ONLY_CORE_APPS;
+import static com.android.systemui.statusbar.phone.CentralSurfacesImpl.ONLY_CORE_APPS;
 
 import android.annotation.Nullable;
 import android.app.ITransientNotificationCallback;
@@ -34,27 +34,49 @@ import android.app.StatusBarManager.WindowType;
 import android.app.StatusBarManager.WindowVisibleState;
 import android.content.ComponentName;
 import android.content.Context;
-import android.hardware.biometrics.IBiometricServiceReceiverInternal;
+import android.graphics.drawable.Icon;
+import android.hardware.biometrics.BiometricAuthenticator.Modality;
+import android.hardware.biometrics.BiometricManager.BiometricMultiSensorMode;
+import android.hardware.biometrics.IBiometricContextListener;
+import android.hardware.biometrics.IBiometricSysuiReceiver;
+import android.hardware.biometrics.PromptInfo;
 import android.hardware.display.DisplayManager;
+import android.hardware.fingerprint.IUdfpsHbmListener;
 import android.inputmethodservice.InputMethodService.BackDispositionMode;
+import android.media.INearbyMediaDevicesProvider;
+import android.media.MediaRoute2Info;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
+import android.os.ParcelFileDescriptor;
+import android.os.RemoteException;
+import android.util.Log;
 import android.util.Pair;
 import android.util.SparseArray;
 import android.view.InsetsState.InternalInsetsType;
+import android.view.InsetsVisibilities;
 import android.view.WindowInsetsController.Appearance;
+import android.view.WindowInsetsController.Behavior;
+
+import androidx.annotation.NonNull;
 
 import com.android.internal.os.SomeArgs;
+import com.android.internal.statusbar.IAddTileResultCallback;
 import com.android.internal.statusbar.IStatusBar;
+import com.android.internal.statusbar.IUndoMediaTransferCallback;
 import com.android.internal.statusbar.StatusBarIcon;
+import com.android.internal.util.GcUtils;
 import com.android.internal.view.AppearanceRegion;
 import com.android.systemui.statusbar.CommandQueue.Callbacks;
+import com.android.systemui.statusbar.commandline.CommandRegistry;
 import com.android.systemui.statusbar.policy.CallbackController;
 import com.android.systemui.tracing.ProtoTracer;
 
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.ArrayList;
 
 /**
@@ -64,8 +86,11 @@ import java.util.ArrayList;
  * coalescing these calls so they don't stack up.  For the calls
  * are coalesced, note that they are all idempotent.
  */
-public class CommandQueue extends IStatusBar.Stub implements CallbackController<Callbacks>,
+public class CommandQueue extends IStatusBar.Stub implements
+        CallbackController<Callbacks>,
         DisplayManager.DisplayListener {
+    private static final String TAG = CommandQueue.class.getSimpleName();
+
     private static final int INDEX_MASK = 0xffff;
     private static final int MSG_SHIFT  = 16;
     private static final int MSG_MASK   = 0xffff << MSG_SHIFT;
@@ -78,7 +103,7 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     private static final int MSG_EXPAND_NOTIFICATIONS              = 3 << MSG_SHIFT;
     private static final int MSG_COLLAPSE_PANELS                   = 4 << MSG_SHIFT;
     private static final int MSG_EXPAND_SETTINGS                   = 5 << MSG_SHIFT;
-    private static final int MSG_SYSTEM_BAR_APPEARANCE_CHANGED     = 6 << MSG_SHIFT;
+    private static final int MSG_SYSTEM_BAR_CHANGED                = 6 << MSG_SHIFT;
     private static final int MSG_DISPLAY_READY                     = 7 << MSG_SHIFT;
     private static final int MSG_SHOW_IME_BUTTON                   = 8 << MSG_SHIFT;
     private static final int MSG_TOGGLE_RECENT_APPS                = 9 << MSG_SHIFT;
@@ -119,13 +144,26 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     private static final int MSG_RECENTS_ANIMATION_STATE_CHANGED   = 47 << MSG_SHIFT;
     private static final int MSG_SHOW_TRANSIENT                    = 48 << MSG_SHIFT;
     private static final int MSG_ABORT_TRANSIENT                   = 49 << MSG_SHIFT;
-    private static final int MSG_TOP_APP_WINDOW_CHANGED            = 50 << MSG_SHIFT;
-    private static final int MSG_SHOW_INATTENTIVE_SLEEP_WARNING    = 51 << MSG_SHIFT;
-    private static final int MSG_DISMISS_INATTENTIVE_SLEEP_WARNING = 52 << MSG_SHIFT;
-    private static final int MSG_SHOW_TOAST                        = 53 << MSG_SHIFT;
-    private static final int MSG_HIDE_TOAST                        = 54 << MSG_SHIFT;
-    private static final int MSG_TRACING_STATE_CHANGED             = 55 << MSG_SHIFT;
-    private static final int MSG_SUPPRESS_AMBIENT_DISPLAY          = 56 << MSG_SHIFT;
+    private static final int MSG_SHOW_INATTENTIVE_SLEEP_WARNING    = 50 << MSG_SHIFT;
+    private static final int MSG_DISMISS_INATTENTIVE_SLEEP_WARNING = 51 << MSG_SHIFT;
+    private static final int MSG_SHOW_TOAST                        = 52 << MSG_SHIFT;
+    private static final int MSG_HIDE_TOAST                        = 53 << MSG_SHIFT;
+    private static final int MSG_TRACING_STATE_CHANGED             = 54 << MSG_SHIFT;
+    private static final int MSG_SUPPRESS_AMBIENT_DISPLAY          = 55 << MSG_SHIFT;
+    private static final int MSG_REQUEST_WINDOW_MAGNIFICATION_CONNECTION = 56 << MSG_SHIFT;
+    private static final int MSG_HANDLE_WINDOW_MANAGER_LOGGING_COMMAND = 57 << MSG_SHIFT;
+    //TODO(b/169175022) Update name and when feature name is locked.
+    private static final int MSG_EMERGENCY_ACTION_LAUNCH_GESTURE      = 58 << MSG_SHIFT;
+    private static final int MSG_SET_NAVIGATION_BAR_LUMA_SAMPLING_ENABLED = 59 << MSG_SHIFT;
+    private static final int MSG_SET_UDFPS_HBM_LISTENER = 60 << MSG_SHIFT;
+    private static final int MSG_TILE_SERVICE_REQUEST_ADD = 61 << MSG_SHIFT;
+    private static final int MSG_TILE_SERVICE_REQUEST_CANCEL = 62 << MSG_SHIFT;
+    private static final int MSG_SET_BIOMETRICS_LISTENER = 63 << MSG_SHIFT;
+    private static final int MSG_MEDIA_TRANSFER_SENDER_STATE = 64 << MSG_SHIFT;
+    private static final int MSG_MEDIA_TRANSFER_RECEIVER_STATE = 65 << MSG_SHIFT;
+    private static final int MSG_REGISTER_NEARBY_MEDIA_DEVICE_PROVIDER = 66 << MSG_SHIFT;
+    private static final int MSG_UNREGISTER_NEARBY_MEDIA_DEVICE_PROVIDER = 67 << MSG_SHIFT;
+    private static final int MSG_TILE_SERVICE_REQUEST_LISTENING_STATE = 68 << MSG_SHIFT;
 
     public static final int FLAG_EXCLUDE_NONE = 0;
     public static final int FLAG_EXCLUDE_SEARCH_PANEL = 1 << 0;
@@ -147,6 +185,7 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
      */
     private int mLastUpdatedImeDisplayId = INVALID_DISPLAY;
     private ProtoTracer mProtoTracer;
+    private final @Nullable CommandRegistry mRegistry;
 
     /**
      * These methods are called back on the main thread.
@@ -243,6 +282,11 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
         default void showAssistDisclosure() { }
         default void startAssist(Bundle args) { }
         default void onCameraLaunchGestureDetected(int source) { }
+
+        /**
+         * Notifies SysUI that the emergency action gesture was detected.
+         */
+        default void onEmergencyActionLaunchGestureDetected() { }
         default void showPictureInPictureMenu() { }
         default void setTopAppHidesStatusBar(boolean topAppHidesStatusBar) { }
 
@@ -260,24 +304,51 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
 
         default void onRotationProposal(int rotation, boolean isValid) { }
 
-        default void showAuthenticationDialog(Bundle bundle,
-                IBiometricServiceReceiverInternal receiver, int biometricModality,
-                boolean requireConfirmation, int userId, String opPackageName,
-                long operationId, int sysUiSessionId) { }
-        default void onBiometricAuthenticated() { }
-        default void onBiometricHelp(String message) { }
-        default void onBiometricError(int modality, int error, int vendorCode) { }
-        default void hideAuthenticationDialog() { }
+        default void showAuthenticationDialog(PromptInfo promptInfo,
+                IBiometricSysuiReceiver receiver,
+                int[] sensorIds, boolean credentialAllowed,
+                boolean requireConfirmation, int userId, long operationId, String opPackageName,
+                long requestId, @BiometricMultiSensorMode int multiSensorConfig) {
+        }
+
+        /** @see IStatusBar#onBiometricAuthenticated(int) */
+        default void onBiometricAuthenticated(@Modality int modality) {
+        }
+
+        /** @see IStatusBar#onBiometricHelp(int, String) */
+        default void onBiometricHelp(@Modality int modality, String message) {
+        }
+
+        /** @see IStatusBar#onBiometricError(int, int, int) */
+        default void onBiometricError(@Modality int modality, int error, int vendorCode) {
+        }
+
+        default void hideAuthenticationDialog(long requestId) {
+        }
+
+        /**
+         * @see IStatusBar#setBiometicContextListener(IBiometricContextListener)
+         */
+        default void setBiometicContextListener(IBiometricContextListener listener) {
+        }
+
+        /**
+         * @see IStatusBar#setUdfpsHbmListener(IUdfpsHbmListener)
+         */
+        default void setUdfpsHbmListener(IUdfpsHbmListener listener) {
+        }
 
         /**
          * @see IStatusBar#onDisplayReady(int)
          */
-        default void onDisplayReady(int displayId) { }
+        default void onDisplayReady(int displayId) {
+        }
 
         /**
          * @see DisplayManager.DisplayListener#onDisplayRemoved(int)
          */
-        default void onDisplayRemoved(int displayId) { }
+        default void onDisplayRemoved(int displayId) {
+        }
 
         /**
          * @see IStatusBar#onRecentsAnimationStateChanged(boolean)
@@ -285,26 +356,30 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
         default void onRecentsAnimationStateChanged(boolean running) { }
 
         /**
-         * @see IStatusBar#onSystemBarAppearanceChanged(int, int, AppearanceRegion[], boolean).
+         * @see IStatusBar#onSystemBarAttributesChanged.
          */
-        default void onSystemBarAppearanceChanged(int displayId, @Appearance int appearance,
-                AppearanceRegion[] appearanceRegions, boolean navbarColorManagedByIme) { }
+        default void onSystemBarAttributesChanged(int displayId, @Appearance int appearance,
+                AppearanceRegion[] appearanceRegions, boolean navbarColorManagedByIme,
+                @Behavior int behavior, InsetsVisibilities requestedVisibilities,
+                String packageName) { }
 
         /**
-         * @see IStatusBar#showTransient(int, int[]).
+         * @see IStatusBar#showTransient(int, int[], boolean).
          */
         default void showTransient(int displayId, @InternalInsetsType int[] types) { }
+
+        /**
+         * @see IStatusBar#showTransient(int, int[], boolean).
+         */
+        default void showTransient(int displayId, @InternalInsetsType int[] types,
+                boolean isGestureOnSystemBar) {
+            showTransient(displayId, types);
+        }
 
         /**
          * @see IStatusBar#abortTransient(int, int[]).
          */
         default void abortTransient(int displayId, @InternalInsetsType int[] types) { }
-
-        /**
-         * @see IStatusBar#topAppWindowChanged(int, boolean, boolean).
-         */
-        default void topAppWindowChanged(int displayId, boolean isFullscreen, boolean isImmersive) {
-        }
 
         /**
          * Called to notify System UI that a warning about the device going to sleep
@@ -323,11 +398,11 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
 
         /**
          * @see IStatusBar#showToast(int, String, IBinder, CharSequence, IBinder, int,
-         * ITransientNotificationCallback)
+         * ITransientNotificationCallback, int)
          */
         default void showToast(int uid, String packageName, IBinder token, CharSequence text,
                 IBinder windowToken, int duration,
-                @Nullable ITransientNotificationCallback callback) { }
+                @Nullable ITransientNotificationCallback callback, int displayId) { }
 
         /**
          * @see IStatusBar#hideToast(String, IBinder) (String, IBinder)
@@ -338,14 +413,79 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
          * @param enabled
          */
         default void onTracingStateChanged(boolean enabled) { }
+
+        /**
+         * Requests {@link com.android.systemui.accessibility.WindowMagnification} to invoke
+         * {@code android.view.accessibility.AccessibilityManager#
+         * setWindowMagnificationConnection(IWindowMagnificationConnection)}
+         *
+         * @param connect {@code true} if needs connection, otherwise set the connection to null.
+         */
+        default void requestWindowMagnificationConnection(boolean connect) { }
+
+        /**
+         * Handles a window manager shell logging command.
+         */
+        default void handleWindowManagerLoggingCommand(String[] args, ParcelFileDescriptor outFd) {}
+
+        /**
+         * @see IStatusBar#setNavigationBarLumaSamplingEnabled(int, boolean)
+         */
+        default void setNavigationBarLumaSamplingEnabled(int displayId, boolean enable) {}
+
+        /**
+         * @see IStatusBar#requestTileServiceListeningState
+         */
+        default void requestTileServiceListeningState(@NonNull ComponentName componentName) {}
+
+        /**
+         * @see IStatusBar#requestAddTile
+         */
+        default void requestAddTile(
+                @NonNull ComponentName componentName,
+                @NonNull CharSequence appName,
+                @NonNull CharSequence label,
+                @NonNull Icon icon,
+                @NonNull IAddTileResultCallback callback) {}
+
+        /**
+         * @see IStatusBar#cancelRequestAddTile
+         */
+        default void cancelRequestAddTile(@NonNull String packageName) {}
+
+        /** @see IStatusBar#updateMediaTapToTransferSenderDisplay */
+        default void updateMediaTapToTransferSenderDisplay(
+                @StatusBarManager.MediaTransferSenderState int displayState,
+                @NonNull MediaRoute2Info routeInfo,
+                @Nullable IUndoMediaTransferCallback undoCallback) {}
+
+        /** @see IStatusBar#updateMediaTapToTransferReceiverDisplay */
+        default void updateMediaTapToTransferReceiverDisplay(
+                @StatusBarManager.MediaTransferReceiverState int displayState,
+                @NonNull MediaRoute2Info routeInfo,
+                @Nullable Icon appIcon,
+                @Nullable CharSequence appName) {}
+
+        /**
+         * @see IStatusBar#registerNearbyMediaDevicesProvider
+         */
+        default void registerNearbyMediaDevicesProvider(
+                @NonNull INearbyMediaDevicesProvider provider) {}
+
+        /**
+         * @see IStatusBar#unregisterNearbyMediaDevicesProvider
+         */
+        default void unregisterNearbyMediaDevicesProvider(
+                @NonNull INearbyMediaDevicesProvider provider) {}
     }
 
     public CommandQueue(Context context) {
-        this(context, null);
+        this(context, null, null);
     }
 
-    public CommandQueue(Context context, ProtoTracer protoTracer) {
+    public CommandQueue(Context context, ProtoTracer protoTracer, CommandRegistry registry) {
         mProtoTracer = protoTracer;
+        mRegistry = registry;
         context.getSystemService(DisplayManager.class).registerDisplayListener(this, mHandler);
         // We always have default display.
         setDisabled(DEFAULT_DISPLAY, DISABLE_NONE, DISABLE2_NONE);
@@ -378,7 +518,8 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                 && !ONLY_CORE_APPS;
     }
 
-    public void addCallback(Callbacks callbacks) {
+    @Override
+    public void addCallback(@NonNull Callbacks callbacks) {
         mCallbacks.add(callbacks);
         // TODO(b/117478341): find a better way to pass disable flags by display.
         for (int i = 0; i < mDisplayDisabled.size(); i++) {
@@ -389,7 +530,8 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
         }
     }
 
-    public void removeCallback(Callbacks callbacks) {
+    @Override
+    public void removeCallback(@NonNull Callbacks callbacks) {
         mCallbacks.remove(callbacks);
     }
 
@@ -445,9 +587,13 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
      * @param animate {@code true} to show animations.
      */
     public void recomputeDisableFlags(int displayId, boolean animate) {
-        int disabled1 = getDisabled1(displayId);
-        int disabled2 = getDisabled2(displayId);
-        disable(displayId, disabled1, disabled2, animate);
+        // This must update holding the lock otherwise it can clobber the disabled flags set on the
+        // binder thread from the disable() call
+        synchronized (mLock) {
+            int disabled1 = getDisabled1(displayId);
+            int disabled2 = getDisabled2(displayId);
+            disable(displayId, disabled1, disabled2, animate);
+        }
     }
 
     private void setDisabled(int displayId, int disabled1, int disabled2) {
@@ -507,20 +653,8 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     }
 
     @Override
-    public void topAppWindowChanged(int displayId, boolean isFullscreen, boolean isImmersive) {
-        synchronized (mLock) {
-            SomeArgs args = SomeArgs.obtain();
-            args.argi1 = displayId;
-            args.argi2 = isFullscreen ? 1 : 0;
-            args.argi3 = isImmersive ? 1 : 0;
-            mHandler.obtainMessage(MSG_TOP_APP_WINDOW_CHANGED, args).sendToTarget();
-        }
-
-    }
-
-    @Override
     public void setImeWindowStatus(int displayId, IBinder token, int vis, int backDisposition,
-            boolean showImeSwitcher, boolean isMultiClientImeEnabled) {
+            boolean showImeSwitcher) {
         synchronized (mLock) {
             mHandler.removeMessages(MSG_SHOW_IME_BUTTON);
             SomeArgs args = SomeArgs.obtain();
@@ -528,7 +662,6 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
             args.argi2 = vis;
             args.argi3 = backDisposition;
             args.argi4 = showImeSwitcher ? 1 : 0;
-            args.argi5 = isMultiClientImeEnabled ? 1 : 0;
             args.arg1 = token;
             Message m = mHandler.obtainMessage(MSG_SHOW_IME_BUTTON, args);
             m.sendToTarget();
@@ -697,6 +830,14 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     }
 
     @Override
+    public void onEmergencyActionLaunchGestureDetected() {
+        synchronized (mLock) {
+            mHandler.removeMessages(MSG_EMERGENCY_ACTION_LAUNCH_GESTURE);
+            mHandler.obtainMessage(MSG_EMERGENCY_ACTION_LAUNCH_GESTURE).sendToTarget();
+        }
+    }
+
+    @Override
     public void addQsTile(ComponentName tile) {
         synchronized (mLock) {
             mHandler.obtainMessage(MSG_ADD_QS_TILE, tile).sendToTarget();
@@ -780,19 +921,22 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     }
 
     @Override
-    public void showAuthenticationDialog(Bundle bundle, IBiometricServiceReceiverInternal receiver,
-            int biometricModality, boolean requireConfirmation, int userId, String opPackageName,
-            long operationId, int sysUiSessionId) {
+    public void showAuthenticationDialog(PromptInfo promptInfo, IBiometricSysuiReceiver receiver,
+            int[] sensorIds, boolean credentialAllowed, boolean requireConfirmation,
+            int userId, long operationId, String opPackageName, long requestId,
+            @BiometricMultiSensorMode int multiSensorConfig) {
         synchronized (mLock) {
             SomeArgs args = SomeArgs.obtain();
-            args.arg1 = bundle;
+            args.arg1 = promptInfo;
             args.arg2 = receiver;
-            args.argi1 = biometricModality;
-            args.arg3 = requireConfirmation;
-            args.argi2 = userId;
-            args.arg4 = opPackageName;
-            args.arg5 = operationId;
-            args.argi3 = sysUiSessionId;
+            args.arg3 = sensorIds;
+            args.arg4 = credentialAllowed;
+            args.arg5 = requireConfirmation;
+            args.argi1 = userId;
+            args.arg6 = opPackageName;
+            args.argl1 = operationId;
+            args.argl2 = requestId;
+            args.argi2 = multiSensorConfig;
             mHandler.obtainMessage(MSG_BIOMETRIC_SHOW, args)
                     .sendToTarget();
         }
@@ -800,7 +944,8 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
 
     @Override
     public void showToast(int uid, String packageName, IBinder token, CharSequence text,
-            IBinder windowToken, int duration, @Nullable ITransientNotificationCallback callback) {
+            IBinder windowToken, int duration, @Nullable ITransientNotificationCallback callback,
+            int displayId) {
         synchronized (mLock) {
             SomeArgs args = SomeArgs.obtain();
             args.arg1 = packageName;
@@ -810,6 +955,7 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
             args.arg5 = callback;
             args.argi1 = uid;
             args.argi2 = duration;
+            args.argi3 = displayId;
             mHandler.obtainMessage(MSG_SHOW_TOAST, args).sendToTarget();
         }
     }
@@ -825,16 +971,21 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     }
 
     @Override
-    public void onBiometricAuthenticated() {
+    public void onBiometricAuthenticated(@Modality int modality) {
         synchronized (mLock) {
-            mHandler.obtainMessage(MSG_BIOMETRIC_AUTHENTICATED).sendToTarget();
+            SomeArgs args = SomeArgs.obtain();
+            args.argi1 = modality;
+            mHandler.obtainMessage(MSG_BIOMETRIC_AUTHENTICATED, args).sendToTarget();
         }
     }
 
     @Override
-    public void onBiometricHelp(String message) {
+    public void onBiometricHelp(@Modality int modality, String message) {
         synchronized (mLock) {
-            mHandler.obtainMessage(MSG_BIOMETRIC_HELP, message).sendToTarget();
+            SomeArgs args = SomeArgs.obtain();
+            args.argi1 = modality;
+            args.arg1 = message;
+            mHandler.obtainMessage(MSG_BIOMETRIC_HELP, args).sendToTarget();
         }
     }
 
@@ -850,9 +1001,25 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     }
 
     @Override
-    public void hideAuthenticationDialog() {
+    public void hideAuthenticationDialog(long requestId) {
         synchronized (mLock) {
-            mHandler.obtainMessage(MSG_BIOMETRIC_HIDE).sendToTarget();
+            final SomeArgs args = SomeArgs.obtain();
+            args.argl1 = requestId;
+            mHandler.obtainMessage(MSG_BIOMETRIC_HIDE, args).sendToTarget();
+        }
+    }
+
+    @Override
+    public void setBiometicContextListener(IBiometricContextListener listener) {
+        synchronized (mLock) {
+            mHandler.obtainMessage(MSG_SET_BIOMETRICS_LISTENER, listener).sendToTarget();
+        }
+    }
+
+    @Override
+    public void setUdfpsHbmListener(IUdfpsHbmListener listener) {
+        synchronized (mLock) {
+            mHandler.obtainMessage(MSG_SET_UDFPS_HBM_LISTENER, listener).sendToTarget();
         }
     }
 
@@ -887,11 +1054,19 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
         }
     }
 
+    @Override
+    public void requestWindowMagnificationConnection(boolean connect) {
+        synchronized (mLock) {
+            mHandler.obtainMessage(MSG_REQUEST_WINDOW_MAGNIFICATION_CONNECTION, connect)
+                    .sendToTarget();
+        }
+    }
+
     private void handleShowImeButton(int displayId, IBinder token, int vis, int backDisposition,
-            boolean showImeSwitcher, boolean isMultiClientImeEnabled) {
+            boolean showImeSwitcher) {
         if (displayId == INVALID_DISPLAY) return;
 
-        if (!isMultiClientImeEnabled && mLastUpdatedImeDisplayId != displayId
+        if (mLastUpdatedImeDisplayId != displayId
                 && mLastUpdatedImeDisplayId != INVALID_DISPLAY) {
             // Set previous NavBar's IME window status as invisible when IME
             // window switched to another display for single-session IME case.
@@ -913,22 +1088,27 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     }
 
     @Override
-    public void onSystemBarAppearanceChanged(int displayId, @Appearance int appearance,
-            AppearanceRegion[] appearanceRegions, boolean navbarColorManagedByIme) {
+    public void onSystemBarAttributesChanged(int displayId, @Appearance int appearance,
+            AppearanceRegion[] appearanceRegions, boolean navbarColorManagedByIme,
+            @Behavior int behavior, InsetsVisibilities requestedVisibilities, String packageName) {
         synchronized (mLock) {
             SomeArgs args = SomeArgs.obtain();
             args.argi1 = displayId;
             args.argi2 = appearance;
             args.argi3 = navbarColorManagedByIme ? 1 : 0;
             args.arg1 = appearanceRegions;
-            mHandler.obtainMessage(MSG_SYSTEM_BAR_APPEARANCE_CHANGED, args).sendToTarget();
+            args.argi4 = behavior;
+            args.arg2 = requestedVisibilities;
+            args.arg3 = packageName;
+            mHandler.obtainMessage(MSG_SYSTEM_BAR_CHANGED, args).sendToTarget();
         }
     }
 
     @Override
-    public void showTransient(int displayId, int[] types) {
+    public void showTransient(int displayId, int[] types, boolean isGestureOnSystemBar) {
         synchronized (mLock) {
-            mHandler.obtainMessage(MSG_SHOW_TRANSIENT, displayId, 0, types).sendToTarget();
+            mHandler.obtainMessage(MSG_SHOW_TRANSIENT, displayId, isGestureOnSystemBar ? 1 : 0,
+                    types).sendToTarget();
         }
     }
 
@@ -960,10 +1140,130 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
     }
 
     @Override
+    public void handleWindowManagerLoggingCommand(String[] args, ParcelFileDescriptor outFd) {
+        synchronized (mLock) {
+            SomeArgs internalArgs = SomeArgs.obtain();
+            internalArgs.arg1 = args;
+            internalArgs.arg2 = outFd;
+            mHandler.obtainMessage(MSG_HANDLE_WINDOW_MANAGER_LOGGING_COMMAND, internalArgs)
+                    .sendToTarget();
+        }
+    }
+
+    @Override
     public void suppressAmbientDisplay(boolean suppress) {
         synchronized (mLock) {
             mHandler.obtainMessage(MSG_SUPPRESS_AMBIENT_DISPLAY, suppress).sendToTarget();
         }
+    }
+
+    @Override
+    public void setNavigationBarLumaSamplingEnabled(int displayId, boolean enable) {
+        synchronized (mLock) {
+            mHandler.obtainMessage(MSG_SET_NAVIGATION_BAR_LUMA_SAMPLING_ENABLED, displayId,
+                    enable ? 1 : 0).sendToTarget();
+        }
+    }
+
+    @Override
+    public void passThroughShellCommand(String[] args, ParcelFileDescriptor pfd) {
+        final FileOutputStream fos = new FileOutputStream(pfd.getFileDescriptor());
+        final PrintWriter pw = new PrintWriter(fos);
+        // This is mimicking Binder#dumpAsync, but on this side of the binder. Might be possible
+        // to just throw this work onto the handler just like the other messages
+        Thread thr = new Thread("Sysui.passThroughShellCommand") {
+            public void run() {
+                try {
+                    if (mRegistry == null) {
+                        return;
+                    }
+
+                    // Registry blocks this thread until finished
+                    mRegistry.onShellCommand(pw, args);
+                } finally {
+                    pw.flush();
+                    try {
+                        // Close the file descriptor so the TransferPipe finishes its thread
+                        pfd.close();
+                    } catch (Exception e) {
+                    }
+                }
+            }
+        };
+        thr.start();
+    }
+
+    @Override
+    public void runGcForTest() {
+        // Gc sysui
+        GcUtils.runGcAndFinalizersSync();
+    }
+
+    @Override
+    public void requestTileServiceListeningState(@NonNull ComponentName componentName) {
+        mHandler.obtainMessage(MSG_TILE_SERVICE_REQUEST_LISTENING_STATE, componentName)
+                .sendToTarget();
+    }
+
+    @Override
+    public void requestAddTile(
+            @NonNull ComponentName componentName,
+            @NonNull CharSequence appName,
+            @NonNull CharSequence label,
+            @NonNull Icon icon,
+            @NonNull IAddTileResultCallback callback
+    ) {
+        SomeArgs args = SomeArgs.obtain();
+        args.arg1 = componentName;
+        args.arg2 = appName;
+        args.arg3 = label;
+        args.arg4 = icon;
+        args.arg5 = callback;
+        mHandler.obtainMessage(MSG_TILE_SERVICE_REQUEST_ADD, args).sendToTarget();
+    }
+
+    @Override
+    public void cancelRequestAddTile(@NonNull String s) throws RemoteException {
+        mHandler.obtainMessage(MSG_TILE_SERVICE_REQUEST_CANCEL, s).sendToTarget();
+    }
+
+    @Override
+    public void updateMediaTapToTransferSenderDisplay(
+            @StatusBarManager.MediaTransferSenderState int displayState,
+            MediaRoute2Info routeInfo,
+            IUndoMediaTransferCallback undoCallback
+    ) throws RemoteException {
+        SomeArgs args = SomeArgs.obtain();
+        args.arg1 = displayState;
+        args.arg2 = routeInfo;
+        args.arg3 = undoCallback;
+        mHandler.obtainMessage(MSG_MEDIA_TRANSFER_SENDER_STATE, args).sendToTarget();
+    }
+
+    @Override
+    public void updateMediaTapToTransferReceiverDisplay(
+            int displayState,
+            @NonNull MediaRoute2Info routeInfo,
+            @Nullable Icon appIcon,
+            @Nullable CharSequence appName) {
+        SomeArgs args = SomeArgs.obtain();
+        args.arg1 = displayState;
+        args.arg2 = routeInfo;
+        args.arg3 = appIcon;
+        args.arg4 = appName;
+        mHandler.obtainMessage(MSG_MEDIA_TRANSFER_RECEIVER_STATE, args).sendToTarget();
+    }
+
+    @Override
+    public void registerNearbyMediaDevicesProvider(@NonNull INearbyMediaDevicesProvider provider) {
+        mHandler.obtainMessage(MSG_REGISTER_NEARBY_MEDIA_DEVICE_PROVIDER, provider).sendToTarget();
+    }
+
+    @Override
+    public void unregisterNearbyMediaDevicesProvider(
+            @NonNull INearbyMediaDevicesProvider provider) {
+        mHandler.obtainMessage(MSG_UNREGISTER_NEARBY_MEDIA_DEVICE_PROVIDER, provider)
+                .sendToTarget();
     }
 
     private final class H extends Handler {
@@ -1022,8 +1322,7 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                     args = (SomeArgs) msg.obj;
                     handleShowImeButton(args.argi1 /* displayId */, (IBinder) args.arg1 /* token */,
                             args.argi2 /* vis */, args.argi3 /* backDisposition */,
-                            args.argi4 != 0 /* showImeSwitcher */,
-                            args.argi5 != 0 /* isMultiClientImeEnabled */);
+                            args.argi4 != 0 /* showImeSwitcher */);
                     break;
                 case MSG_SHOW_RECENT_APPS:
                     for (int i = 0; i < mCallbacks.size(); i++) {
@@ -1107,6 +1406,11 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                         mCallbacks.get(i).onCameraLaunchGestureDetected(msg.arg1);
                     }
                     break;
+                case MSG_EMERGENCY_ACTION_LAUNCH_GESTURE:
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).onEmergencyActionLaunchGestureDetected();
+                    }
+                    break;
                 case MSG_SHOW_PICTURE_IN_PICTURE_MENU:
                     for (int i = 0; i < mCallbacks.size(); i++) {
                         mCallbacks.get(i).showPictureInPictureMenu();
@@ -1164,30 +1468,39 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                     SomeArgs someArgs = (SomeArgs) msg.obj;
                     for (int i = 0; i < mCallbacks.size(); i++) {
                         mCallbacks.get(i).showAuthenticationDialog(
-                                (Bundle) someArgs.arg1,
-                                (IBiometricServiceReceiverInternal) someArgs.arg2,
-                                someArgs.argi1 /* biometricModality */,
-                                (boolean) someArgs.arg3 /* requireConfirmation */,
-                                someArgs.argi2 /* userId */,
-                                (String) someArgs.arg4 /* opPackageName */,
-                                (long) someArgs.arg5 /* operationId */,
-                                someArgs.argi3 /* sysUiSessionId */);
+                                (PromptInfo) someArgs.arg1,
+                                (IBiometricSysuiReceiver) someArgs.arg2,
+                                (int[]) someArgs.arg3 /* sensorIds */,
+                                (boolean) someArgs.arg4 /* credentialAllowed */,
+                                (boolean) someArgs.arg5 /* requireConfirmation */,
+                                someArgs.argi1 /* userId */,
+                                someArgs.argl1 /* operationId */,
+                                (String) someArgs.arg6 /* opPackageName */,
+                                someArgs.argl2 /* requestId */,
+                                someArgs.argi2 /* multiSensorConfig */);
                     }
                     someArgs.recycle();
                     break;
                 }
                 case MSG_BIOMETRIC_AUTHENTICATED: {
+                    SomeArgs someArgs = (SomeArgs) msg.obj;
                     for (int i = 0; i < mCallbacks.size(); i++) {
-                        mCallbacks.get(i).onBiometricAuthenticated();
+                        mCallbacks.get(i).onBiometricAuthenticated(someArgs.argi1 /* modality */);
                     }
+                    someArgs.recycle();
                     break;
                 }
-                case MSG_BIOMETRIC_HELP:
+                case MSG_BIOMETRIC_HELP: {
+                    SomeArgs someArgs = (SomeArgs) msg.obj;
                     for (int i = 0; i < mCallbacks.size(); i++) {
-                        mCallbacks.get(i).onBiometricHelp((String) msg.obj);
+                        mCallbacks.get(i).onBiometricHelp(
+                                someArgs.argi1 /* modality */,
+                                (String) someArgs.arg1 /* message */);
                     }
+                    someArgs.recycle();
                     break;
-                case MSG_BIOMETRIC_ERROR:
+                }
+                case MSG_BIOMETRIC_ERROR: {
                     SomeArgs someArgs = (SomeArgs) msg.obj;
                     for (int i = 0; i < mCallbacks.size(); i++) {
                         mCallbacks.get(i).onBiometricError(
@@ -1198,9 +1511,24 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                     }
                     someArgs.recycle();
                     break;
-                case MSG_BIOMETRIC_HIDE:
+                }
+                case MSG_BIOMETRIC_HIDE: {
+                    final SomeArgs someArgs = (SomeArgs) msg.obj;
                     for (int i = 0; i < mCallbacks.size(); i++) {
-                        mCallbacks.get(i).hideAuthenticationDialog();
+                        mCallbacks.get(i).hideAuthenticationDialog(someArgs.argl1 /* requestId */);
+                    }
+                    someArgs.recycle();
+                    break;
+                }
+                case MSG_SET_BIOMETRICS_LISTENER:
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).setBiometicContextListener(
+                                (IBiometricContextListener) msg.obj);
+                    }
+                    break;
+                case MSG_SET_UDFPS_HBM_LISTENER:
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).setUdfpsHbmListener((IUdfpsHbmListener) msg.obj);
                     }
                     break;
                 case MSG_SHOW_CHARGING_ANIMATION:
@@ -1228,19 +1556,21 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                         mCallbacks.get(i).onRecentsAnimationStateChanged(msg.arg1 > 0);
                     }
                     break;
-                case MSG_SYSTEM_BAR_APPEARANCE_CHANGED:
+                case MSG_SYSTEM_BAR_CHANGED:
                     args = (SomeArgs) msg.obj;
                     for (int i = 0; i < mCallbacks.size(); i++) {
-                        mCallbacks.get(i).onSystemBarAppearanceChanged(args.argi1, args.argi2,
-                                (AppearanceRegion[]) args.arg1, args.argi3 == 1);
+                        mCallbacks.get(i).onSystemBarAttributesChanged(args.argi1, args.argi2,
+                                (AppearanceRegion[]) args.arg1, args.argi3 == 1, args.argi4,
+                                (InsetsVisibilities) args.arg2, (String) args.arg3);
                     }
                     args.recycle();
                     break;
                 case MSG_SHOW_TRANSIENT: {
                     final int displayId = msg.arg1;
                     final int[] types = (int[]) msg.obj;
+                    final boolean isGestureOnSystemBar = msg.arg2 != 0;
                     for (int i = 0; i < mCallbacks.size(); i++) {
-                        mCallbacks.get(i).showTransient(displayId, types);
+                        mCallbacks.get(i).showTransient(displayId, types, isGestureOnSystemBar);
                     }
                     break;
                 }
@@ -1250,15 +1580,6 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                     for (int i = 0; i < mCallbacks.size(); i++) {
                         mCallbacks.get(i).abortTransient(displayId, types);
                     }
-                    break;
-                }
-                case MSG_TOP_APP_WINDOW_CHANGED: {
-                    args = (SomeArgs) msg.obj;
-                    for (int i = 0; i < mCallbacks.size(); i++) {
-                        mCallbacks.get(i).topAppWindowChanged(
-                                args.argi1, args.argi2 != 0, args.argi3 != 0);
-                    }
-                    args.recycle();
                     break;
                 }
                 case MSG_SHOW_INATTENTIVE_SLEEP_WARNING:
@@ -1281,9 +1602,10 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                             (ITransientNotificationCallback) args.arg5;
                     int uid = args.argi1;
                     int duration = args.argi2;
+                    int displayId = args.argi3;
                     for (Callbacks callbacks : mCallbacks) {
                         callbacks.showToast(uid, packageName, token, text, windowToken, duration,
-                                callback);
+                                callback, displayId);
                     }
                     break;
                 }
@@ -1304,6 +1626,90 @@ public class CommandQueue extends IStatusBar.Stub implements CallbackController<
                 case MSG_SUPPRESS_AMBIENT_DISPLAY:
                     for (Callbacks callbacks: mCallbacks) {
                         callbacks.suppressAmbientDisplay((boolean) msg.obj);
+                    }
+                    break;
+                case MSG_REQUEST_WINDOW_MAGNIFICATION_CONNECTION:
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).requestWindowMagnificationConnection((Boolean) msg.obj);
+                    }
+                    break;
+                case MSG_HANDLE_WINDOW_MANAGER_LOGGING_COMMAND:
+                    args = (SomeArgs) msg.obj;
+                    try (ParcelFileDescriptor pfd = (ParcelFileDescriptor) args.arg2) {
+                        for (int i = 0; i < mCallbacks.size(); i++) {
+                            mCallbacks.get(i).handleWindowManagerLoggingCommand(
+                                    (String[]) args.arg1, pfd);
+                        }
+                    } catch (IOException e) {
+                        Log.e(TAG, "Failed to handle logging command", e);
+                    }
+                    args.recycle();
+                    break;
+                case MSG_SET_NAVIGATION_BAR_LUMA_SAMPLING_ENABLED:
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).setNavigationBarLumaSamplingEnabled(msg.arg1,
+                                msg.arg2 != 0);
+                    }
+                    break;
+                case MSG_TILE_SERVICE_REQUEST_ADD:
+                    args = (SomeArgs) msg.obj;
+                    ComponentName componentName = (ComponentName) args.arg1;
+                    CharSequence appName = (CharSequence) args.arg2;
+                    CharSequence label = (CharSequence) args.arg3;
+                    Icon icon = (Icon) args.arg4;
+                    IAddTileResultCallback callback = (IAddTileResultCallback) args.arg5;
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).requestAddTile(
+                                componentName, appName, label, icon, callback);
+                    }
+                    args.recycle();
+                    break;
+                case MSG_TILE_SERVICE_REQUEST_CANCEL:
+                    String packageName = (String) msg.obj;
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).cancelRequestAddTile(packageName);
+                    }
+                    break;
+                case MSG_MEDIA_TRANSFER_SENDER_STATE:
+                    args = (SomeArgs) msg.obj;
+                    int displayState = (int) args.arg1;
+                    MediaRoute2Info routeInfo = (MediaRoute2Info) args.arg2;
+                    IUndoMediaTransferCallback undoCallback =
+                            (IUndoMediaTransferCallback) args.arg3;
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).updateMediaTapToTransferSenderDisplay(
+                                displayState, routeInfo, undoCallback);
+                    }
+                    args.recycle();
+                    break;
+                case MSG_MEDIA_TRANSFER_RECEIVER_STATE:
+                    args = (SomeArgs) msg.obj;
+                    int receiverDisplayState = (int) args.arg1;
+                    MediaRoute2Info receiverRouteInfo = (MediaRoute2Info) args.arg2;
+                    Icon appIcon = (Icon) args.arg3;
+                    appName = (CharSequence) args.arg4;
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).updateMediaTapToTransferReceiverDisplay(
+                                receiverDisplayState, receiverRouteInfo, appIcon, appName);
+                    }
+                    args.recycle();
+                    break;
+                case MSG_REGISTER_NEARBY_MEDIA_DEVICE_PROVIDER:
+                    INearbyMediaDevicesProvider provider = (INearbyMediaDevicesProvider) msg.obj;
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).registerNearbyMediaDevicesProvider(provider);
+                    }
+                    break;
+                case MSG_UNREGISTER_NEARBY_MEDIA_DEVICE_PROVIDER:
+                    provider = (INearbyMediaDevicesProvider) msg.obj;
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).unregisterNearbyMediaDevicesProvider(provider);
+                    }
+                    break;
+                case MSG_TILE_SERVICE_REQUEST_LISTENING_STATE:
+                    ComponentName component = (ComponentName) msg.obj;
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).requestTileServiceListeningState(component);
                     }
                     break;
             }

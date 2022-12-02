@@ -49,6 +49,7 @@ import android.app.Activity;
 import android.app.ActivityThread;
 import android.app.AppGlobals;
 import android.app.AppOpsManager;
+import android.app.PendingIntent;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -61,6 +62,7 @@ import android.content.res.ObbScanner;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Binder;
+import android.os.Build;
 import android.os.Environment;
 import android.os.FileUtils;
 import android.os.Handler;
@@ -78,15 +80,14 @@ import android.os.ServiceManager;
 import android.os.ServiceManager.ServiceNotFoundException;
 import android.os.SystemProperties;
 import android.os.UserHandle;
+import android.provider.DeviceConfig;
 import android.provider.MediaStore;
 import android.provider.Settings;
-import android.sysprop.VoldProperties;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
 import android.text.TextUtils;
 import android.util.DataUnit;
-import android.util.FeatureFlagUtils;
 import android.util.Log;
 import android.util.Pair;
 import android.util.Slog;
@@ -116,6 +117,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -151,20 +153,9 @@ public class StorageManager {
     /** {@hide} */
     public static final String PROP_ADOPTABLE = "persist.sys.adoptable";
     /** {@hide} */
-    public static final String PROP_EMULATE_FBE = "persist.sys.emulate_fbe";
-    /** {@hide} */
     public static final String PROP_SDCARDFS = "persist.sys.sdcardfs";
     /** {@hide} */
     public static final String PROP_VIRTUAL_DISK = "persist.sys.virtual_disk";
-    /** {@hide} */
-    public static final String PROP_ISOLATED_STORAGE = "persist.sys.isolated_storage";
-    /** {@hide} */
-    public static final String PROP_ISOLATED_STORAGE_SNAPSHOT = "sys.isolated_storage_snapshot";
-    /** {@hide} */
-    public static final String PROP_FUSE = "persist.sys.fuse";
-    /** {@hide} */
-    public static final String PROP_SETTINGS_FUSE = FeatureFlagUtils.PERSIST_PREFIX
-            + FeatureFlagUtils.SETTINGS_FUSE_FLAG;
     /** {@hide} */
     public static final String PROP_FORCED_SCOPED_STORAGE_WHITELIST =
             "forced_scoped_storage_whitelist";
@@ -175,6 +166,9 @@ public class StorageManager {
     public static final String UUID_PRIMARY_PHYSICAL = "primary_physical";
     /** {@hide} */
     public static final String UUID_SYSTEM = "system";
+
+    // NOTE: See comments around #convert for more details.
+    private static final String FAT_UUID_PREFIX = "fafafafa-fafa-5afa-8afa-fafa";
 
     // NOTE: UUID constants below are namespaced
     // uuid -v5 ad99aa3d-308e-4191-a200-ebcab371c0ad default
@@ -262,17 +256,11 @@ public class StorageManager {
     /** {@hide} */
     public static final int DEBUG_ADOPTABLE_FORCE_OFF = 1 << 1;
     /** {@hide} */
-    public static final int DEBUG_EMULATE_FBE = 1 << 2;
+    public static final int DEBUG_SDCARDFS_FORCE_ON = 1 << 2;
     /** {@hide} */
-    public static final int DEBUG_SDCARDFS_FORCE_ON = 1 << 3;
+    public static final int DEBUG_SDCARDFS_FORCE_OFF = 1 << 3;
     /** {@hide} */
-    public static final int DEBUG_SDCARDFS_FORCE_OFF = 1 << 4;
-    /** {@hide} */
-    public static final int DEBUG_VIRTUAL_DISK = 1 << 5;
-    /** {@hide} */
-    public static final int DEBUG_ISOLATED_STORAGE_FORCE_ON = 1 << 6;
-    /** {@hide} */
-    public static final int DEBUG_ISOLATED_STORAGE_FORCE_OFF = 1 << 7;
+    public static final int DEBUG_VIRTUAL_DISK = 1 << 4;
 
     /** {@hide} */
     public static final int FLAG_STORAGE_DE = IInstalld.FLAG_STORAGE_DE;
@@ -280,6 +268,18 @@ public class StorageManager {
     public static final int FLAG_STORAGE_CE = IInstalld.FLAG_STORAGE_CE;
     /** {@hide} */
     public static final int FLAG_STORAGE_EXTERNAL = IInstalld.FLAG_STORAGE_EXTERNAL;
+    /** @hide */
+    public static final int FLAG_STORAGE_SDK = IInstalld.FLAG_STORAGE_SDK;
+
+    /** {@hide} */
+    @IntDef(prefix = "FLAG_STORAGE_",  value = {
+            FLAG_STORAGE_DE,
+            FLAG_STORAGE_CE,
+            FLAG_STORAGE_EXTERNAL,
+            FLAG_STORAGE_SDK,
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface StorageFlags {}
 
     /** {@hide} */
     public static final int FLAG_FOR_WRITE = 1 << 8;
@@ -289,34 +289,15 @@ public class StorageManager {
     public static final int FLAG_INCLUDE_INVISIBLE = 1 << 10;
     /** {@hide} */
     public static final int FLAG_INCLUDE_RECENT = 1 << 11;
+    /** {@hide} */
+    public static final int FLAG_INCLUDE_SHARED_PROFILE = 1 << 12;
 
     /** {@hide} */
     public static final int FSTRIM_FLAG_DEEP = IVold.FSTRIM_FLAG_DEEP_TRIM;
 
     /** @hide The volume is not encrypted. */
-    @UnsupportedAppUsage
-    public static final int ENCRYPTION_STATE_NONE =
-            IVold.ENCRYPTION_STATE_NONE;
-
-    /** @hide The volume has been encrypted succesfully. */
-    public static final int ENCRYPTION_STATE_OK =
-            IVold.ENCRYPTION_STATE_OK;
-
-    /** @hide The volume is in a bad state. */
-    public static final int ENCRYPTION_STATE_ERROR_UNKNOWN =
-            IVold.ENCRYPTION_STATE_ERROR_UNKNOWN;
-
-    /** @hide Encryption is incomplete */
-    public static final int ENCRYPTION_STATE_ERROR_INCOMPLETE =
-            IVold.ENCRYPTION_STATE_ERROR_INCOMPLETE;
-
-    /** @hide Encryption is incomplete and irrecoverable */
-    public static final int ENCRYPTION_STATE_ERROR_INCONSISTENT =
-            IVold.ENCRYPTION_STATE_ERROR_INCONSISTENT;
-
-    /** @hide Underlying data is corrupt */
-    public static final int ENCRYPTION_STATE_ERROR_CORRUPT =
-            IVold.ENCRYPTION_STATE_ERROR_CORRUPT;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public static final int ENCRYPTION_STATE_NONE = 1;
 
     private static volatile IStorageManager sStorageManager = null;
 
@@ -634,7 +615,7 @@ public class StorageManager {
      * @hide
      */
     @Deprecated
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void enableUsbMassStorage() {
     }
 
@@ -644,7 +625,7 @@ public class StorageManager {
      * @hide
      */
     @Deprecated
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void disableUsbMassStorage() {
     }
 
@@ -655,7 +636,7 @@ public class StorageManager {
      * @hide
      */
     @Deprecated
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public boolean isUsbMassStorageConnected() {
         return false;
     }
@@ -673,9 +654,7 @@ public class StorageManager {
     }
 
     /**
-     * Mount an Opaque Binary Blob (OBB) file. If a <code>key</code> is
-     * specified, it is supplied to the mounting process to be used in any
-     * encryption used in the OBB.
+     * Mount an Opaque Binary Blob (OBB) file.
      * <p>
      * The OBB will remain mounted for as long as the StorageManager reference
      * is held by the application. As soon as this reference is lost, the OBBs
@@ -688,23 +667,53 @@ public class StorageManager {
      * application's OBB that shares its UID.
      *
      * @param rawPath the path to the OBB file
-     * @param key secret used to encrypt the OBB; may be <code>null</code> if no
-     *            encryption was used on the OBB.
+     * @param key must be <code>null</code>. Previously, some Android device
+     *            implementations accepted a non-<code>null</code> key to mount
+     *            an encrypted OBB file. However, this never worked reliably and
+     *            is no longer supported.
      * @param listener will receive the success or failure of the operation
      * @return whether the mount call was successfully queued or not
      */
     public boolean mountObb(String rawPath, String key, OnObbStateChangeListener listener) {
         Preconditions.checkNotNull(rawPath, "rawPath cannot be null");
+        Preconditions.checkArgument(key == null, "mounting encrypted OBBs is no longer supported");
         Preconditions.checkNotNull(listener, "listener cannot be null");
 
         try {
             final String canonicalPath = new File(rawPath).getCanonicalPath();
             final int nonce = mObbActionListener.addListener(listener);
-            mStorageManager.mountObb(rawPath, canonicalPath, key, mObbActionListener, nonce,
+            mStorageManager.mountObb(rawPath, canonicalPath, mObbActionListener, nonce,
                     getObbInfo(canonicalPath));
             return true;
         } catch (IOException e) {
             throw new IllegalArgumentException("Failed to resolve path: " + rawPath, e);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns a {@link PendingIntent} that can be used by Apps with
+     * {@link android.Manifest.permission#MANAGE_EXTERNAL_STORAGE} permission
+     * to launch the manageSpaceActivity for any App that implements it, irrespective of its
+     * exported status.
+     * <p>
+     * Caller has the responsibility of supplying a valid packageName which has
+     * manageSpaceActivity implemented.
+     *
+     * @param packageName package name for the App for which manageSpaceActivity is to be launched
+     * @param requestCode for launching the activity
+     * @return PendingIntent to launch the manageSpaceActivity if successful, null if the
+     * packageName doesn't have a manageSpaceActivity.
+     * @throws IllegalArgumentException an invalid packageName is supplied.
+     */
+    @RequiresPermission(android.Manifest.permission.MANAGE_EXTERNAL_STORAGE)
+    @Nullable
+    public PendingIntent getManageSpaceActivityIntent(
+            @NonNull String packageName, int requestCode) {
+        try {
+            return mStorageManager.getManageSpaceActivityIntent(packageName,
+                    requestCode);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -811,7 +820,7 @@ public class StorageManager {
     }
 
     /** {@hide} */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public @Nullable VolumeInfo findVolumeById(String id) {
         Preconditions.checkNotNull(id);
         // TODO; go directly to service to make this faster
@@ -1032,7 +1041,7 @@ public class StorageManager {
     }
 
     /** {@hide} */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void format(String volId) {
         try {
             mStorageManager.format(volId);
@@ -1074,7 +1083,7 @@ public class StorageManager {
     }
 
     /** {@hide} */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void partitionPublic(String diskId) {
         try {
             mStorageManager.partitionPublic(diskId);
@@ -1236,7 +1245,7 @@ public class StorageManager {
     }
 
     /** {@hide} */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private static @Nullable StorageVolume getStorageVolume(StorageVolume[] volumes, File file) {
         if (file == null) {
             return null;
@@ -1295,6 +1304,25 @@ public class StorageManager {
         final ArrayList<StorageVolume> res = new ArrayList<>();
         Collections.addAll(res,
                 getVolumeList(mContext.getUserId(), FLAG_REAL_STATE | FLAG_INCLUDE_INVISIBLE));
+        return res;
+    }
+
+    /**
+     * Return the list of shared/external storage volumes currently available to
+     * the calling user and the user it shares media with. Please refer to
+     * <a href="https://source.android.com/compatibility/12/android-12-cdd#95_multi-user_support">
+     *     multi-user support</a> for more details.
+     *
+     * <p>
+     * This is similar to {@link StorageManager#getStorageVolumes()} except that the result also
+     * includes the volumes belonging to any user it shares media with
+     */
+    @RequiresPermission(android.Manifest.permission.MANAGE_EXTERNAL_STORAGE)
+    public @NonNull List<StorageVolume> getStorageVolumesIncludingSharedProfiles() {
+        final ArrayList<StorageVolume> res = new ArrayList<>();
+        Collections.addAll(res,
+                getVolumeList(mContext.getUserId(),
+                        FLAG_REAL_STATE | FLAG_INCLUDE_INVISIBLE | FLAG_INCLUDE_SHARED_PROFILE));
         return res;
     }
 
@@ -1372,13 +1400,7 @@ public class StorageManager {
                 }
                 packageName = packageNames[0];
             }
-            final int uid = ActivityThread.getPackageManager().getPackageUid(packageName,
-                    PackageManager.MATCH_DEBUG_TRIAGED_MISSING, userId);
-            if (uid <= 0) {
-                Log.w(TAG, "Missing UID; no storage volumes available");
-                return new StorageVolume[0];
-            }
-            return storageManager.getVolumeList(uid, packageName, flags);
+            return storageManager.getVolumeList(userId, packageName, flags);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -1415,11 +1437,47 @@ public class StorageManager {
         throw new IllegalStateException("Missing primary storage");
     }
 
-    private static final int DEFAULT_THRESHOLD_PERCENTAGE = 5;
-    private static final long DEFAULT_THRESHOLD_MAX_BYTES = DataUnit.MEBIBYTES.toBytes(500);
+    /**
+     * Devices having above STORAGE_THRESHOLD_PERCENT_HIGH of total space free are considered to be
+     * in high free space category.
+     *
+     * @hide
+     */
+    public static final int DEFAULT_STORAGE_THRESHOLD_PERCENT_HIGH = 20;
+    /** {@hide} */
+    @TestApi
+    public static final String
+            STORAGE_THRESHOLD_PERCENT_HIGH_KEY = "storage_threshold_percent_high";
+    /**
+     * Devices having below STORAGE_THRESHOLD_PERCENT_LOW of total space free are considered to be
+     * in low free space category and can be configured via
+     * Settings.Global.SYS_STORAGE_THRESHOLD_PERCENTAGE.
+     *
+     * @hide
+     */
+    public static final int DEFAULT_STORAGE_THRESHOLD_PERCENT_LOW = 5;
+    /**
+     * For devices in high free space category, CACHE_RESERVE_PERCENT_HIGH percent of total space is
+     * allocated for cache.
+     *
+     * @hide
+     */
+    public static final int DEFAULT_CACHE_RESERVE_PERCENT_HIGH = 10;
+    /** {@hide} */
+    @TestApi
+    public static final String CACHE_RESERVE_PERCENT_HIGH_KEY = "cache_reserve_percent_high";
+    /**
+     * For devices in low free space category, CACHE_RESERVE_PERCENT_LOW percent of total space is
+     * allocated for cache.
+     *
+     * @hide
+     */
+    public static final int DEFAULT_CACHE_RESERVE_PERCENT_LOW = 2;
+    /** {@hide} */
+    @TestApi
+    public static final String CACHE_RESERVE_PERCENT_LOW_KEY = "cache_reserve_percent_low";
 
-    private static final int DEFAULT_CACHE_PERCENTAGE = 10;
-    private static final long DEFAULT_CACHE_MAX_BYTES = DataUnit.GIBIBYTES.toBytes(5);
+    private static final long DEFAULT_THRESHOLD_MAX_BYTES = DataUnit.MEBIBYTES.toBytes(500);
 
     private static final long DEFAULT_FULL_THRESHOLD_BYTES = DataUnit.MEBIBYTES.toBytes(1);
 
@@ -1443,7 +1501,8 @@ public class StorageManager {
     @UnsupportedAppUsage
     public long getStorageLowBytes(File path) {
         final long lowPercent = Settings.Global.getInt(mResolver,
-                Settings.Global.SYS_STORAGE_THRESHOLD_PERCENTAGE, DEFAULT_THRESHOLD_PERCENTAGE);
+                Settings.Global.SYS_STORAGE_THRESHOLD_PERCENTAGE,
+                DEFAULT_STORAGE_THRESHOLD_PERCENT_LOW);
         final long lowBytes = (path.getTotalSpace() * lowPercent) / 100;
 
         final long maxLowBytes = Settings.Global.getLong(mResolver,
@@ -1453,28 +1512,66 @@ public class StorageManager {
     }
 
     /**
+     * Compute the minimum number of bytes of storage on the device that could
+     * be reserved for cached data depending on the device state which is then passed on
+     * to getStorageCacheBytes.
+     *
+     * Input File path must point to a storage volume.
+     *
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    @TestApi
+    @SuppressLint("StreamFiles")
+    public long computeStorageCacheBytes(@NonNull File path) {
+        final int storageThresholdPercentHigh = DeviceConfig.getInt(
+                DeviceConfig.NAMESPACE_STORAGE_NATIVE_BOOT,
+                STORAGE_THRESHOLD_PERCENT_HIGH_KEY, DEFAULT_STORAGE_THRESHOLD_PERCENT_HIGH);
+        final int cacheReservePercentHigh = DeviceConfig.getInt(
+                DeviceConfig.NAMESPACE_STORAGE_NATIVE_BOOT,
+                CACHE_RESERVE_PERCENT_HIGH_KEY, DEFAULT_CACHE_RESERVE_PERCENT_HIGH);
+        final int cacheReservePercentLow = DeviceConfig.getInt(
+                DeviceConfig.NAMESPACE_STORAGE_NATIVE_BOOT,
+                CACHE_RESERVE_PERCENT_LOW_KEY, DEFAULT_CACHE_RESERVE_PERCENT_LOW);
+        final long totalBytes = path.getTotalSpace();
+        final long usableBytes = path.getUsableSpace();
+        final long storageThresholdHighBytes = totalBytes * storageThresholdPercentHigh / 100;
+        final long storageThresholdLowBytes = getStorageLowBytes(path);
+        long result;
+        if (usableBytes > storageThresholdHighBytes) {
+            // If free space is >storageThresholdPercentHigh of total space,
+            // reserve cacheReservePercentHigh of total space
+            result = totalBytes * cacheReservePercentHigh / 100;
+        } else if (usableBytes < storageThresholdLowBytes) {
+            // If free space is <min(storageThresholdPercentLow of total space, 500MB),
+            // reserve cacheReservePercentLow of total space
+            result = totalBytes * cacheReservePercentLow / 100;
+        } else {
+            // Else, linearly interpolate the amount of space to reserve
+            double slope = (cacheReservePercentHigh - cacheReservePercentLow) * totalBytes
+                    / (100.0 * (storageThresholdHighBytes - storageThresholdLowBytes));
+            double intercept = totalBytes * cacheReservePercentLow / 100.0
+                    - storageThresholdLowBytes * slope;
+            result = Math.round(slope * usableBytes + intercept);
+        }
+        return result;
+    }
+
+    /**
      * Return the minimum number of bytes of storage on the device that should
      * be reserved for cached data.
      *
      * @hide
      */
-    public long getStorageCacheBytes(File path, @AllocateFlags int flags) {
-        final long cachePercent = Settings.Global.getInt(mResolver,
-                Settings.Global.SYS_STORAGE_CACHE_PERCENTAGE, DEFAULT_CACHE_PERCENTAGE);
-        final long cacheBytes = (path.getTotalSpace() * cachePercent) / 100;
-
-        final long maxCacheBytes = Settings.Global.getLong(mResolver,
-                Settings.Global.SYS_STORAGE_CACHE_MAX_BYTES, DEFAULT_CACHE_MAX_BYTES);
-
-        final long result = Math.min(cacheBytes, maxCacheBytes);
+    public long getStorageCacheBytes(@NonNull File path, @AllocateFlags int flags) {
         if ((flags & StorageManager.FLAG_ALLOCATE_AGGRESSIVE) != 0) {
             return 0;
         } else if ((flags & StorageManager.FLAG_ALLOCATE_DEFY_ALL_RESERVED) != 0) {
             return 0;
         } else if ((flags & StorageManager.FLAG_ALLOCATE_DEFY_HALF_RESERVED) != 0) {
-            return result / 2;
+            return computeStorageCacheBytes(path) / 2;
         } else {
-            return result;
+            return computeStorageCacheBytes(path);
         }
     }
 
@@ -1484,7 +1581,7 @@ public class StorageManager {
      *
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public long getStorageFullBytes(File path) {
         return Settings.Global.getLong(mResolver, Settings.Global.SYS_STORAGE_FULL_THRESHOLD_BYTES,
                 DEFAULT_FULL_THRESHOLD_BYTES);
@@ -1509,9 +1606,9 @@ public class StorageManager {
     }
 
     /** {@hide} */
-    public void unlockUserKey(int userId, int serialNumber, byte[] token, byte[] secret) {
+    public void unlockUserKey(int userId, int serialNumber, byte[] secret) {
         try {
-            mStorageManager.unlockUserKey(userId, serialNumber, token, secret);
+            mStorageManager.unlockUserKey(userId, serialNumber, secret);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -1545,6 +1642,7 @@ public class StorageManager {
     }
 
     /** {@hide} */
+    @TestApi
     public static boolean isUserKeyUnlocked(int userId) {
         if (sStorageManager == null) {
             sStorageManager = IStorageManager.Stub
@@ -1579,30 +1677,23 @@ public class StorageManager {
     }
 
     /** {@hide}
-     * Is this device encryptable or already encrypted?
-     * @return true for encryptable or encrypted
-     *         false not encrypted and not encryptable
-     */
-    public static boolean isEncryptable() {
-        return RoSystemProperties.CRYPTO_ENCRYPTABLE;
-    }
-
-    /** {@hide}
-     * Is this device already encrypted?
-     * @return true for encrypted. (Implies isEncryptable() == true)
-     *         false not encrypted
+     * Is this device encrypted?
+     * <p>
+     * Note: all devices launching with Android 10 (API level 29) or later are
+     * required to be encrypted.  This should only ever return false for
+     * in-development devices on which encryption has not yet been configured.
+     *
+     * @return true if encrypted, false if not encrypted
      */
     public static boolean isEncrypted() {
         return RoSystemProperties.CRYPTO_ENCRYPTED;
     }
 
     /** {@hide}
-     * Is this device file encrypted?
-     * @return true for file encrypted. (Implies isEncrypted() == true)
-     *         false not encrypted or block encrypted
+     * Does this device have file-based encryption (FBE) enabled?
+     * @return true if the device has file-based encryption enabled.
      */
-    @UnsupportedAppUsage
-    public static boolean isFileEncryptedNativeOnly() {
+    public static boolean isFileEncrypted() {
         if (!isEncrypted()) {
             return false;
         }
@@ -1610,81 +1701,20 @@ public class StorageManager {
     }
 
     /** {@hide}
-     * Is this device block encrypted?
-     * @return true for block encrypted. (Implies isEncrypted() == true)
-     *         false not encrypted or file encrypted
+     * @deprecated Use {@link #isFileEncrypted} instead, since emulated FBE is no longer supported.
      */
-    public static boolean isBlockEncrypted() {
-        if (!isEncrypted()) {
-            return false;
-        }
-        return RoSystemProperties.CRYPTO_BLOCK_ENCRYPTED;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    @Deprecated
+    public static boolean isFileEncryptedNativeOnly() {
+        return isFileEncrypted();
     }
 
     /** {@hide}
-     * Is this device block encrypted with credentials?
-     * @return true for crediential block encrypted.
-     *         (Implies isBlockEncrypted() == true)
-     *         false not encrypted, file encrypted or default block encrypted
+     * @deprecated Use {@link #isFileEncrypted} instead, since emulated FBE is no longer supported.
      */
-    public static boolean isNonDefaultBlockEncrypted() {
-        if (!isBlockEncrypted()) {
-            return false;
-        }
-
-        try {
-            IStorageManager storageManager = IStorageManager.Stub.asInterface(
-                    ServiceManager.getService("mount"));
-            return storageManager.getPasswordType() != CRYPT_TYPE_DEFAULT;
-        } catch (RemoteException e) {
-            Log.e(TAG, "Error getting encryption type");
-            return false;
-        }
-    }
-
-    /** {@hide}
-     * Is this device in the process of being block encrypted?
-     * @return true for encrypting.
-     *         false otherwise
-     * Whether device isEncrypted at this point is undefined
-     * Note that only system services and CryptKeeper will ever see this return
-     * true - no app will ever be launched in this state.
-     * Also note that this state will not change without a teardown of the
-     * framework, so no service needs to check for changes during their lifespan
-     */
-    public static boolean isBlockEncrypting() {
-        final String state = VoldProperties.encrypt_progress().orElse("");
-        return !"".equalsIgnoreCase(state);
-    }
-
-    /** {@hide}
-     * Is this device non default block encrypted and in the process of
-     * prompting for credentials?
-     * @return true for prompting for credentials.
-     *         (Implies isNonDefaultBlockEncrypted() == true)
-     *         false otherwise
-     * Note that only system services and CryptKeeper will ever see this return
-     * true - no app will ever be launched in this state.
-     * Also note that this state will not change without a teardown of the
-     * framework, so no service needs to check for changes during their lifespan
-     */
-    public static boolean inCryptKeeperBounce() {
-        final String status = VoldProperties.decrypt().orElse("");
-        return "trigger_restart_min_framework".equals(status);
-    }
-
-    /** {@hide} */
-    public static boolean isFileEncryptedEmulatedOnly() {
-        return SystemProperties.getBoolean(StorageManager.PROP_EMULATE_FBE, false);
-    }
-
-    /** {@hide}
-     * Is this device running in a file encrypted mode, either native or emulated?
-     * @return true for file encrypted, false otherwise
-     */
+    @Deprecated
     public static boolean isFileEncryptedNativeOrEmulated() {
-        return isFileEncryptedNativeOnly()
-               || isFileEncryptedEmulatedOnly();
+        return isFileEncrypted();
     }
 
     /** {@hide} */
@@ -1701,17 +1731,13 @@ public class StorageManager {
 
     /**
      * Return if the currently booted device has the "isolated storage" feature
-     * flag enabled. This will eventually be fully enabled in the final
-     * {@link android.os.Build.VERSION_CODES#Q} release.
+     * flag enabled.
      *
      * @hide
      */
     @SystemApi
-    @TestApi
     public static boolean hasIsolatedStorage() {
-        // Prefer to use snapshot for current boot when available
-        return SystemProperties.getBoolean(PROP_ISOLATED_STORAGE_SNAPSHOT,
-                SystemProperties.getBoolean(PROP_ISOLATED_STORAGE, true));
+        return false;
     }
 
     /**
@@ -2108,6 +2134,52 @@ public class StorageManager {
         }
     }
 
+
+    /** @hide */
+    @IntDef(prefix = { "MOUNT_MODE_" }, value = {
+            MOUNT_MODE_EXTERNAL_NONE,
+            MOUNT_MODE_EXTERNAL_DEFAULT,
+            MOUNT_MODE_EXTERNAL_INSTALLER,
+            MOUNT_MODE_EXTERNAL_PASS_THROUGH,
+            MOUNT_MODE_EXTERNAL_ANDROID_WRITABLE
+    })
+    /** @hide */
+    public @interface MountMode {}
+
+    /**
+     * No external storage should be mounted.
+     * @hide
+     */
+    @SystemApi
+    public static final int MOUNT_MODE_EXTERNAL_NONE = IVold.REMOUNT_MODE_NONE;
+    /**
+     * Default external storage should be mounted.
+     * @hide
+     */
+    @SystemApi
+    public static final int MOUNT_MODE_EXTERNAL_DEFAULT = IVold.REMOUNT_MODE_DEFAULT;
+    /**
+     * Mount mode for package installers which should give them access to
+     * all obb dirs in addition to their package sandboxes
+     * @hide
+     */
+    @SystemApi
+    public static final int MOUNT_MODE_EXTERNAL_INSTALLER = IVold.REMOUNT_MODE_INSTALLER;
+    /**
+     * The lower file system should be bind mounted directly on external storage
+     * @hide
+     */
+    @SystemApi
+    public static final int MOUNT_MODE_EXTERNAL_PASS_THROUGH = IVold.REMOUNT_MODE_PASS_THROUGH;
+
+    /**
+     * Use the regular scoped storage filesystem, but Android/ should be writable.
+     * Used to support the applications hosting DownloadManager and the MTP server.
+     * @hide
+     */
+    @SystemApi
+    public static final int MOUNT_MODE_EXTERNAL_ANDROID_WRITABLE =
+            IVold.REMOUNT_MODE_ANDROID_WRITABLE;
     /**
      * Flag indicating that a disk space allocation request should operate in an
      * aggressive mode. This flag should only be rarely used in situations that
@@ -2222,7 +2294,7 @@ public class StorageManager {
     /** @hide */
     @SystemApi
     @WorkerThread
-    @SuppressLint("Doclava125")
+    @SuppressLint("RequiresPermission")
     public long getAllocatableBytes(@NonNull UUID storageUuid,
             @RequiresPermission @AllocateFlags int flags) throws IOException {
         try {
@@ -2271,7 +2343,7 @@ public class StorageManager {
     /** @hide */
     @SystemApi
     @WorkerThread
-    @SuppressLint("Doclava125")
+    @SuppressLint("RequiresPermission")
     public void allocateBytes(@NonNull UUID storageUuid, @BytesLong long bytes,
             @RequiresPermission @AllocateFlags int flags) throws IOException {
         try {
@@ -2279,6 +2351,28 @@ public class StorageManager {
                     mContext.getOpPackageName());
         } catch (ParcelableException e) {
             e.maybeRethrow(IOException.class);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the External Storage mount mode corresponding to the given uid and packageName.
+     * These mount modes specify different views and access levels for
+     * different apps on external storage.
+     *
+     * @params uid UID of the application
+     * @params packageName name of the package
+     * @return {@code MountMode} for the given uid and packageName.
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.WRITE_MEDIA_STORAGE)
+    @SystemApi
+    @MountMode
+    public int getExternalStorageMountMode(int uid, @NonNull String packageName) {
+        try {
+            return mStorageManager.getExternalStorageMountMode(uid, packageName);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -2321,7 +2415,7 @@ public class StorageManager {
     /** @hide */
     @SystemApi
     @WorkerThread
-    @SuppressLint("Doclava125")
+    @SuppressLint("RequiresPermission")
     public void allocateBytes(FileDescriptor fd, @BytesLong long bytes,
             @RequiresPermission @AllocateFlags int flags) throws IOException {
         final File file = ParcelFileDescriptor.getFile(fd);
@@ -2638,21 +2732,44 @@ public class StorageManager {
         return isCacheBehavior(path, XATTR_CACHE_TOMBSTONE);
     }
 
+    /**
+     * Returns true if {@code uuid} is a FAT volume identifier. FAT Volume identifiers
+     * are 32 randomly generated bits that are represented in string form as AAAA-AAAA.
+     */
+    private static boolean isFatVolumeIdentifier(String uuid) {
+        return uuid.length() == 9 && uuid.charAt(4) == '-';
+    }
+
     /** {@hide} */
-    public static UUID convert(String uuid) {
+    @TestApi
+    public static @NonNull UUID convert(@NonNull String uuid) {
         if (Objects.equals(uuid, UUID_PRIVATE_INTERNAL)) {
             return UUID_DEFAULT;
         } else if (Objects.equals(uuid, UUID_PRIMARY_PHYSICAL)) {
             return UUID_PRIMARY_PHYSICAL_;
         } else if (Objects.equals(uuid, UUID_SYSTEM)) {
             return UUID_SYSTEM_;
+        } else if (isFatVolumeIdentifier(uuid)) {
+            // FAT volume identifiers are not UUIDs but we need to coerce them into
+            // UUIDs in order to satisfy apis that take java.util.UUID arguments.
+            //
+            // We coerce a 32 bit fat volume identifier of the form XXXX-YYYY into
+            // a UUID of form "fafafafa-fafa-5afa-8afa-fafaXXXXYYYY". This is an
+            // RFC-422 UUID with Version 5, which is a namespaced UUID. The UUIDs we
+            // coerce into are not true namespace UUIDs; although FAT storage volume
+            // identifiers are unique names within a fixed namespace, this UUID is not
+            // based on an SHA-1 hash of the name. We avoid the SHA-1 hash because
+            // (a) we need this transform to be reversible (b) it's pointless to generate
+            // a 128 bit hash from a 32 bit value.
+            return UUID.fromString(FAT_UUID_PREFIX + uuid.replace("-", ""));
         } else {
             return UUID.fromString(uuid);
         }
     }
 
     /** {@hide} */
-    public static String convert(UUID storageUuid) {
+    @TestApi
+    public static @NonNull String convert(@NonNull UUID storageUuid) {
         if (UUID_DEFAULT.equals(storageUuid)) {
             return UUID_PRIVATE_INTERNAL;
         } else if (UUID_PRIMARY_PHYSICAL_.equals(storageUuid)) {
@@ -2660,6 +2777,17 @@ public class StorageManager {
         } else if (UUID_SYSTEM_.equals(storageUuid)) {
             return UUID_SYSTEM;
         } else {
+            String uuidString = storageUuid.toString();
+            // This prefix match will exclude fsUuids from private volumes because
+            // (a) linux fsUuids are generally Version 4 (random) UUIDs so the prefix
+            // will contain 4xxx instead of 5xxx and (b) we've already matched against
+            // known namespace (Version 5) UUIDs above.
+            if (uuidString.startsWith(FAT_UUID_PREFIX)) {
+                String fatStr = uuidString.substring(FAT_UUID_PREFIX.length())
+                        .toUpperCase(Locale.US);
+                return fatStr.substring(0, 4) + "-" + fatStr.substring(4);
+            }
+
             return storageUuid.toString();
         }
     }
@@ -2677,30 +2805,161 @@ public class StorageManager {
         }
     }
 
+    /**
+     * Reason to provide if app IO is blocked/resumed for unknown reasons
+     *
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public static final int APP_IO_BLOCKED_REASON_UNKNOWN = 0;
+
+    /**
+     * Reason to provide if app IO is blocked/resumed because of transcoding
+     *
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public static final int APP_IO_BLOCKED_REASON_TRANSCODING = 1;
+
+    /**
+     * Constants for use with
+     * {@link #notifyAppIoBlocked} and {@link notifyAppIoResumed}, to specify the reason an app's
+     * IO is blocked/resumed.
+     *
+     * @hide
+     */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(prefix = { "APP_IO_BLOCKED_REASON_" }, value = {
+                APP_IO_BLOCKED_REASON_TRANSCODING,
+                APP_IO_BLOCKED_REASON_UNKNOWN,
+    })
+    public @interface AppIoBlockedReason {}
+
+    /**
+     * Notify the system that an app with {@code uid} and {@code tid} is blocked on an IO request on
+     * {@code volumeUuid} for {@code reason}.
+     *
+     * This blocked state can be used to modify the ANR behavior for the app while it's blocked.
+     * For example during transcoding.
+     *
+     * This can only be called by the {@link ExternalStorageService} holding the
+     * {@link android.Manifest.permission#WRITE_MEDIA_STORAGE} permission.
+     *
+     * @param volumeUuid the UUID of the storage volume that the app IO is blocked on
+     * @param uid the UID of the app blocked on IO
+     * @param tid the tid of the app blocked on IO
+     * @param reason the reason the app is blocked on IO
+     *
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public void notifyAppIoBlocked(@NonNull UUID volumeUuid, int uid, int tid,
+            @AppIoBlockedReason int reason) {
+        Objects.requireNonNull(volumeUuid);
+        try {
+            mStorageManager.notifyAppIoBlocked(convert(volumeUuid), uid, tid, reason);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Notify the system that an app with {@code uid} and {@code tid} has resmued a previously
+     * blocked IO request on {@code volumeUuid} for {@code reason}.
+     *
+     * All app IO will be automatically marked as unblocked if {@code volumeUuid} is unmounted.
+     *
+     * This can only be called by the {@link ExternalStorageService} holding the
+     * {@link android.Manifest.permission#WRITE_MEDIA_STORAGE} permission.
+     *
+     * @param volumeUuid the UUID of the storage volume that the app IO is resumed on
+     * @param uid the UID of the app resuming IO
+     * @param tid the tid of the app resuming IO
+     * @param reason the reason the app is resuming IO
+     *
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public void notifyAppIoResumed(@NonNull UUID volumeUuid, int uid, int tid,
+            @AppIoBlockedReason int reason) {
+        Objects.requireNonNull(volumeUuid);
+        try {
+            mStorageManager.notifyAppIoResumed(convert(volumeUuid), uid, tid, reason);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Check if {@code uid} with {@code tid} is blocked on IO for {@code reason}.
+     *
+     * This requires {@link ExternalStorageService} the
+     * {@link android.Manifest.permission#WRITE_MEDIA_STORAGE} permission.
+     *
+     * @param volumeUuid the UUID of the storage volume to check IO blocked status
+     * @param uid the UID of the app to check IO blocked status
+     * @param tid the tid of the app to check IO blocked status
+     * @param reason the reason to check IO blocked status for
+     *
+     * @hide
+     */
+    @TestApi
+    public boolean isAppIoBlocked(@NonNull UUID volumeUuid, int uid, int tid,
+            @AppIoBlockedReason int reason) {
+        Objects.requireNonNull(volumeUuid);
+        try {
+            return mStorageManager.isAppIoBlocked(convert(volumeUuid), uid, tid, reason);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Notify the system of the current cloud media provider.
+     *
+     * This can only be called by the {@link android.service.storage.ExternalStorageService}
+     * holding the {@link android.Manifest.permission#WRITE_MEDIA_STORAGE} permission.
+     *
+     * @param authority the authority of the content provider
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public void setCloudMediaProvider(@Nullable String authority) {
+        try {
+            mStorageManager.setCloudMediaProvider(authority);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the authority of the current cloud media provider that was set by the
+     * {@link android.service.storage.ExternalStorageService} holding the
+     * {@link android.Manifest.permission#WRITE_MEDIA_STORAGE} permission via
+     * {@link #setCloudMediaProvider(String)}.
+     *
+     * @hide
+     */
+    @Nullable
+    @TestApi
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public String getCloudMediaProvider() {
+        try {
+            return mStorageManager.getCloudMediaProvider();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
     private final Object mFuseAppLoopLock = new Object();
 
     @GuardedBy("mFuseAppLoopLock")
     private @Nullable FuseAppLoop mFuseAppLoop = null;
 
-    /// Consts to match the password types in cryptfs.h
     /** @hide */
-    @UnsupportedAppUsage
-    public static final int CRYPT_TYPE_PASSWORD = IVold.PASSWORD_TYPE_PASSWORD;
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public static final int CRYPT_TYPE_PASSWORD = 0;
     /** @hide */
-    @UnsupportedAppUsage
-    public static final int CRYPT_TYPE_DEFAULT = IVold.PASSWORD_TYPE_DEFAULT;
-    /** @hide */
-    public static final int CRYPT_TYPE_PATTERN = IVold.PASSWORD_TYPE_PATTERN;
-    /** @hide */
-    public static final int CRYPT_TYPE_PIN = IVold.PASSWORD_TYPE_PIN;
-
-    // Constants for the data available via StorageManagerService.getField.
-    /** @hide */
-    public static final String SYSTEM_LOCALE_KEY = "SystemLocale";
-    /** @hide */
-    public static final String OWNER_INFO_KEY = "OwnerInfo";
-    /** @hide */
-    public static final String PATTERN_VISIBLE_KEY = "PatternVisible";
-    /** @hide */
-    public static final String PASSWORD_VISIBLE_KEY = "PasswordVisible";
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public static final int CRYPT_TYPE_DEFAULT = 1;
 }

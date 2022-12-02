@@ -26,7 +26,6 @@ import android.annotation.CallSuper;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.app.Service;
 import android.content.ComponentName;
 import android.content.ContentCaptureOptions;
@@ -55,7 +54,6 @@ import android.view.contentcapture.MainContentCaptureSession;
 
 import com.android.internal.os.IResultReceiver;
 import com.android.internal.util.FrameworkStatsLog;
-import com.android.internal.util.Preconditions;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -63,6 +61,7 @@ import java.lang.ref.WeakReference;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
@@ -74,7 +73,6 @@ import java.util.function.Consumer;
  * @hide
  */
 @SystemApi
-@TestApi
 public abstract class ContentCaptureService extends Service {
 
     private static final String TAG = ContentCaptureService.class.getSimpleName();
@@ -344,7 +342,6 @@ public abstract class ContentCaptureService extends Service {
      * @hide
      */
     @SystemApi
-    @TestApi
     public void onDataShareRequest(@NonNull DataShareRequest request,
             @NonNull DataShareCallback callback) {
         if (sVerbose) Log.v(TAG, "onDataShareRequest()");
@@ -547,8 +544,8 @@ public abstract class ContentCaptureService extends Service {
             @Override
             public void onAccept(@NonNull Executor executor,
                     @NonNull DataShareReadAdapter adapter) {
-                Preconditions.checkNotNull(adapter);
-                Preconditions.checkNotNull(executor);
+                Objects.requireNonNull(adapter);
+                Objects.requireNonNull(executor);
 
                 DataShareReadAdapterDelegate delegate =
                         new DataShareReadAdapterDelegate(executor, adapter,
@@ -664,9 +661,9 @@ public abstract class ContentCaptureService extends Service {
 
         DataShareReadAdapterDelegate(Executor executor, DataShareReadAdapter adapter,
                 LocalDataShareAdapterResourceManager resourceManager) {
-            Preconditions.checkNotNull(executor);
-            Preconditions.checkNotNull(adapter);
-            Preconditions.checkNotNull(resourceManager);
+            Objects.requireNonNull(executor);
+            Objects.requireNonNull(adapter);
+            Objects.requireNonNull(resourceManager);
 
             resourceManager.initializeForDelegate(this, adapter, executor);
             mResourceManagerReference = new WeakReference<>(resourceManager);

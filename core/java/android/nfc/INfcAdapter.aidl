@@ -24,12 +24,14 @@ import android.nfc.Tag;
 import android.nfc.TechListParcel;
 import android.nfc.IAppCallback;
 import android.nfc.INfcAdapterExtras;
+import android.nfc.INfcControllerAlwaysOnListener;
 import android.nfc.INfcTag;
 import android.nfc.INfcCardEmulation;
 import android.nfc.INfcFCardEmulation;
 import android.nfc.INfcUnlockHandler;
 import android.nfc.ITagRemovedCallback;
 import android.nfc.INfcDta;
+import android.nfc.NfcAntennaInfo;
 import android.os.Bundle;
 
 /**
@@ -71,5 +73,11 @@ interface INfcAdapter
     boolean isNfcSecureEnabled();
     boolean deviceSupportsNfcSecure();
     boolean setNfcSecure(boolean enable);
+    NfcAntennaInfo getNfcAntennaInfo();
 
+    boolean setControllerAlwaysOn(boolean value);
+    boolean isControllerAlwaysOn();
+    boolean isControllerAlwaysOnSupported();
+    void registerControllerAlwaysOnListener(in INfcControllerAlwaysOnListener listener);
+    void unregisterControllerAlwaysOnListener(in INfcControllerAlwaysOnListener listener);
 }

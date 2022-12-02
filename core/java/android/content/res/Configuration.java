@@ -19,6 +19,7 @@ package android.content.res;
 import static android.content.ConfigurationProto.COLOR_MODE;
 import static android.content.ConfigurationProto.DENSITY_DPI;
 import static android.content.ConfigurationProto.FONT_SCALE;
+import static android.content.ConfigurationProto.FONT_WEIGHT_ADJUSTMENT;
 import static android.content.ConfigurationProto.HARD_KEYBOARD_HIDDEN;
 import static android.content.ConfigurationProto.KEYBOARD;
 import static android.content.ConfigurationProto.KEYBOARD_HIDDEN;
@@ -45,12 +46,12 @@ import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.TestApi;
-import android.app.UiModeManager;
 import android.app.WindowConfiguration;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.LocaleProto;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ActivityInfo.Config;
+import android.graphics.Typeface;
 import android.os.Build;
 import android.os.LocaleList;
 import android.os.Parcel;
@@ -333,6 +334,24 @@ public final class Configuration implements Parcelable, Comparable<Configuration
     public int screenLayout;
 
     /**
+     * An undefined fontWeightAdjustment.
+     */
+    public static final int FONT_WEIGHT_ADJUSTMENT_UNDEFINED = Integer.MAX_VALUE;
+
+    /**
+     * Adjustment in text font weight. Used to reflect the current user preference for increasing
+     * font weight.
+     *
+     * <p> If the text font weight is less than the minimum of 1, 1 will be used. If the font weight
+     * exceeds the maximum of 1000, 1000 will be used.
+     *
+     * @see android.graphics.Typeface#create(Typeface, int, boolean)
+     * @see android.graphics.fonts.FontStyle#FONT_WEIGHT_MIN
+     * @see android.graphics.fonts.FontStyle#FONT_WEIGHT_MAX
+     */
+    public int fontWeightAdjustment;
+
+    /**
      * Configuration relating to the windowing state of the object associated with this
      * Configuration. Contents of this field are not intended to affect resources, but need to be
      * communicated and propagated at the same time as the rest of Configuration.
@@ -467,6 +486,9 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         }
         if ((diff & ActivityInfo.CONFIG_WINDOW_CONFIGURATION) != 0) {
             list.add("CONFIG_WINDOW_CONFIGURATION");
+        }
+        if ((diff & ActivityInfo.CONFIG_FONT_WEIGHT_ADJUSTMENT) != 0) {
+            list.add("CONFIG_AUTO_BOLD_TEXT");
         }
         StringBuilder builder = new StringBuilder("{");
         for (int i = 0, n = list.size(); i < n; i++) {
@@ -729,11 +751,43 @@ public final class Configuration implements Parcelable, Comparable<Configuration
     public static final int SCREEN_WIDTH_DP_UNDEFINED = 0;
 
     /**
-     * The current width of the available screen space, in dp units,
-     * corresponding to
-     * <a href="{@docRoot}guide/topics/resources/providing-resources.html#ScreenWidthQualifier">screen
-     * width</a> resource qualifier.  Set to
+     * The width of the available screen space in dp units excluding the area
+     * occupied by {@link android.view.WindowInsets window insets}.
+     *
+     * <aside class="note"><b>Note:</b> The width measurement excludes window
+     * insets even when the app is displayed edge to edge using
+     * {@link android.view.Window#setDecorFitsSystemWindows(boolean)
+     * Window#setDecorFitsSystemWindows(boolean)}.</aside>
+     *
+     * <p>Corresponds to the
+     * <a href="{@docRoot}guide/topics/resources/providing-resources.html#AvailableWidthHeightQualifier">
+     * available width</a> resource qualifier. Defaults to
      * {@link #SCREEN_WIDTH_DP_UNDEFINED} if no width is specified.
+     *
+     * <p>In multi-window mode, equals the width of the available display area
+     * of the app window, not the available display area of the device screen
+     * (for example, when apps are displayed side by side in split-screen mode
+     * in landscape orientation).
+     *
+     * <p>For embedded activities, equals the width of the individual
+     * activities, not the width of the app window or the device screen.
+     *
+     * <p>In multiple-screen scenarios, the width measurement can span screens.
+     * For example, if the app is spanning both screens of a dual-screen device
+     * (with the screens side by side), {@code screenWidthDp} represents the
+     * width of both screens excluding the area occupied by window insets. When
+     * the app is restricted to a single screen in a multiple-screen
+     * environment, {@code screenWidthDp} is the width of the screen on which
+     * the app is displayed excluding window insets.
+     *
+     * <p>Differs from {@link android.view.WindowMetrics} by not including
+     * window insets in the width measurement and by expressing the measurement
+     * in dp rather than px. Use {@code screenWidthDp} to obtain the width of
+     * the display area available to an app or embedded activity excluding the
+     * area occupied by window insets. Use
+     * {@link android.view.WindowMetrics#getBounds()} to obtain the horizontal
+     * display area available to an app or embedded activity including the area
+     * occupied by window insets.
      */
     public int screenWidthDp;
 
@@ -744,11 +798,44 @@ public final class Configuration implements Parcelable, Comparable<Configuration
     public static final int SCREEN_HEIGHT_DP_UNDEFINED = 0;
 
     /**
-     * The current height of the available screen space, in dp units,
-     * corresponding to
-     * <a href="{@docRoot}guide/topics/resources/providing-resources.html#ScreenHeightQualifier">screen
-     * height</a> resource qualifier.  Set to
+     * The height of the available screen space in dp units excluding the area
+     * occupied by {@link android.view.WindowInsets window insets}, such as the
+     * status bar, navigation bar, and cutouts.
+     *
+     * <aside class="note"><b>Note:</b> The height measurement excludes window
+     * insets even when the app is displayed edge to edge using
+     * {@link android.view.Window#setDecorFitsSystemWindows(boolean)
+     * Window#setDecorFitsSystemWindows(boolean)}.</aside>
+     *
+     * <p>Corresponds to the
+     * <a href="{@docRoot}guide/topics/resources/providing-resources.html#AvailableWidthHeightQualifier">
+     * available height</a> resource qualifier. Defaults to
      * {@link #SCREEN_HEIGHT_DP_UNDEFINED} if no height is specified.
+     *
+     * <p>In multi-window mode, equals the height of the available display area
+     * of the app window, not the available display area of the device screen
+     * (for example, when apps are displayed one above another in split-screen
+     * mode in portrait orientation).
+     *
+     * <p>For embedded activities, equals the height of the individual
+     * activities, not the height of the app window or the device screen.
+     *
+     * <p>In multiple-screen scenarios, the height measurement can span screens.
+     * For example, if the app is spanning both screens of a dual-screen device
+     * rotated 90 degrees (one screen above the other), {@code screenHeightDp}
+     * represents the height of both screens excluding the area occupied by
+     * window insets. When the app is restricted to a single screen in a
+     * multiple-screen environment, {@code screenHeightDp} is the height of the
+     * screen on which the app is displayed excluding window insets.
+     *
+     * <p>Differs from {@link android.view.WindowMetrics} by not including
+     * window insets in the height measurement and by expressing the measurement
+     * in dp rather than px. Use {@code screenHeightDp} to obtain the height of
+     * the display area available to an app or embedded activity excluding the
+     * area occupied by window insets. Use
+     * {@link android.view.WindowMetrics#getBounds()} to obtain the vertical
+     * display area available to an app or embedded activity including the area
+     * occupied by window insets.
      */
     public int screenHeightDp;
 
@@ -759,12 +846,12 @@ public final class Configuration implements Parcelable, Comparable<Configuration
     public static final int SMALLEST_SCREEN_WIDTH_DP_UNDEFINED = 0;
 
     /**
-     * The smallest screen size an application will see in normal operation,
-     * corresponding to
-     * <a href="{@docRoot}guide/topics/resources/providing-resources.html#SmallestScreenWidthQualifier">smallest
-     * screen width</a> resource qualifier.
-     * This is the smallest value of both screenWidthDp and screenHeightDp
-     * in both portrait and landscape.  Set to
+     * The smallest screen size an application will see in normal operation.
+     * Corresponds to the
+     * <a href="{@docRoot}guide/topics/resources/providing-resources.html#SmallestScreenWidthQualifier">
+     * smallest width</a> resource qualifier. This is the smallest value of
+     * {@link #screenWidthDp} and {@link #screenHeightDp} in both portrait and
+     * landscape orientations. Defaults to
      * {@link #SMALLEST_SCREEN_WIDTH_DP_UNDEFINED} if no width is specified.
      */
     public int smallestScreenWidthDp;
@@ -816,7 +903,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
      * {@link ActivityInfo#CONFIG_ASSETS_PATHS}.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     @TestApi
     public int assetsSeq;
 
@@ -928,7 +1015,13 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         fontScale = o.fontScale;
         mcc = o.mcc;
         mnc = o.mnc;
-        locale = o.locale == null ? null : (Locale) o.locale.clone();
+        if (o.locale == null) {
+            locale = null;
+        } else if (!o.locale.equals(locale)) {
+            // Only clone a new Locale instance if we need to:  the clone() is
+            // both CPU and GC intensive.
+            locale = (Locale) o.locale.clone();
+        }
         o.fixUpLocaleList();
         mLocaleList = o.mLocaleList;
         userSetLocale = o.userSetLocale;
@@ -952,6 +1045,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         assetsSeq = o.assetsSeq;
         seq = o.seq;
         windowConfiguration.setTo(o.windowConfiguration);
+        fontWeightAdjustment = o.fontWeightAdjustment;
     }
 
     public String toString() {
@@ -1107,6 +1201,12 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         if (seq != 0) {
             sb.append(" s.").append(seq);
         }
+        if (fontWeightAdjustment != FONT_WEIGHT_ADJUSTMENT_UNDEFINED) {
+            sb.append(" fontWeightAdjustment=");
+            sb.append(fontWeightAdjustment);
+        } else {
+            sb.append(" ?fontWeightAdjustment");
+        }
         sb.append('}');
         return sb.toString();
     }
@@ -1147,6 +1247,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
             if (!persisted && windowConfiguration != null) {
                 windowConfiguration.dumpDebug(protoOutputStream, WINDOW_CONFIGURATION);
             }
+            protoOutputStream.write(FONT_WEIGHT_ADJUSTMENT, fontWeightAdjustment);
         }
         protoOutputStream.write(ORIENTATION, orientation);
         protoOutputStream.write(SCREEN_WIDTH_DP, screenWidthDp);
@@ -1310,6 +1411,9 @@ public final class Configuration implements Parcelable, Comparable<Configuration
                             Slog.e(TAG, "error parsing locale list in configuration.", e);
                         }
                         break;
+                    case (int) FONT_WEIGHT_ADJUSTMENT:
+                        fontWeightAdjustment = protoInputStream.readInt(FONT_WEIGHT_ADJUSTMENT);
+                        break;
                 }
             }
         } finally {
@@ -1405,6 +1509,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         assetsSeq = ASSETS_SEQ_UNDEFINED;
         seq = 0;
         windowConfiguration.setToDefaults();
+        fontWeightAdjustment = FONT_WEIGHT_ADJUSTMENT_UNDEFINED;
     }
 
     /**
@@ -1602,6 +1707,12 @@ public final class Configuration implements Parcelable, Comparable<Configuration
             changed |= ActivityInfo.CONFIG_WINDOW_CONFIGURATION;
         }
 
+        if (delta.fontWeightAdjustment != FONT_WEIGHT_ADJUSTMENT_UNDEFINED
+                && delta.fontWeightAdjustment != fontWeightAdjustment) {
+            changed |= ActivityInfo.CONFIG_FONT_WEIGHT_ADJUSTMENT;
+            fontWeightAdjustment = delta.fontWeightAdjustment;
+        }
+
         return changed;
     }
 
@@ -1624,7 +1735,10 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         if ((mask & ActivityInfo.CONFIG_LOCALE) != 0) {
             mLocaleList = delta.mLocaleList;
             if (!mLocaleList.isEmpty()) {
-                locale = (Locale) delta.locale.clone();
+                if (!delta.locale.equals(locale)) {
+                    // Don't churn a new Locale clone unless we're actually changing it
+                    locale = (Locale) delta.locale.clone();
+                }
             }
         }
         if ((mask & ActivityInfo.CONFIG_LAYOUT_DIRECTION) != 0) {
@@ -1677,6 +1791,9 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         if ((mask & ActivityInfo.CONFIG_WINDOW_CONFIGURATION) != 0) {
             windowConfiguration.setTo(delta.windowConfiguration, windowMask);
         }
+        if ((mask & ActivityInfo.CONFIG_FONT_WEIGHT_ADJUSTMENT) != 0) {
+            fontWeightAdjustment = delta.fontWeightAdjustment;
+        }
     }
 
     /**
@@ -1684,33 +1801,9 @@ public final class Configuration implements Parcelable, Comparable<Configuration
      * object and the given one.  Does not change the values of either.  Any
      * undefined fields in <var>delta</var> are ignored.
      * @return Returns a bit mask indicating which configuration
-     * values has changed, containing any combination of
-     * {@link android.content.pm.ActivityInfo#CONFIG_FONT_SCALE
-     * PackageManager.ActivityInfo.CONFIG_FONT_SCALE},
-     * {@link android.content.pm.ActivityInfo#CONFIG_MCC
-     * PackageManager.ActivityInfo.CONFIG_MCC},
-     * {@link android.content.pm.ActivityInfo#CONFIG_MNC
-     * PackageManager.ActivityInfo.CONFIG_MNC},
-     * {@link android.content.pm.ActivityInfo#CONFIG_LOCALE
-     * PackageManager.ActivityInfo.CONFIG_LOCALE},
-     * {@link android.content.pm.ActivityInfo#CONFIG_TOUCHSCREEN
-     * PackageManager.ActivityInfo.CONFIG_TOUCHSCREEN},
-     * {@link android.content.pm.ActivityInfo#CONFIG_KEYBOARD
-     * PackageManager.ActivityInfo.CONFIG_KEYBOARD},
-     * {@link android.content.pm.ActivityInfo#CONFIG_NAVIGATION
-     * PackageManager.ActivityInfo.CONFIG_NAVIGATION},
-     * {@link android.content.pm.ActivityInfo#CONFIG_ORIENTATION
-     * PackageManager.ActivityInfo.CONFIG_ORIENTATION},
-     * {@link android.content.pm.ActivityInfo#CONFIG_SCREEN_LAYOUT
-     * PackageManager.ActivityInfo.CONFIG_SCREEN_LAYOUT}, or
-     * {@link android.content.pm.ActivityInfo#CONFIG_SCREEN_SIZE
-     * PackageManager.ActivityInfo.CONFIG_SCREEN_SIZE}, or
-     * {@link android.content.pm.ActivityInfo#CONFIG_SMALLEST_SCREEN_SIZE
-     * PackageManager.ActivityInfo.CONFIG_SMALLEST_SCREEN_SIZE}.
-     * {@link android.content.pm.ActivityInfo#CONFIG_LAYOUT_DIRECTION
-     * PackageManager.ActivityInfo.CONFIG_LAYOUT_DIRECTION}.
+     * values have changed.
      */
-    public int diff(Configuration delta) {
+    public @Config int diff(Configuration delta) {
         return diff(delta, false /* compareUndefined */, false /* publicOnly */);
     }
 
@@ -1832,6 +1925,10 @@ public final class Configuration implements Parcelable, Comparable<Configuration
             changed |= ActivityInfo.CONFIG_WINDOW_CONFIGURATION;
         }
 
+        if ((compareUndefined || delta.fontWeightAdjustment != FONT_WEIGHT_ADJUSTMENT_UNDEFINED)
+                && fontWeightAdjustment != delta.fontWeightAdjustment) {
+            changed |= ActivityInfo.CONFIG_FONT_WEIGHT_ADJUSTMENT;
+        }
         return changed;
     }
 
@@ -1898,7 +1995,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         dest.writeInt(mnc);
 
         fixUpLocaleList();
-        dest.writeParcelable(mLocaleList, flags);
+        dest.writeTypedObject(mLocaleList, flags);
 
         if(userSetLocale) {
             dest.writeInt(1);
@@ -1922,9 +2019,10 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         dest.writeInt(compatScreenWidthDp);
         dest.writeInt(compatScreenHeightDp);
         dest.writeInt(compatSmallestScreenWidthDp);
-        dest.writeValue(windowConfiguration);
+        windowConfiguration.writeToParcel(dest, flags);
         dest.writeInt(assetsSeq);
         dest.writeInt(seq);
+        dest.writeInt(fontWeightAdjustment);
     }
 
     public void readFromParcel(Parcel source) {
@@ -1932,7 +2030,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         mcc = source.readInt();
         mnc = source.readInt();
 
-        mLocaleList = source.readParcelable(LocaleList.class.getClassLoader());
+        mLocaleList = source.readTypedObject(LocaleList.CREATOR);
         locale = mLocaleList.get(0);
 
         userSetLocale = (source.readInt()==1);
@@ -1953,9 +2051,10 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         compatScreenWidthDp = source.readInt();
         compatScreenHeightDp = source.readInt();
         compatSmallestScreenWidthDp = source.readInt();
-        windowConfiguration.setTo((WindowConfiguration) source.readValue(null));
+        windowConfiguration.readFromParcel(source);
         assetsSeq = source.readInt();
         seq = source.readInt();
+        fontWeightAdjustment = source.readInt();
     }
 
     public static final @android.annotation.NonNull Parcelable.Creator<Configuration> CREATOR
@@ -2054,6 +2153,8 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         if (n != 0) return n;
         n = windowConfiguration.compareTo(that.windowConfiguration);
         if (n != 0) return n;
+        n = this.fontWeightAdjustment - that.fontWeightAdjustment;
+        if (n != 0) return n;
 
         // if (n != 0) return n;
         return n;
@@ -2065,7 +2166,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         return this.compareTo(that) == 0;
     }
 
-    public boolean equals(Object that) {
+    public boolean equals(@Nullable Object that) {
         try {
             return equals((Configuration)that);
         } catch (ClassCastException e) {
@@ -2094,6 +2195,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         result = 31 * result + smallestScreenWidthDp;
         result = 31 * result + densityDpi;
         result = 31 * result + assetsSeq;
+        result = 31 * result + fontWeightAdjustment;
         return result;
     }
 
@@ -2272,7 +2374,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
      *
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static String resourceQualifierString(Configuration config) {
         return resourceQualifierString(config, null);
     }
@@ -2395,27 +2497,10 @@ public final class Configuration implements Parcelable, Comparable<Configuration
                 break;
         }
 
-        switch (config.uiMode & Configuration.UI_MODE_TYPE_MASK) {
-            case Configuration.UI_MODE_TYPE_APPLIANCE:
-                parts.add("appliance");
-                break;
-            case Configuration.UI_MODE_TYPE_DESK:
-                parts.add("desk");
-                break;
-            case Configuration.UI_MODE_TYPE_TELEVISION:
-                parts.add("television");
-                break;
-            case Configuration.UI_MODE_TYPE_CAR:
-                parts.add("car");
-                break;
-            case Configuration.UI_MODE_TYPE_WATCH:
-                parts.add("watch");
-                break;
-            case Configuration.UI_MODE_TYPE_VR_HEADSET:
-                parts.add("vrheadset");
-                break;
-            default:
-                break;
+        final String uiModeTypeString =
+                getUiModeTypeString(config.uiMode & Configuration.UI_MODE_TYPE_MASK);
+        if (uiModeTypeString != null) {
+            parts.add(uiModeTypeString);
         }
 
         switch (config.uiMode & Configuration.UI_MODE_NIGHT_MASK) {
@@ -2550,6 +2635,28 @@ public final class Configuration implements Parcelable, Comparable<Configuration
     }
 
     /**
+     * @hide
+     */
+    public static String getUiModeTypeString(int uiModeType) {
+        switch (uiModeType) {
+            case Configuration.UI_MODE_TYPE_APPLIANCE:
+                return "appliance";
+            case Configuration.UI_MODE_TYPE_DESK:
+                return "desk";
+            case Configuration.UI_MODE_TYPE_TELEVISION:
+                return "television";
+            case Configuration.UI_MODE_TYPE_CAR:
+                return "car";
+            case Configuration.UI_MODE_TYPE_WATCH:
+                return "watch";
+            case Configuration.UI_MODE_TYPE_VR_HEADSET:
+                return "vrheadset";
+            default:
+                return null;
+        }
+    }
+
+    /**
      * Generate a delta Configuration between <code>base</code> and <code>change</code>. The
      * resulting delta can be used with {@link #updateFrom(Configuration)}.
      * <p />
@@ -2557,10 +2664,10 @@ public final class Configuration implements Parcelable, Comparable<Configuration
      * {@link #updateFrom(Configuration)} will treat it as a no-op and not update that member.
      *
      * This is fine for device configurations as no member is ever undefined.
-     * {@hide}
      */
-    @UnsupportedAppUsage
-    public static Configuration generateDelta(Configuration base, Configuration change) {
+    @NonNull
+    public static Configuration generateDelta(
+            @NonNull Configuration base, @NonNull Configuration change) {
         final Configuration delta = new Configuration();
         if (base.fontScale != change.fontScale) {
             delta.fontScale = change.fontScale;
@@ -2666,6 +2773,10 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         if (!base.windowConfiguration.equals(change.windowConfiguration)) {
             delta.windowConfiguration.setTo(change.windowConfiguration);
         }
+
+        if (base.fontWeightAdjustment != change.fontWeightAdjustment) {
+            delta.fontWeightAdjustment = change.fontWeightAdjustment;
+        }
         return delta;
     }
 
@@ -2689,6 +2800,7 @@ public final class Configuration implements Parcelable, Comparable<Configuration
     private static final String XML_ATTR_SMALLEST_WIDTH = "sw";
     private static final String XML_ATTR_DENSITY = "density";
     private static final String XML_ATTR_APP_BOUNDS = "app_bounds";
+    private static final String XML_ATTR_FONT_WEIGHT_ADJUSTMENT = "fontWeightAdjustment";
 
     /**
      * Reads the attributes corresponding to Configuration member fields from the Xml parser.
@@ -2738,6 +2850,8 @@ public final class Configuration implements Parcelable, Comparable<Configuration
                         SMALLEST_SCREEN_WIDTH_DP_UNDEFINED);
         configOut.densityDpi = XmlUtils.readIntAttribute(parser, XML_ATTR_DENSITY,
                 DENSITY_DPI_UNDEFINED);
+        configOut.fontWeightAdjustment = XmlUtils.readIntAttribute(parser,
+                XML_ATTR_FONT_WEIGHT_ADJUSTMENT, FONT_WEIGHT_ADJUSTMENT_UNDEFINED);
 
         // For persistence, we don't care about assetsSeq and WindowConfiguration, so do not read it
         // out.

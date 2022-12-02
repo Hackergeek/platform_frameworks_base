@@ -25,6 +25,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.ActivityInfo.Config;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.os.StrictMode;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
@@ -45,7 +46,7 @@ import java.util.Arrays;
  * The indices used to retrieve values from this structure correspond to
  * the positions of the attributes given to obtainStyledAttributes.
  */
-public class TypedArray {
+public class TypedArray implements AutoCloseable {
 
     static TypedArray obtain(Resources res, int len) {
         TypedArray attrs = res.mTypedArrayPool.acquire();
@@ -75,17 +76,17 @@ public class TypedArray {
 
     @UnsupportedAppUsage
     private final Resources mResources;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private DisplayMetrics mMetrics;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private AssetManager mAssets;
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private boolean mRecycled;
 
     @UnsupportedAppUsage
     /*package*/ XmlBlock.Parser mXml;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     /*package*/ Resources.Theme mTheme;
     /**
      * mData is used to hold the value/id and other metadata about each attribute.
@@ -526,11 +527,12 @@ public class TypedArray {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to color: type=0x" + Integer.toHexString(type));
+                + " to color: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -560,7 +562,8 @@ public class TypedArray {
         if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             if (value.type == TypedValue.TYPE_ATTRIBUTE) {
                 throw new UnsupportedOperationException(
-                        "Failed to resolve attribute at index " + index + ": " + value);
+                        "Failed to resolve attribute at index " + index + ": " + value
+                                + ", theme=" + mTheme);
             }
             return mResources.loadComplexColor(value, value.resourceId, mTheme);
         }
@@ -595,7 +598,8 @@ public class TypedArray {
         if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             if (value.type == TypedValue.TYPE_ATTRIBUTE) {
                 throw new UnsupportedOperationException(
-                        "Failed to resolve attribute at index " + index + ": " + value);
+                        "Failed to resolve attribute at index " + index + ": " + value
+                                + ", theme=" + mTheme);
             }
             return mResources.loadColorStateList(value, value.resourceId, mTheme);
         }
@@ -636,11 +640,12 @@ public class TypedArray {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to integer: type=0x" + Integer.toHexString(type));
+                + " to integer: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -683,11 +688,12 @@ public class TypedArray {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to dimension: type=0x" + Integer.toHexString(type));
+                + " to dimension: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -731,11 +737,12 @@ public class TypedArray {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to dimension: type=0x" + Integer.toHexString(type));
+                + " to dimension: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -780,11 +787,12 @@ public class TypedArray {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to dimension: type=0x" + Integer.toHexString(type));
+                + " to dimension: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -824,11 +832,12 @@ public class TypedArray {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException(getPositionDescription()
-                + ": You must supply a " + name + " attribute.");
+                + ": You must supply a " + name + " attribute." + ", theme=" + mTheme);
     }
 
     /**
@@ -899,11 +908,12 @@ public class TypedArray {
             final TypedValue value = mValue;
             getValueAt(index, value);
             throw new UnsupportedOperationException(
-                    "Failed to resolve attribute at index " + attrIndex + ": " + value);
+                    "Failed to resolve attribute at index " + attrIndex + ": " + value
+                            + ", theme=" + mTheme);
         }
 
         throw new UnsupportedOperationException("Can't convert value at index " + attrIndex
-                + " to fraction: type=0x" + Integer.toHexString(type));
+                + " to fraction: type=0x" + Integer.toHexString(type) + ", theme=" + mTheme);
     }
 
     /**
@@ -995,7 +1005,8 @@ public class TypedArray {
         if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             if (value.type == TypedValue.TYPE_ATTRIBUTE) {
                 throw new UnsupportedOperationException(
-                        "Failed to resolve attribute at index " + index + ": " + value);
+                        "Failed to resolve attribute at index " + index + ": " + value
+                                + ", theme=" + mTheme);
             }
 
             if (density > 0) {
@@ -1031,7 +1042,8 @@ public class TypedArray {
         if (getValueAt(index * STYLE_NUM_ENTRIES, value)) {
             if (value.type == TypedValue.TYPE_ATTRIBUTE) {
                 throw new UnsupportedOperationException(
-                        "Failed to resolve attribute at index " + index + ": " + value);
+                        "Failed to resolve attribute at index " + index + ": " + value
+                                + ", theme=" + mTheme);
             }
             return mResources.getFont(value, value.resourceId);
         }
@@ -1252,6 +1264,17 @@ public class TypedArray {
     }
 
     /**
+     * Recycles the TypedArray, to be re-used by a later caller. After calling
+     * this function you must not ever touch the typed array again.
+     *
+     * @see #recycle()
+     * @throws RuntimeException if the TypedArray has already been recycled.
+     */
+    public void close() {
+        recycle();
+    }
+
+    /**
      * Extracts theme attributes from a typed array for later resolution using
      * {@link android.content.res.Resources.Theme#resolveAttributes(int[], int[])}.
      * Removes the entries from the typed array so that subsequent calls to typed
@@ -1364,6 +1387,7 @@ public class TypedArray {
         return true;
     }
 
+    @Nullable
     private CharSequence loadStringValueAt(int index) {
         final int[] data = mData;
         final int cookie = data[index + STYLE_ASSET_COOKIE];

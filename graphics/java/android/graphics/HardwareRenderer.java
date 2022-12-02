@@ -22,26 +22,34 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.content.Context;
+import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
+import android.hardware.display.DisplayManager;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.util.Log;
 import android.util.TimeUtils;
+import android.view.Display;
+import android.view.Display.Mode;
 import android.view.IGraphicsStats;
 import android.view.IGraphicsStatsCallback;
 import android.view.NativeVectorDrawableAnimator;
 import android.view.PixelCopy;
 import android.view.Surface;
+import android.view.SurfaceControl;
 import android.view.SurfaceHolder;
-import android.view.TextureLayer;
 import android.view.animation.AnimationUtils;
 
 import java.io.File;
 import java.io.FileDescriptor;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.stream.Stream;
 
 import sun.misc.Cleaner;
 
@@ -143,21 +151,24 @@ public class HardwareRenderer {
     private static final String CACHE_PATH_SHADERS = "com.android.opengl.shaders_cache";
     private static final String CACHE_PATH_SKIASHADERS = "com.android.skia.shaders_cache";
 
+    private static int sDensityDpi = 0;
+
     private final long mNativeProxy;
     /** @hide */
     protected RenderNode mRootNode;
     private boolean mOpaque = true;
     private boolean mForceDark = false;
-    private boolean mIsWideGamut = false;
+    private @ActivityInfo.ColorMode int mColorMode = ActivityInfo.COLOR_MODE_DEFAULT;
 
     /**
      * Creates a new instance of a HardwareRenderer. The HardwareRenderer will default
      * to opaque with no light source configured.
      */
     public HardwareRenderer() {
+        ProcessInitializer.sInstance.initUsingContext();
         mRootNode = RenderNode.adopt(nCreateRootRenderNode());
         mRootNode.setClipToBounds(false);
-        mNativeProxy = nCreateProxy(!mOpaque, mIsWideGamut, mRootNode.mNativeRenderNode);
+        mNativeProxy = nCreateProxy(!mOpaque, mRootNode.mNativeRenderNode);
         if (mNativeProxy == 0) {
             throw new OutOfMemoryError("Unable to create hardware renderer");
         }
@@ -304,6 +315,16 @@ public class HardwareRenderer {
     }
 
     /**
+     * Sets the SurfaceControl to be used internally inside render thread
+     * @hide
+     * @param surfaceControl The surface control to pass to render thread in hwui.
+     *        If null, any previous references held in render thread will be discarded.
+    */
+    public void setSurfaceControl(@Nullable SurfaceControl surfaceControl) {
+        nSetSurfaceControl(mNativeProxy, surfaceControl != null ? surfaceControl.mNativeObject : 0);
+    }
+
+    /**
      * Sets the parameters that can be used to control a render request for a
      * {@link HardwareRenderer}. This is not thread-safe and must not be held on to for longer
      * than a single frame request.
@@ -343,7 +364,9 @@ public class HardwareRenderer {
          * @return this instance
          */
         public @NonNull FrameRenderRequest setVsyncTime(long vsyncTime) {
-            mFrameInfo.setVsync(vsyncTime, vsyncTime);
+            // TODO(b/168552873): populate vsync Id once available to Choreographer public API
+            mFrameInfo.setVsync(vsyncTime, vsyncTime, FrameInfo.INVALID_VSYNC_ID, Long.MAX_VALUE,
+                    vsyncTime, -1);
             mFrameInfo.addFlags(FrameInfo.FLAG_SURFACE_CANVAS);
             return this;
         }
@@ -365,7 +388,8 @@ public class HardwareRenderer {
          */
         public @NonNull FrameRenderRequest setFrameCommitCallback(@NonNull Executor executor,
                 @NonNull Runnable frameCommitCallback) {
-            setFrameCompleteCallback(frameNr -> executor.execute(frameCommitCallback));
+            nSetFrameCommitCallback(mNativeProxy,
+                    didProduceBuffer -> executor.execute(frameCommitCallback));
             return this;
         }
 
@@ -586,6 +610,11 @@ public class HardwareRenderer {
     }
 
     /** @hide */
+    public void setFrameCommitCallback(FrameCommitCallback callback) {
+        nSetFrameCommitCallback(mNativeProxy, callback);
+    }
+
+    /** @hide */
     public void setFrameCompleteCallback(FrameCompleteCallback callback) {
         nSetFrameCompleteCallback(mNativeProxy, callback);
     }
@@ -609,17 +638,30 @@ public class HardwareRenderer {
     }
 
     /**
-     * Enable/disable wide gamut rendering on this renderer. Whether or not the actual rendering
-     * will be wide gamut depends on the hardware support for such rendering.
+     * Sets the desired color mode on this renderer. Whether or not the actual rendering
+     * will use the requested colorMode depends on the hardware support for such rendering.
      *
-     * @param wideGamut true if this renderer should render in wide gamut, false if it should
-     *                  render in sRGB
-     *                  TODO: Figure out color...
+     * @param colorMode The @{@link ActivityInfo.ColorMode} to request
      * @hide
      */
-    public void setWideGamut(boolean wideGamut) {
-        mIsWideGamut = wideGamut;
-        nSetWideGamut(mNativeProxy, wideGamut);
+    public void setColorMode(@ActivityInfo.ColorMode int colorMode) {
+        if (mColorMode != colorMode) {
+            mColorMode = colorMode;
+            nSetColorMode(mNativeProxy, colorMode);
+        }
+    }
+
+    /**
+     * Sets the colormode with the desired SDR white point.
+     *
+     * The white point only applies if the color mode is an HDR mode
+     *
+     * @hide
+     */
+    public void setColorMode(@ActivityInfo.ColorMode int colorMode, float whitePoint) {
+        nSetSdrWhitePoint(mNativeProxy, whitePoint);
+        mColorMode = colorMode;
+        nSetColorMode(mNativeProxy, colorMode);
     }
 
     /**
@@ -717,6 +759,17 @@ public class HardwareRenderer {
     }
 
     /** @hide */
+    protected void setASurfaceTransactionCallback(ASurfaceTransactionCallback callback) {
+        nSetASurfaceTransactionCallback(mNativeProxy, callback);
+    }
+
+    /** @hide */
+    protected void setPrepareSurfaceControlForWebviewCallback(
+            PrepareSurfaceControlForWebviewCallback callback) {
+        nSetPrepareSurfaceControlForWebviewCallback(mNativeProxy, callback);
+    }
+
+    /** @hide */
     public void setFrameCallback(FrameDrawingCallback callback) {
         nSetFrameCallback(mNativeProxy, callback);
     }
@@ -770,6 +823,13 @@ public class HardwareRenderer {
     /**
      * @hide
      */
+    public static void dumpGlobalProfileInfo(FileDescriptor fd, @DumpFlags int dumpFlags) {
+        nDumpGlobalProfileInfo(fd, dumpFlags);
+    }
+
+    /**
+     * @hide
+     */
     public void dumpProfileInfo(FileDescriptor fd, @DumpFlags int dumpFlags) {
         nDumpProfileInfo(mNativeProxy, fd, dumpFlags);
     }
@@ -789,20 +849,53 @@ public class HardwareRenderer {
         nSetContentDrawBounds(mNativeProxy, left, top, right, bottom);
     }
 
-    /** @hide */
-    public void setPictureCaptureCallback(@Nullable PictureCapturedCallback callback) {
-        nSetPictureCaptureCallback(mNativeProxy, callback);
+    /**
+     * Force the new frame to draw, ensuring the UI draw request will attempt a draw this vsync.
+     * @hide
+     */
+    public void forceDrawNextFrame() {
+        nForceDrawNextFrame(mNativeProxy);
     }
 
     /** @hide */
-    public boolean isWideGamut() {
-        return mIsWideGamut;
+    public void setPictureCaptureCallback(@Nullable PictureCapturedCallback callback) {
+        nSetPictureCaptureCallback(mNativeProxy, callback);
     }
 
     /** called by native */
     static void invokePictureCapturedCallback(long picturePtr, PictureCapturedCallback callback) {
         Picture picture = new Picture(picturePtr);
         callback.onPictureCaptured(picture);
+    }
+
+   /**
+     * Interface used to receive callbacks when Webview requests a surface control.
+     *
+     * @hide
+     */
+    public interface PrepareSurfaceControlForWebviewCallback {
+        /**
+         * Invoked when Webview calls to get a surface control.
+         *
+         */
+        void prepare();
+    }
+
+    /**
+     * Interface used to receive callbacks when a transaction needs to be merged.
+     *
+     * @hide
+     */
+    public interface ASurfaceTransactionCallback {
+        /**
+         * Invoked during a frame drawing.
+         *
+         * @param aSurfaceTranactionNativeObj the ASurfaceTransaction native object handle
+         * @param aSurfaceControlNativeObj ASurfaceControl native object handle
+         * @param frame The id of the frame being drawn.
+         */
+        boolean onMergeTransaction(long aSurfaceTranactionNativeObj,
+                                long aSurfaceControlNativeObj, long frame);
     }
 
     /**
@@ -817,6 +910,20 @@ public class HardwareRenderer {
          * @param frame The id of the frame being drawn.
          */
         void onFrameDraw(long frame);
+
+        /**
+         * Invoked during a frame drawing.
+         *
+         * @param syncResult The result of the draw. Should be a value or a combination of values
+         *                   from {@link SyncAndDrawResult}
+         * @param frame The id of the frame being drawn.
+         *
+         * @return A {@link FrameCommitCallback} that will report back if the current vsync draws.
+         */
+        default FrameCommitCallback onFrameDraw(@SyncAndDrawResult int syncResult, long frame) {
+            onFrameDraw(frame);
+            return null;
+        }
     }
 
     /**
@@ -824,13 +931,27 @@ public class HardwareRenderer {
      *
      * @hide
      */
+    public interface FrameCommitCallback {
+        /**
+         * Invoked after a new frame was drawn
+         *
+         * @param didProduceBuffer The draw successfully produced a new buffer.
+         */
+        void onFrameCommit(boolean didProduceBuffer);
+    }
+
+    /**
+     * Interface used to be notified when RenderThread has finished an attempt to draw. This doesn't
+     * mean a new frame has drawn, specifically if there's nothing new to draw, but only that
+     * RenderThread had a chance to draw a frame.
+     *
+     * @hide
+     */
     public interface FrameCompleteCallback {
         /**
-         * Invoked after a frame draw
-         *
-         * @param frameNr The id of the frame that was drawn.
+         * Invoked after a frame draw was attempted.
          */
-        void onFrameComplete(long frameNr);
+        void onFrameComplete();
     }
 
     /**
@@ -862,18 +983,13 @@ public class HardwareRenderer {
         }
     }
 
-    /** @hide */
-    public static void invokeFunctor(long functor, boolean waitForCompletion) {
-        nInvokeFunctor(functor, waitForCompletion);
-    }
-
     /**
-     * b/68769804: For low FPS experiments.
+     * b/68769804, b/66945974: For low FPS experiments.
      *
      * @hide
      */
     public static void setFPSDivisor(int divisor) {
-        nHackySetRTAnimationsEnabled(divisor <= 1);
+        nSetRtAnimationsEnabled(divisor <= 1);
     }
 
     /**
@@ -904,6 +1020,20 @@ public class HardwareRenderer {
      */
     public static void setIsolatedProcess(boolean isIsolated) {
         nSetIsolatedProcess(isIsolated);
+        ProcessInitializer.sInstance.setIsolated(isIsolated);
+    }
+
+    /**
+     * Sends device configuration changes to the render thread, for rendering profiling views.
+     *
+     * @hide
+     */
+    public static void sendDeviceConfigurationForDebugging(Configuration config) {
+        if (config.densityDpi != Configuration.DENSITY_DPI_UNDEFINED
+                && config.densityDpi != sDensityDpi) {
+            sDensityDpi = config.densityDpi;
+            nSetDisplayDensityDpi(config.densityDpi);
+        }
     }
 
     /**
@@ -975,6 +1105,64 @@ public class HardwareRenderer {
         ProcessInitializer.sInstance.setPackageName(packageName);
     }
 
+    /**
+     * Gets a context for process initialization
+     *
+     * TODO: Remove this once there is a static method for retrieving an application's context.
+     *
+     * @hide
+     */
+    public static void setContextForInit(Context context) {
+        ProcessInitializer.sInstance.setContext(context);
+    }
+
+    /**
+     * Returns true if HardwareRender will produce output.
+     *
+     * This value is global to the process and affects all uses of HardwareRenderer,
+     * including
+     * those created by the system such as those used by the View tree when using hardware
+     * accelerated rendering.
+     *
+     * Default is true in all production environments, but may be false in testing-focused
+     * emulators or if {@link #setDrawingEnabled(boolean)} is used.
+     */
+    public static boolean isDrawingEnabled() {
+        return nIsDrawingEnabled();
+    }
+
+    /**
+     * Toggles whether or not HardwareRenderer will produce drawing output globally in the current
+     * process.
+     *
+     * This applies to all HardwareRenderer instances, including those created by the platform such
+     * as those used by the system for hardware accelerated View rendering.
+     *
+     * The capability to disable drawing output is intended for test environments, primarily
+     * headless ones. By setting this to false, tests that launch activities or interact with Views
+     * can be quicker with less RAM usage by skipping the final step of View drawing. All View
+     * lifecycle events will occur as normal, only the final step of rendering on the GPU to the
+     * display will be skipped.
+     *
+     * This can be toggled on and off at will, so screenshot tests can also run in this same
+     * environment by toggling drawing back on and forcing a frame to be drawn such as by calling
+     * view#invalidate(). Once drawn and the screenshot captured, this can then be turned back off.
+     */
+    // TODO(b/194195794): Add link to androidx's Screenshot library for help with this
+    public static void setDrawingEnabled(boolean drawingEnabled) {
+        nSetDrawingEnabled(drawingEnabled);
+    }
+
+    /**
+     * Disable RenderThread animations that schedule draws directly from RenderThread. This is used
+     * when we don't want to de-schedule draw requests that come from the UI thread.
+     *
+     * @hide
+     */
+    public static void setRtAnimationsEnabled(boolean enabled) {
+        nSetRtAnimationsEnabled(enabled);
+    }
+
     private static final class DestroyContextRunnable implements Runnable {
         private final long mNativeInstance;
 
@@ -991,8 +1179,35 @@ public class HardwareRenderer {
     private static class ProcessInitializer {
         static ProcessInitializer sInstance = new ProcessInitializer();
 
-        private boolean mInitialized = false;
+        // Magic values from android/data_space.h
+        private static final int INTERNAL_DATASPACE_SRGB = 142671872;
+        private static final int INTERNAL_DATASPACE_DISPLAY_P3 = 143261696;
+        private static final int INTERNAL_DATASPACE_SCRGB = 411107328;
 
+        private enum Dataspace {
+            DISPLAY_P3(ColorSpace.Named.DISPLAY_P3, INTERNAL_DATASPACE_DISPLAY_P3),
+            SCRGB(ColorSpace.Named.EXTENDED_SRGB, INTERNAL_DATASPACE_SCRGB),
+            SRGB(ColorSpace.Named.SRGB, INTERNAL_DATASPACE_SRGB);
+
+            private final ColorSpace.Named mColorSpace;
+            private final int mNativeDataspace;
+            Dataspace(ColorSpace.Named colorSpace, int nativeDataspace) {
+                this.mColorSpace = colorSpace;
+                this.mNativeDataspace = nativeDataspace;
+            }
+
+            static Optional<Dataspace> find(ColorSpace colorSpace) {
+                return Stream.of(Dataspace.values())
+                        .filter(d -> ColorSpace.get(d.mColorSpace).equals(colorSpace))
+                        .findFirst();
+            }
+        }
+
+        private boolean mInitialized = false;
+        private boolean mDisplayInitialized = false;
+
+        private boolean mIsolated = false;
+        private Context mContext;
         private String mPackageName;
         private IGraphicsStats mGraphicsStatsService;
         private IGraphicsStatsCallback mGraphicsStatsCallback = new IGraphicsStatsCallback.Stub() {
@@ -1008,6 +1223,16 @@ public class HardwareRenderer {
         synchronized void setPackageName(String name) {
             if (mInitialized) return;
             mPackageName = name;
+        }
+
+        synchronized void setIsolated(boolean isolated) {
+            if (mInitialized) return;
+            mIsolated = isolated;
+        }
+
+        synchronized void setContext(Context context) {
+            if (mInitialized) return;
+            mContext = context;
         }
 
         synchronized void init(long renderProxy) {
@@ -1038,6 +1263,54 @@ public class HardwareRenderer {
             } catch (Throwable t) {
                 Log.w(LOG_TAG, "Could not acquire gfx stats buffer", t);
             }
+        }
+
+        synchronized void initUsingContext() {
+            if (mContext == null) return;
+
+            initDisplayInfo();
+
+            nSetIsHighEndGfx(ActivityManager.isHighEndGfx());
+            // Defensively clear out the context in case we were passed a context that can leak
+            // if we live longer than it, e.g. an activity context.
+            mContext = null;
+        }
+
+        private void initDisplayInfo() {
+            if (mDisplayInitialized) return;
+            if (mIsolated) {
+                mDisplayInitialized = true;
+                return;
+            }
+
+            DisplayManager dm = (DisplayManager) mContext.getSystemService(Context.DISPLAY_SERVICE);
+            if (dm == null) {
+                Log.d(LOG_TAG, "Failed to find DisplayManager for display-based configuration");
+                return;
+            }
+
+            Display display = dm.getDisplay(Display.DEFAULT_DISPLAY);
+            if (display == null) {
+                Log.d(LOG_TAG, "Failed to find default display for display-based configuration");
+                return;
+            }
+
+            Dataspace wideColorDataspace =
+                    Optional.ofNullable(display.getPreferredWideGamutColorSpace())
+                            .flatMap(Dataspace::find)
+                            // Default to SRGB if the display doesn't support wide color
+                            .orElse(Dataspace.SRGB);
+
+            // Grab the physical screen dimensions from the active display mode
+            // Strictly speaking the screen resolution may not always be constant - it is for
+            // sizing the font cache for the underlying rendering thread. Since it's a
+            // heuristic we don't need to be always 100% correct.
+            Mode activeMode = display.getMode();
+            nInitDisplayInfo(activeMode.getPhysicalWidth(), activeMode.getPhysicalHeight(),
+                    display.getRefreshRate(), wideColorDataspace.mNativeDataspace,
+                    display.getAppVsyncOffsetNanos(), display.getPresentationDeadlineNanos());
+
+            mDisplayInitialized = true;
         }
 
         private void rotateBuffer() {
@@ -1074,6 +1347,11 @@ public class HardwareRenderer {
      */
     public static native void preload();
 
+    /**
+     * @hide
+     */
+    protected static native boolean isWebViewOverlaysEnabled();
+
     /** @hide */
     protected static native void setupShadersDiskCache(String cacheFile, String skiaCacheFile);
 
@@ -1085,8 +1363,7 @@ public class HardwareRenderer {
 
     private static native long nCreateRootRenderNode();
 
-    private static native long nCreateProxy(boolean translucent, boolean isWideGamut,
-            long rootRenderNode);
+    private static native long nCreateProxy(boolean translucent, long rootRenderNode);
 
     private static native void nDeleteProxy(long nativeProxy);
 
@@ -1095,6 +1372,8 @@ public class HardwareRenderer {
     private static native void nSetName(long nativeProxy, String name);
 
     private static native void nSetSurface(long nativeProxy, Surface window, boolean discardBuffer);
+
+    private static native void nSetSurfaceControl(long nativeProxy, long nativeSurfaceControl);
 
     private static native boolean nPause(long nativeProxy);
 
@@ -1108,7 +1387,11 @@ public class HardwareRenderer {
 
     private static native void nSetOpaque(long nativeProxy, boolean opaque);
 
-    private static native void nSetWideGamut(long nativeProxy, boolean wideGamut);
+    private static native void nSetColorMode(long nativeProxy, int colorMode);
+
+    private static native void nSetSdrWhitePoint(long nativeProxy, float whitePoint);
+
+    private static native void nSetIsHighEndGfx(boolean isHighEndGfx);
 
     private static native int nSyncAndDrawFrame(long nativeProxy, long[] frameInfo, int size);
 
@@ -1118,8 +1401,6 @@ public class HardwareRenderer {
             long animatingNode);
 
     private static native void nRegisterVectorDrawableAnimator(long rootRenderNode, long animator);
-
-    private static native void nInvokeFunctor(long functor, boolean waitForCompletion);
 
     private static native long nCreateTextureLayer(long nativeProxy);
 
@@ -1148,6 +1429,8 @@ public class HardwareRenderer {
     private static native void nDumpProfileInfo(long nativeProxy, FileDescriptor fd,
             @DumpFlags int dumpFlags);
 
+    private static native void nDumpGlobalProfileInfo(FileDescriptor fd, @DumpFlags int dumpFlags);
+
     private static native void nAddRenderNode(long nativeProxy, long rootRenderNode,
             boolean placeFront);
 
@@ -1158,10 +1441,21 @@ public class HardwareRenderer {
     private static native void nSetContentDrawBounds(long nativeProxy, int left,
             int top, int right, int bottom);
 
+    private static native void nForceDrawNextFrame(long nativeProxy);
+
     private static native void nSetPictureCaptureCallback(long nativeProxy,
             PictureCapturedCallback callback);
 
+    private static native void nSetASurfaceTransactionCallback(long nativeProxy,
+            ASurfaceTransactionCallback callback);
+
+    private static native void nSetPrepareSurfaceControlForWebviewCallback(long nativeProxy,
+            PrepareSurfaceControlForWebviewCallback callback);
+
     private static native void nSetFrameCallback(long nativeProxy, FrameDrawingCallback callback);
+
+    private static native void nSetFrameCommitCallback(long nativeProxy,
+            FrameCommitCallback callback);
 
     private static native void nSetFrameCompleteCallback(long nativeProxy,
             FrameCompleteCallback callback);
@@ -1177,9 +1471,6 @@ public class HardwareRenderer {
 
     private static native void nSetHighContrastText(boolean enabled);
 
-    // For temporary experimentation b/66945974
-    private static native void nHackySetRTAnimationsEnabled(boolean enabled);
-
     private static native void nSetDebuggingEnabled(boolean enabled);
 
     private static native void nSetIsolatedProcess(boolean enabled);
@@ -1189,4 +1480,15 @@ public class HardwareRenderer {
     private static native void nAllocateBuffers(long nativeProxy);
 
     private static native void nSetForceDark(long nativeProxy, boolean enabled);
+
+    private static native void nSetDisplayDensityDpi(int densityDpi);
+
+    private static native void nInitDisplayInfo(int width, int height, float refreshRate,
+            int wideColorDataspace, long appVsyncOffsetNanos, long presentationDeadlineNanos);
+
+    private static native void nSetDrawingEnabled(boolean drawingEnabled);
+
+    private static native boolean nIsDrawingEnabled();
+
+    private static native void nSetRtAnimationsEnabled(boolean rtAnimationsEnabled);
 }

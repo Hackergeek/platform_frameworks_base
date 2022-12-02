@@ -105,6 +105,13 @@ public final class CursorAnchorInfo implements Parcelable {
     private final SparseRectFArray mCharacterBoundsArray;
 
     /**
+     * Container of rectangular position of Editor in the local coordinates that will be transformed
+     * with the transformation matrix when rendered on the screen.
+     * @see {@link EditorBoundsInfo}.
+     */
+    private final EditorBoundsInfo mEditorBoundsInfo;
+
+    /**
      * Transformation matrix that is applied to any positional information of this class to
      * transform local coordinates into screen coordinates.
      */
@@ -140,7 +147,8 @@ public final class CursorAnchorInfo implements Parcelable {
         mInsertionMarkerTop = source.readFloat();
         mInsertionMarkerBaseline = source.readFloat();
         mInsertionMarkerBottom = source.readFloat();
-        mCharacterBoundsArray = source.readParcelable(SparseRectFArray.class.getClassLoader());
+        mCharacterBoundsArray = source.readParcelable(SparseRectFArray.class.getClassLoader(), android.view.inputmethod.SparseRectFArray.class);
+        mEditorBoundsInfo = source.readTypedObject(EditorBoundsInfo.CREATOR);
         mMatrixValues = source.createFloatArray();
     }
 
@@ -163,6 +171,7 @@ public final class CursorAnchorInfo implements Parcelable {
         dest.writeFloat(mInsertionMarkerBaseline);
         dest.writeFloat(mInsertionMarkerBottom);
         dest.writeParcelable(mCharacterBoundsArray, flags);
+        dest.writeTypedObject(mEditorBoundsInfo, flags);
         dest.writeFloatArray(mMatrixValues);
     }
 
@@ -183,7 +192,7 @@ public final class CursorAnchorInfo implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object obj){
+    public boolean equals(@Nullable Object obj){
         if (obj == null) {
             return false;
         }
@@ -213,6 +222,10 @@ public final class CursorAnchorInfo implements Parcelable {
         }
 
         if (!Objects.equals(mCharacterBoundsArray, that.mCharacterBoundsArray)) {
+            return false;
+        }
+
+        if (!Objects.equals(mEditorBoundsInfo, that.mEditorBoundsInfo)) {
             return false;
         }
 
@@ -248,6 +261,7 @@ public final class CursorAnchorInfo implements Parcelable {
                 + " mInsertionMarkerBaseline=" + mInsertionMarkerBaseline
                 + " mInsertionMarkerBottom=" + mInsertionMarkerBottom
                 + " mCharacterBoundsArray=" + Objects.toString(mCharacterBoundsArray)
+                + " mEditorBoundsInfo=" + mEditorBoundsInfo
                 + " mMatrix=" + Arrays.toString(mMatrixValues)
                 + "}";
     }
@@ -266,6 +280,7 @@ public final class CursorAnchorInfo implements Parcelable {
         private float mInsertionMarkerBottom = Float.NaN;
         private int mInsertionMarkerFlags = 0;
         private SparseRectFArrayBuilder mCharacterBoundsArrayBuilder = null;
+        private EditorBoundsInfo mEditorBoundsInfo = null;
         private float[] mMatrixValues = null;
         private boolean mMatrixInitialized = false;
 
@@ -356,6 +371,17 @@ public final class CursorAnchorInfo implements Parcelable {
         }
 
         /**
+         * Sets the current editor related bounds.
+         *
+         * @param bounds {@link EditorBoundsInfo} in local coordinates.
+         */
+        @NonNull
+        public Builder setEditorBoundsInfo(@Nullable EditorBoundsInfo bounds) {
+            mEditorBoundsInfo = bounds;
+            return this;
+        }
+
+        /**
          * Sets the matrix that transforms local coordinates into screen coordinates.
          * @param matrix transformation matrix from local coordinates into screen coordinates. null
          * is interpreted as an identity matrix.
@@ -410,6 +436,7 @@ public final class CursorAnchorInfo implements Parcelable {
             if (mCharacterBoundsArrayBuilder != null) {
                 mCharacterBoundsArrayBuilder.reset();
             }
+            mEditorBoundsInfo = null;
         }
     }
 
@@ -429,14 +456,16 @@ public final class CursorAnchorInfo implements Parcelable {
                 builder.mComposingTextStart, builder.mComposingText, builder.mInsertionMarkerFlags,
                 builder.mInsertionMarkerHorizontal, builder.mInsertionMarkerTop,
                 builder.mInsertionMarkerBaseline, builder.mInsertionMarkerBottom,
-                characterBoundsArray, matrixValues);
+                characterBoundsArray, builder.mEditorBoundsInfo, matrixValues);
     }
 
     private CursorAnchorInfo(int selectionStart, int selectionEnd, int composingTextStart,
             @Nullable CharSequence composingText, int insertionMarkerFlags,
             float insertionMarkerHorizontal, float insertionMarkerTop,
             float insertionMarkerBaseline, float insertionMarkerBottom,
-            @Nullable  SparseRectFArray characterBoundsArray, @NonNull float[] matrixValues) {
+            @Nullable SparseRectFArray characterBoundsArray,
+            @Nullable EditorBoundsInfo editorBoundsInfo,
+            @NonNull float[] matrixValues) {
         mSelectionStart = selectionStart;
         mSelectionEnd = selectionEnd;
         mComposingTextStart = composingTextStart;
@@ -447,12 +476,13 @@ public final class CursorAnchorInfo implements Parcelable {
         mInsertionMarkerBaseline = insertionMarkerBaseline;
         mInsertionMarkerBottom = insertionMarkerBottom;
         mCharacterBoundsArray = characterBoundsArray;
+        mEditorBoundsInfo = editorBoundsInfo;
         mMatrixValues = matrixValues;
 
         // To keep hash function simple, we only use some complex objects for hash.
         int hashCode = Objects.hashCode(mComposingText);
         hashCode *= 31;
-        hashCode += Arrays.hashCode(matrixValues);
+        hashCode += Arrays.hashCode(mMatrixValues);
         mHashCode = hashCode;
     }
 
@@ -460,7 +490,7 @@ public final class CursorAnchorInfo implements Parcelable {
      * Creates a new instance of {@link CursorAnchorInfo} by applying {@code parentMatrix} to
      * the coordinate transformation matrix.
      *
-     * @param original {@link CursorAnchorInfo} to be cloned from.
+     * @param original     {@link CursorAnchorInfo} to be cloned from.
      * @param parentMatrix {@link Matrix} to be applied to {@code original.getMatrix()}
      * @return A new instance of {@link CursorAnchorInfo} whose {@link CursorAnchorInfo#getMatrix()}
      *         returns {@code parentMatrix * original.getMatrix()}.
@@ -473,7 +503,7 @@ public final class CursorAnchorInfo implements Parcelable {
                 original.mInsertionMarkerFlags, original.mInsertionMarkerHorizontal,
                 original.mInsertionMarkerTop, original.mInsertionMarkerBaseline,
                 original.mInsertionMarkerBottom, original.mCharacterBoundsArray,
-                computeMatrixValues(parentMatrix, original));
+                original.mEditorBoundsInfo, computeMatrixValues(parentMatrix, original));
     }
 
     /**
@@ -481,7 +511,7 @@ public final class CursorAnchorInfo implements Parcelable {
      * {@code parentMatrix * info.getMatrix()}.
      *
      * @param parentMatrix {@link Matrix} to be multiplied.
-     * @param info {@link CursorAnchorInfo} to provide {@link Matrix} to be multiplied.
+     * @param info         {@link CursorAnchorInfo} to provide {@link Matrix} to be multiplied.
      * @return {@code parentMatrix * info.getMatrix()}.
      */
     private static float[] computeMatrixValues(@NonNull Matrix parentMatrix,
@@ -604,6 +634,16 @@ public final class CursorAnchorInfo implements Parcelable {
             return 0;
         }
         return mCharacterBoundsArray.getFlags(index, 0);
+    }
+
+    /**
+     * Returns {@link EditorBoundsInfo} for the current editor, or {@code null} if IME is not
+     * subscribed with {@link InputConnection#CURSOR_UPDATE_FILTER_EDITOR_BOUNDS}
+     * or {@link InputConnection#CURSOR_UPDATE_MONITOR}.
+     */
+    @Nullable
+    public EditorBoundsInfo getEditorBoundsInfo() {
+        return mEditorBoundsInfo;
     }
 
     /**

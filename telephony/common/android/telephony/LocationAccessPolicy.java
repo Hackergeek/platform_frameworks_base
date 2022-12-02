@@ -86,8 +86,9 @@ public final class LocationAccessPolicy {
             private String mCallingFeatureId;
             private int mCallingUid;
             private int mCallingPid;
-            private int mMinSdkVersionForCoarse = Integer.MAX_VALUE;
-            private int mMinSdkVersionForFine = Integer.MAX_VALUE;
+            private int mMinSdkVersionForCoarse = -1;
+            private int mMinSdkVersionForFine = -1;
+            private int mMinSdkVersionForEnforcement = -1;
             private boolean mLogAsInfo = false;
             private String mMethod;
 
@@ -125,7 +126,14 @@ public final class LocationAccessPolicy {
 
             /**
              * Apps that target at least this sdk version will be checked for coarse location
-             * permission. Defaults to INT_MAX (which means don't check)
+             * permission. This method MUST be called before calling {@link #build()}. Otherwise, an
+             * {@link IllegalArgumentException} will be thrown.
+             *
+             * Additionally, if both the argument to this method and
+             * {@link #setMinSdkVersionForFine} are greater than {@link Build.VERSION_CODES#BASE},
+             * you must call {@link #setMinSdkVersionForEnforcement} with the min of the two to
+             * affirm that you do not want any location checks below a certain SDK version.
+             * Otherwise, {@link #build} will throw an {@link IllegalArgumentException}.
              */
             public Builder setMinSdkVersionForCoarse(
                     int minSdkVersionForCoarse) {
@@ -135,11 +143,29 @@ public final class LocationAccessPolicy {
 
             /**
              * Apps that target at least this sdk version will be checked for fine location
-             * permission. Defaults to INT_MAX (which means don't check)
+             * permission.  This method MUST be called before calling {@link #build()}.
+             * Otherwise, an {@link IllegalArgumentException} will be thrown.
+             *
+             * Additionally, if both the argument to this method and
+             * {@link #setMinSdkVersionForCoarse} are greater than {@link Build.VERSION_CODES#BASE},
+             * you must call {@link #setMinSdkVersionForEnforcement} with the min of the two to
+             * affirm that you do not want any location checks below a certain SDK version.
+             * Otherwise, {@link #build} will throw an {@link IllegalArgumentException}.
              */
             public Builder setMinSdkVersionForFine(
                     int minSdkVersionForFine) {
                 mMinSdkVersionForFine = minSdkVersionForFine;
+                return this;
+            }
+
+            /**
+             * If both the argument to {@link #setMinSdkVersionForFine} and
+             * {@link #setMinSdkVersionForCoarse} are greater than {@link Build.VERSION_CODES#BASE},
+             * this method must be called with the min of the two to
+             * affirm that you do not want any location checks below a certain SDK version.
+             */
+            public Builder setMinSdkVersionForEnforcement(int minSdkVersionForEnforcement) {
+                mMinSdkVersionForEnforcement = minSdkVersionForEnforcement;
                 return this;
             }
 
@@ -161,6 +187,26 @@ public final class LocationAccessPolicy {
 
             /** build LocationPermissionQuery */
             public LocationPermissionQuery build() {
+                if (mMinSdkVersionForCoarse < 0 || mMinSdkVersionForFine < 0) {
+                    throw new IllegalArgumentException("Must specify min sdk versions for"
+                            + " enforcement for both coarse and fine permissions");
+                }
+                if (mMinSdkVersionForFine > Build.VERSION_CODES.BASE
+                        && mMinSdkVersionForCoarse > Build.VERSION_CODES.BASE) {
+                    if (mMinSdkVersionForEnforcement != Math.min(
+                            mMinSdkVersionForCoarse, mMinSdkVersionForFine)) {
+                        throw new IllegalArgumentException("setMinSdkVersionForEnforcement must be"
+                                + " called.");
+                    }
+                }
+
+                if (mMinSdkVersionForFine < mMinSdkVersionForCoarse) {
+                    throw new IllegalArgumentException("Since fine location permission includes"
+                            + " access to coarse location, the min sdk level for enforcement of"
+                            + " the fine location permission must not be less than the min sdk"
+                            + " level for enforcement of the coarse location permission.");
+                }
+
                 return new LocationPermissionQuery(mCallingPackage, mCallingFeatureId,
                         mCallingUid, mCallingPid, mMinSdkVersionForCoarse, mMinSdkVersionForFine,
                         mLogAsInfo, mMethod);
@@ -270,9 +316,11 @@ public final class LocationAccessPolicy {
             return LocationPermissionResult.ALLOWED;
         }
 
-        // Check the system-wide requirements. If the location main switch is off or
-        // the app's profile isn't in foreground, return a soft denial.
-        if (!checkSystemLocationAccess(context, query.callingUid, query.callingPid)) {
+        // Check the system-wide requirements. If the location main switch is off and the caller is
+        // not in the allowlist of apps that always have loation access or the app's profile
+        // isn't in the foreground, return a soft denial.
+        if (!checkSystemLocationAccess(context, query.callingUid, query.callingPid,
+                query.callingPackage)) {
             return LocationPermissionResult.DENIED_SOFT;
         }
 
@@ -298,15 +346,16 @@ public final class LocationAccessPolicy {
         return LocationPermissionResult.ALLOWED;
     }
 
-
     private static boolean checkManifestPermission(Context context, int pid, int uid,
             String permissionToCheck) {
         return context.checkPermission(permissionToCheck, pid, uid)
                 == PackageManager.PERMISSION_GRANTED;
     }
 
-    private static boolean checkSystemLocationAccess(@NonNull Context context, int uid, int pid) {
-        if (!isLocationModeEnabled(context, UserHandle.getUserHandleForUid(uid).getIdentifier())) {
+    private static boolean checkSystemLocationAccess(@NonNull Context context, int uid, int pid,
+            @NonNull String callingPackage) {
+        if (!isLocationModeEnabled(context, UserHandle.getUserHandleForUid(uid).getIdentifier())
+                && !isLocationBypassAllowed(context, callingPackage)) {
             if (DBG) Log.w(TAG, "Location disabled, failed, (" + uid + ")");
             return false;
         }
@@ -315,13 +364,34 @@ public final class LocationAccessPolicy {
         return isCurrentProfile(context, uid) || checkInteractAcrossUsersFull(context, pid, uid);
     }
 
-    private static boolean isLocationModeEnabled(@NonNull Context context, @UserIdInt int userId) {
+    /**
+     * @return Whether location is enabled for the given user.
+     */
+    public static boolean isLocationModeEnabled(@NonNull Context context, @UserIdInt int userId) {
         LocationManager locationManager = context.getSystemService(LocationManager.class);
         if (locationManager == null) {
             Log.w(TAG, "Couldn't get location manager, denying location access");
             return false;
         }
         return locationManager.isLocationEnabledForUser(UserHandle.of(userId));
+    }
+
+    private static boolean isLocationBypassAllowed(@NonNull Context context,
+            @NonNull String callingPackage) {
+        for (String bypassPackage : getLocationBypassPackages(context)) {
+            if (callingPackage.equals(bypassPackage)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @return An array of packages that are always allowed to access location.
+     */
+    public static @NonNull String[] getLocationBypassPackages(@NonNull Context context) {
+        return context.getResources().getStringArray(
+                com.android.internal.R.array.config_serviceStateLocationAllowedPackages);
     }
 
     private static boolean checkInteractAcrossUsersFull(
@@ -331,7 +401,7 @@ public final class LocationAccessPolicy {
     }
 
     private static boolean isCurrentProfile(@NonNull Context context, int uid) {
-        long token = Binder.clearCallingIdentity();
+        final long token = Binder.clearCallingIdentity();
         try {
             if (UserHandle.getUserHandleForUid(uid).getIdentifier()
                     == ActivityManager.getCurrentUser()) {

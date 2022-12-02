@@ -18,6 +18,7 @@
 #define AAPT_RESOURCE_PARSER_H
 
 #include <memory>
+#include <optional>
 
 #include "android-base/macros.h"
 #include "androidfw/ConfigDescription.h"
@@ -27,7 +28,6 @@
 #include "ResourceTable.h"
 #include "ResourceValues.h"
 #include "StringPool.h"
-#include "util/Maybe.h"
 #include "xml/XmlPullParser.h"
 
 namespace aapt {
@@ -54,7 +54,15 @@ struct ResourceParserOptions {
 
   // If visibility was forced, we need to use it when creating a new resource and also error if we
   // try to parse the <public>, <public-group>, <java-symbol> or <symbol> tags.
-  Maybe<Visibility::Level> visibility;
+  std::optional<Visibility::Level> visibility;
+};
+
+struct FlattenedXmlSubTree {
+  std::string raw_value;
+  StyleString style_string;
+  std::vector<UntranslatableSection> untranslatable_sections;
+  xml::IPackageDeclStack* namespace_resolver;
+  Source source;
 };
 
 /*
@@ -67,8 +75,15 @@ class ResourceParser {
                  const ResourceParserOptions& options = {});
   bool Parse(xml::XmlPullParser* parser);
 
+  static std::unique_ptr<Item> ParseXml(const FlattenedXmlSubTree& xmlsub_tree, uint32_t type_mask,
+                                        bool allow_raw_value, ResourceTable& table,
+                                        const android::ConfigDescription& config,
+                                        IDiagnostics& diag);
+
  private:
   DISALLOW_COPY_AND_ASSIGN(ResourceParser);
+
+  std::optional<FlattenedXmlSubTree> CreateFlattenSubTree(xml::XmlPullParser* parser);
 
   // Parses the XML subtree as a StyleString (flattened XML representation for strings with
   // formatting). If parsing fails, false is returned and the out parameters are left in an
@@ -96,19 +111,20 @@ class ResourceParser {
 
   bool ParseItem(xml::XmlPullParser* parser, ParsedResource* out_resource, uint32_t format);
   bool ParseString(xml::XmlPullParser* parser, ParsedResource* out_resource);
-
+  bool ParseMacro(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParsePublic(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParsePublicGroup(xml::XmlPullParser* parser, ParsedResource* out_resource);
+  bool ParseStagingPublicGroup(xml::XmlPullParser* parser, ParsedResource* out_resource);
+  bool ParseStagingPublicGroupFinal(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParseSymbolImpl(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParseSymbol(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParseOverlayable(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParseAddResource(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParseAttr(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParseAttrImpl(xml::XmlPullParser* parser, ParsedResource* out_resource, bool weak);
-  Maybe<Attribute::Symbol> ParseEnumOrFlagItem(xml::XmlPullParser* parser,
-                                               const android::StringPiece& tag);
-  bool ParseStyle(const ResourceType type, xml::XmlPullParser* parser,
-                  ParsedResource* out_resource);
+  std::optional<Attribute::Symbol> ParseEnumOrFlagItem(xml::XmlPullParser* parser,
+                                                       const android::StringPiece& tag);
+  bool ParseStyle(ResourceType type, xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParseStyleItem(xml::XmlPullParser* parser, Style* style);
   bool ParseDeclareStyleable(xml::XmlPullParser* parser, ParsedResource* out_resource);
   bool ParseArray(xml::XmlPullParser* parser, ParsedResource* out_resource);

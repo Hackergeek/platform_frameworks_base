@@ -14,35 +14,37 @@
 
 package com.android.systemui.statusbar.policy;
 
-import android.content.Context;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityManager.AccessibilityServicesStateChangeListener;
 
+import androidx.annotation.NonNull;
+
+import com.android.systemui.dagger.SysUISingleton;
+
 import javax.inject.Inject;
-import javax.inject.Singleton;
 
 /**
  * For mocking because AccessibilityManager is final for some reason...
  */
-@Singleton
+@SysUISingleton
 public class AccessibilityManagerWrapper implements
         CallbackController<AccessibilityServicesStateChangeListener> {
 
     private final AccessibilityManager mAccessibilityManager;
 
     @Inject
-    public AccessibilityManagerWrapper(Context context) {
-        mAccessibilityManager = context.getSystemService(AccessibilityManager.class);
+    public AccessibilityManagerWrapper(AccessibilityManager accessibilityManager) {
+        mAccessibilityManager = accessibilityManager;
     }
 
     @Override
-    public void addCallback(AccessibilityServicesStateChangeListener listener) {
-        mAccessibilityManager.addAccessibilityServicesStateChangeListener(listener, null);
+    public void addCallback(@NonNull AccessibilityServicesStateChangeListener listener) {
+        mAccessibilityManager.addAccessibilityServicesStateChangeListener(listener);
     }
 
     @Override
-    public void removeCallback(AccessibilityServicesStateChangeListener listener) {
+    public void removeCallback(@NonNull AccessibilityServicesStateChangeListener listener) {
         mAccessibilityManager.removeAccessibilityServicesStateChangeListener(listener);
     }
 

@@ -24,6 +24,7 @@ import static org.mockito.Mockito.when;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothProfile;
 import android.content.Context;
+import android.graphics.drawable.BitmapDrawable;
 
 import com.android.settingslib.bluetooth.CachedBluetoothDevice;
 
@@ -51,6 +52,7 @@ public class BluetoothMediaDeviceTest {
 
         when(mDevice.isActiveDevice(BluetoothProfile.A2DP)).thenReturn(true);
         when(mDevice.isActiveDevice(BluetoothProfile.HEARING_AID)).thenReturn(true);
+        when(mDevice.isActiveDevice(BluetoothProfile.LE_AUDIO)).thenReturn(true);
 
         mBluetoothMediaDevice = new BluetoothMediaDevice(mContext, mDevice, null, null, null);
     }
@@ -95,5 +97,18 @@ public class BluetoothMediaDeviceTest {
                 .thenReturn(bytes);
 
         assertThat(mBluetoothMediaDevice.isFastPairDevice()).isFalse();
+    }
+
+    @Test
+    public void getIcon_isNotFastPairDevice_drawableTypeIsNotBitmapDrawable() {
+        final BluetoothDevice bluetoothDevice = mock(BluetoothDevice.class);
+        when(mDevice.getDevice()).thenReturn(bluetoothDevice);
+
+        final String value = "False";
+        final byte[] bytes = value.getBytes();
+        when(bluetoothDevice.getMetadata(BluetoothDevice.METADATA_IS_UNTETHERED_HEADSET))
+                .thenReturn(bytes);
+
+        assertThat(mBluetoothMediaDevice.getIcon() instanceof BitmapDrawable).isFalse();
     }
 }

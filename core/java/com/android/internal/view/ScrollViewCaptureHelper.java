@@ -19,9 +19,12 @@ package com.android.internal.view;
 import android.annotation.NonNull;
 import android.graphics.Point;
 import android.graphics.Rect;
+import android.os.CancellationSignal;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+
+import java.util.function.Consumer;
 
 /**
  * ScrollCapture for ScrollView and <i>ScrollView-like</i> ViewGroups.
@@ -35,13 +38,19 @@ import android.view.ViewParent;
  * <li>correctly implements {@link ViewParent#requestChildRectangleOnScreen(View,
  * Rect, boolean)}
  * </ul>
+ *
+ * @see ScrollCaptureViewSupport
  */
 public class ScrollViewCaptureHelper implements ScrollCaptureViewHelper<ViewGroup> {
     private int mStartScrollY;
     private boolean mScrollBarEnabled;
     private int mOverScrollMode;
 
-    /** @see ScrollCaptureViewHelper#onPrepareForStart(View, Rect) */
+    public boolean onAcceptSession(@NonNull ViewGroup view) {
+        return view.isVisibleToUser()
+                && (view.canScrollVertically(UP) || view.canScrollVertically(DOWN));
+    }
+
     public void onPrepareForStart(@NonNull ViewGroup view, Rect scrollBounds) {
         mStartScrollY = view.getScrollY();
         mOverScrollMode = view.getOverScrollMode();
@@ -54,12 +63,8 @@ public class ScrollViewCaptureHelper implements ScrollCaptureViewHelper<ViewGrou
         }
     }
 
-    /** @see ScrollCaptureViewHelper#onScrollRequested(View, Rect, Rect) */
-    public Rect onScrollRequested(@NonNull ViewGroup view, Rect scrollBounds, Rect requestRect) {
-        final View contentView = view.getChildAt(0); // returns null, does not throw IOOBE
-        if (contentView == null) {
-            return null;
-        }
+    public void onScrollRequested(@NonNull ViewGroup view, Rect scrollBounds,
+            Rect requestRect, CancellationSignal signal, Consumer<ScrollResult> resultConsumer) {
         /*
                +---------+ <----+ Content [25,25 - 275,1025] (w=250,h=1000)
                |         |
@@ -95,6 +100,18 @@ public class ScrollViewCaptureHelper implements ScrollCaptureViewHelper<ViewGrou
         // (y-100) (scrollY - mStartScrollY)
         int scrollDelta = view.getScrollY() - mStartScrollY;
 
+        final ScrollResult result = new ScrollResult();
+        result.requestedArea = new Rect(requestRect);
+        result.scrollDelta = scrollDelta;
+        result.availableArea = new Rect();
+
+        final View contentView = view.getChildAt(0); // returns null, does not throw IOOBE
+        if (contentView == null) {
+            // No child view? Cannot continue.
+            resultConsumer.accept(result);
+            return;
+        }
+
         //  1) Translate request rect to make it relative to container view
         //
         //  Container View [0,0 - 300,300] (scrollY=200)
@@ -117,44 +134,54 @@ public class ScrollViewCaptureHelper implements ScrollCaptureViewHelper<ViewGrou
                 view.getScrollX() - contentView.getLeft(),
                 view.getScrollY() - contentView.getTop());
 
+        Rect input = new Rect(requestedContentBounds);
 
+        // Expand input rect to get the requested rect to be in the center
+        int remainingHeight = view.getHeight() - view.getPaddingTop()
+                - view.getPaddingBottom() - input.height();
+        if (remainingHeight > 0) {
+            input.inset(0, -remainingHeight / 2);
+        }
 
         // requestRect is now local to contentView as requestedContentBounds
         // contentView (and each parent in turn if possible) will be scrolled
         // (if necessary) to make all of requestedContent visible, (if possible!)
-        contentView.requestRectangleOnScreen(new Rect(requestedContentBounds), true);
+        contentView.requestRectangleOnScreen(input, true);
 
         // update new offset between starting and current scroll position
         scrollDelta = view.getScrollY() - mStartScrollY;
+        result.scrollDelta = scrollDelta;
 
-
-        // TODO: adjust to avoid occlusions/minimize scroll changes
+        // TODO: crop capture area to avoid occlusions/minimize scroll changes
 
         Point offset = new Point();
-        final Rect capturedRect = new Rect(requestedContentBounds); // empty
-        if (!view.getChildVisibleRect(contentView, capturedRect, offset)) {
-            capturedRect.setEmpty();
-            return capturedRect;
+        final Rect available = new Rect(requestedContentBounds);
+        if (!view.getChildVisibleRect(contentView, available, offset)) {
+            available.setEmpty();
+            result.availableArea = available;
+            resultConsumer.accept(result);
+            return;
         }
         // Transform back from global to content-view local
-        capturedRect.offset(-offset.x, -offset.y);
+        available.offset(-offset.x, -offset.y);
 
         // Then back to container view
-        capturedRect.offset(
+        available.offset(
                 contentView.getLeft() - view.getScrollX(),
                 contentView.getTop() - view.getScrollY());
 
 
         // And back to relative to scrollBounds
-        capturedRect.offset(-scrollBounds.left, -scrollBounds.top);
+        available.offset(-scrollBounds.left, -scrollBounds.top);
 
-        // Apply scrollDelta again to return to make capturedRect relative to scrollBounds at
+        // Apply scrollDelta again to return to make `available` relative to `scrollBounds` at
         // the scroll position at start of capture.
-        capturedRect.offset(0, scrollDelta);
-        return capturedRect;
+        available.offset(0, scrollDelta);
+
+        result.availableArea = new Rect(available);
+        resultConsumer.accept(result);
     }
 
-    /** @see ScrollCaptureViewHelper#onPrepareForEnd(View)  */
     public void onPrepareForEnd(@NonNull ViewGroup view) {
         view.scrollTo(0, mStartScrollY);
         if (mOverScrollMode != View.OVER_SCROLL_NEVER) {

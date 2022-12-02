@@ -20,6 +20,7 @@ import android.os.IVoldTaskListener;
 import android.os.PersistableBundle;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.SystemProperties;
 import android.os.storage.DiskInfo;
 import android.os.storage.IStorageManager;
 import android.os.storage.StorageManager;
@@ -30,6 +31,8 @@ import java.util.concurrent.CompletableFuture;
 
 public final class Sm {
     private static final String TAG = "Sm";
+    private static final String ANDROID_VOLD_APP_DATA_ISOLATION_ENABLED_PROPERTY =
+            "persist.sys.vold_app_data_isolation_enabled";
 
     IStorageManager mSm;
 
@@ -91,8 +94,6 @@ public final class Sm {
             runBenchmark();
         } else if ("forget".equals(op)) {
             runForget();
-        } else if ("set-emulate-fbe".equals(op)) {
-            runSetEmulateFbe();
         } else if ("get-fbe-mode".equals(op)) {
             runGetFbeMode();
         } else if ("idle-maint".equals(op)) {
@@ -101,12 +102,12 @@ public final class Sm {
             runFstrim();
         } else if ("set-virtual-disk".equals(op)) {
             runSetVirtualDisk();
-        } else if ("set-isolated-storage".equals(op)) {
-            runIsolatedStorage();
         } else if ("start-checkpoint".equals(op)) {
             runStartCheckpoint();
         } else if ("supports-checkpoint".equals(op)) {
             runSupportsCheckpoint();
+        } else if ("unmount-app-data-dirs".equals(op)) {
+            runDisableAppDataIsolation();
         } else {
             throw new IllegalArgumentException();
         }
@@ -188,17 +189,9 @@ public final class Sm {
         }
     }
 
-    public void runSetEmulateFbe() throws RemoteException {
-        final boolean emulateFbe = Boolean.parseBoolean(nextArg());
-        mSm.setDebugFlags(emulateFbe ? StorageManager.DEBUG_EMULATE_FBE : 0,
-                StorageManager.DEBUG_EMULATE_FBE);
-    }
-
     public void runGetFbeMode() {
-        if (StorageManager.isFileEncryptedNativeOnly()) {
+        if (StorageManager.isFileEncrypted()) {
             System.out.println("native");
-        } else if (StorageManager.isFileEncryptedEmulatedOnly()) {
-            System.out.println("emulated");
         } else {
             System.out.println("none");
         }
@@ -253,6 +246,18 @@ public final class Sm {
         System.out.println(result.get());
     }
 
+    public void runDisableAppDataIsolation() throws RemoteException {
+        if (!SystemProperties.getBoolean(
+                ANDROID_VOLD_APP_DATA_ISOLATION_ENABLED_PROPERTY, false)) {
+            System.err.println("Storage app data isolation is not enabled.");
+            return;
+        }
+        final String pkgName = nextArg();
+        final int pid = Integer.parseInt(nextArg());
+        final int userId = Integer.parseInt(nextArg());
+        mSm.disableAppDataIsolation(pkgName, pid, userId);
+    }
+
     public void runForget() throws RemoteException {
         final String fsUuid = nextArg();
         if ("all".equals(fsUuid)) {
@@ -284,28 +289,6 @@ public final class Sm {
         final boolean virtualDisk = Boolean.parseBoolean(nextArg());
         mSm.setDebugFlags(virtualDisk ? StorageManager.DEBUG_VIRTUAL_DISK : 0,
                 StorageManager.DEBUG_VIRTUAL_DISK);
-    }
-
-    public void runIsolatedStorage() throws RemoteException {
-        final int value;
-        final int mask = StorageManager.DEBUG_ISOLATED_STORAGE_FORCE_ON
-                | StorageManager.DEBUG_ISOLATED_STORAGE_FORCE_OFF;
-        switch (nextArg()) {
-            case "on":
-            case "true":
-                value = StorageManager.DEBUG_ISOLATED_STORAGE_FORCE_ON;
-                break;
-            case "off":
-                value = StorageManager.DEBUG_ISOLATED_STORAGE_FORCE_OFF;
-                break;
-            case "default":
-            case "false":
-                value = 0;
-                break;
-            default:
-                return;
-        }
-        mSm.setDebugFlags(value, mask);
     }
 
     public void runIdleMaint() throws RemoteException {
@@ -365,13 +348,11 @@ public final class Sm {
         System.err.println("");
         System.err.println("       sm forget [UUID|all]");
         System.err.println("");
-        System.err.println("       sm set-emulate-fbe [true|false]");
-        System.err.println("");
-        System.err.println("       sm set-isolated-storage [on|off|default]");
-        System.err.println("");
         System.err.println("       sm start-checkpoint <num-retries>");
         System.err.println("");
         System.err.println("       sm supports-checkpoint");
+        System.err.println("");
+        System.err.println("       sm unmount-app-data-dirs PACKAGE_NAME PID USER_ID");
         System.err.println("");
         return 1;
     }

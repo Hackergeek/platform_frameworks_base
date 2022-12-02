@@ -19,7 +19,6 @@ package android.graphics.drawable;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.compat.annotation.UnsupportedAppUsage;
 import android.content.res.AssetFileDescriptor;
 import android.content.res.Resources;
 import android.content.res.Resources.Theme;
@@ -49,6 +48,7 @@ import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 
 /**
@@ -495,7 +495,7 @@ public class AnimatedImageDrawable extends Drawable implements Animatable2 {
 
         if (mAnimationCallbacks == null) {
             mAnimationCallbacks = new ArrayList<Animatable2.AnimationCallback>();
-            nSetOnAnimationEndListener(mState.mNativePtr, this);
+            nSetOnAnimationEndListener(mState.mNativePtr, new WeakReference<>(this));
         }
 
         if (!mAnimationCallbacks.contains(callback)) {
@@ -563,12 +563,25 @@ public class AnimatedImageDrawable extends Drawable implements Animatable2 {
      *  callback, so no need to post.
      */
     @SuppressWarnings("unused")
-    @UnsupportedAppUsage
+    private static void callOnAnimationEnd(WeakReference<AnimatedImageDrawable> weakDrawable) {
+        AnimatedImageDrawable drawable = weakDrawable.get();
+        if (drawable != null) {
+            drawable.onAnimationEnd();
+        }
+    }
+
     private void onAnimationEnd() {
         if (mAnimationCallbacks != null) {
             for (Animatable2.AnimationCallback callback : mAnimationCallbacks) {
                 callback.onAnimationEnd(this);
             }
+        }
+    }
+
+    @Override
+    protected void onBoundsChange(Rect bounds) {
+        if (mState.mNativePtr != 0) {
+            nSetBounds(mState.mNativePtr, bounds);
         }
     }
 
@@ -598,9 +611,11 @@ public class AnimatedImageDrawable extends Drawable implements Animatable2 {
     private static native void nSetRepeatCount(long nativePtr, int repeatCount);
     // Pass the drawable down to native so it can call onAnimationEnd.
     private static native void nSetOnAnimationEndListener(long nativePtr,
-            @Nullable AnimatedImageDrawable drawable);
+            @Nullable WeakReference<AnimatedImageDrawable> drawable);
     @FastNative
     private static native long nNativeByteSize(long nativePtr);
     @FastNative
     private static native void nSetMirrored(long nativePtr, boolean mirror);
+    @FastNative
+    private static native void nSetBounds(long nativePtr, Rect rect);
 }

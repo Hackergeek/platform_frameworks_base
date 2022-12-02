@@ -17,10 +17,13 @@
 package com.android.systemui.controls.management
 
 import android.content.ComponentName
+import android.content.res.Configuration
+import android.content.res.Resources
 import android.graphics.Rect
 import android.os.Bundle
 import android.service.controls.Control
 import android.service.controls.DeviceTypes
+import android.util.TypedValue
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -32,7 +35,6 @@ import android.widget.TextView
 import androidx.core.view.AccessibilityDelegateCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
-import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.android.systemui.R
 import com.android.systemui.controls.ControlInterface
@@ -56,11 +58,32 @@ class ControlAdapter(
         const val TYPE_ZONE = 0
         const val TYPE_CONTROL = 1
         const val TYPE_DIVIDER = 2
-    }
 
-    val spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
-        override fun getSpanSize(position: Int): Int {
-            return if (getItemViewType(position) != TYPE_CONTROL) 2 else 1
+        /**
+         * For low-dp width screens that also employ an increased font scale, adjust the
+         * number of columns. This helps prevent text truncation on these devices.
+         *
+         */
+        @JvmStatic
+        fun findMaxColumns(res: Resources): Int {
+            var maxColumns = res.getInteger(R.integer.controls_max_columns)
+            val maxColumnsAdjustWidth =
+                    res.getInteger(R.integer.controls_max_columns_adjust_below_width_dp)
+
+            val outValue = TypedValue()
+            res.getValue(R.dimen.controls_max_columns_adjust_above_font_scale, outValue, true)
+            val maxColumnsAdjustFontScale = outValue.getFloat()
+
+            val config = res.configuration
+            val isPortrait = config.orientation == Configuration.ORIENTATION_PORTRAIT
+            if (isPortrait &&
+                    config.screenWidthDp != Configuration.SCREEN_WIDTH_DP_UNDEFINED &&
+                    config.screenWidthDp <= maxColumnsAdjustWidth &&
+                    config.fontScale >= maxColumnsAdjustFontScale) {
+                maxColumns--
+            }
+
+            return maxColumns
         }
     }
 
@@ -72,8 +95,13 @@ class ControlAdapter(
             TYPE_CONTROL -> {
                 ControlHolder(
                     layoutInflater.inflate(R.layout.controls_base_item, parent, false).apply {
-                        layoutParams.apply {
+                        (layoutParams as ViewGroup.MarginLayoutParams).apply {
                             width = ViewGroup.LayoutParams.MATCH_PARENT
+                            // Reset margins as they will be set through the decoration
+                            topMargin = 0
+                            bottomMargin = 0
+                            leftMargin = 0
+                            rightMargin = 0
                         }
                         elevation = this@ControlAdapter.elevation
                         background = parent.context.getDrawable(
@@ -258,6 +286,7 @@ internal class ControlHolder(
         val context = itemView.context
         val fg = context.getResources().getColorStateList(ri.foreground, context.getTheme())
 
+        icon.imageTintList = null
         ci.customIcon?.let {
             icon.setImageIcon(it)
         } ?: run {
@@ -314,7 +343,7 @@ private class ControlHolderAccessibilityDelegate(
         info.className = Switch::class.java.name
     }
 
-    override fun performAccessibilityAction(host: View?, action: Int, args: Bundle?): Boolean {
+    override fun performAccessibilityAction(host: View, action: Int, args: Bundle?): Boolean {
         if (super.performAccessibilityAction(host, action, args)) {
             return true
         }
@@ -386,7 +415,7 @@ class MarginItemDecorator(
         val type = parent.adapter?.getItemViewType(position)
         if (type == ControlAdapter.TYPE_CONTROL) {
             outRect.apply {
-                top = topMargin
+                top = topMargin * 2 // Use double margin, as we are not setting bottom
                 left = sideMargins
                 right = sideMargins
                 bottom = 0

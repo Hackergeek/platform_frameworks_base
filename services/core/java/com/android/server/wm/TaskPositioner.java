@@ -18,6 +18,7 @@ package com.android.server.wm;
 
 import static android.app.ActivityTaskManager.RESIZE_MODE_USER;
 import static android.app.ActivityTaskManager.RESIZE_MODE_USER_FORCED;
+import static android.os.InputConstants.DEFAULT_DISPATCHING_TIMEOUT_MILLIS;
 import static android.os.Trace.TRACE_TAG_WINDOW_MANAGER;
 
 import static com.android.internal.policy.TaskResizingAlgorithm.CTRL_BOTTOM;
@@ -25,8 +26,8 @@ import static com.android.internal.policy.TaskResizingAlgorithm.CTRL_LEFT;
 import static com.android.internal.policy.TaskResizingAlgorithm.CTRL_NONE;
 import static com.android.internal.policy.TaskResizingAlgorithm.CTRL_RIGHT;
 import static com.android.internal.policy.TaskResizingAlgorithm.CTRL_TOP;
+import static com.android.internal.protolog.ProtoLogGroup.WM_DEBUG_ORIENTATION;
 import static com.android.server.wm.DragResizeMode.DRAG_RESIZE_MODE_FREEFORM;
-import static com.android.server.wm.ProtoLogGroup.WM_DEBUG_ORIENTATION;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_TASK_POSITIONING;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WITH_CLASS_NAME;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
@@ -39,18 +40,18 @@ import android.graphics.Point;
 import android.graphics.Rect;
 import android.os.Binder;
 import android.os.IBinder;
-import android.os.Looper;
+import android.os.InputConfig;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.Trace;
 import android.util.DisplayMetrics;
 import android.util.Slog;
 import android.view.BatchedInputEventReceiver;
-import android.view.Choreographer;
 import android.view.InputApplicationHandle;
 import android.view.InputChannel;
 import android.view.InputDevice;
 import android.view.InputEvent;
+import android.view.InputEventReceiver;
 import android.view.InputWindowHandle;
 import android.view.MotionEvent;
 import android.view.WindowManager;
@@ -58,7 +59,7 @@ import android.view.WindowManager;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.policy.TaskResizingAlgorithm;
 import com.android.internal.policy.TaskResizingAlgorithm.CtrlType;
-import com.android.server.protolog.common.ProtoLog;
+import com.android.internal.protolog.common.ProtoLog;
 
 class TaskPositioner implements IBinder.DeathRecipient {
     private static final boolean DEBUG_ORIENTATION_VIOLATIONS = false;
@@ -72,7 +73,7 @@ class TaskPositioner implements IBinder.DeathRecipient {
     public static final int RESIZING_HINT_DURATION_MS = 0;
 
     private final WindowManagerService mService;
-    private WindowPositionerEventReceiver mInputEventReceiver;
+    private InputEventReceiver mInputEventReceiver;
     private DisplayContent mDisplayContent;
     private Rect mTmpRect = new Rect();
     private int mMinVisibleWidth;
@@ -95,108 +96,95 @@ class TaskPositioner implements IBinder.DeathRecipient {
     boolean mDragEnded;
     IBinder mClientCallback;
 
-    InputChannel mServerChannel;
     InputChannel mClientChannel;
     InputApplicationHandle mDragApplicationHandle;
     InputWindowHandle mDragWindowHandle;
-
-    private final class WindowPositionerEventReceiver extends BatchedInputEventReceiver {
-        public WindowPositionerEventReceiver(
-                InputChannel inputChannel, Looper looper, Choreographer choreographer) {
-            super(inputChannel, looper, choreographer);
-        }
-
-        @Override
-        public void onInputEvent(InputEvent event) {
-            boolean handled = false;
-            try {
-                // All returns need to be in the try block to make sure the finishInputEvent is
-                // called correctly.
-                if (!(event instanceof MotionEvent)
-                        || (event.getSource() & InputDevice.SOURCE_CLASS_POINTER) == 0) {
-                    return;
-                }
-                final MotionEvent motionEvent = (MotionEvent) event;
-                if (mDragEnded) {
-                    // The drag has ended but the clean-up message has not been processed by
-                    // window manager. Drop events that occur after this until window manager
-                    // has a chance to clean-up the input handle.
-                    handled = true;
-                    return;
-                }
-
-                final float newX = motionEvent.getRawX();
-                final float newY = motionEvent.getRawY();
-
-                switch (motionEvent.getAction()) {
-                    case MotionEvent.ACTION_DOWN: {
-                        if (DEBUG_TASK_POSITIONING) {
-                            Slog.w(TAG, "ACTION_DOWN @ {" + newX + ", " + newY + "}");
-                        }
-                    } break;
-
-                    case MotionEvent.ACTION_MOVE: {
-                        if (DEBUG_TASK_POSITIONING){
-                            Slog.w(TAG, "ACTION_MOVE @ {" + newX + ", " + newY + "}");
-                        }
-                        synchronized (mService.mGlobalLock) {
-                            mDragEnded = notifyMoveLocked(newX, newY);
-                            mTask.getDimBounds(mTmpRect);
-                        }
-                        if (!mTmpRect.equals(mWindowDragBounds)) {
-                            Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER,
-                                    "wm.TaskPositioner.resizeTask");
-                            mService.mAtmService.resizeTask(
-                                    mTask.mTaskId, mWindowDragBounds, RESIZE_MODE_USER);
-                            Trace.traceEnd(Trace.TRACE_TAG_WINDOW_MANAGER);
-                        }
-                    } break;
-
-                    case MotionEvent.ACTION_UP: {
-                        if (DEBUG_TASK_POSITIONING) {
-                            Slog.w(TAG, "ACTION_UP @ {" + newX + ", " + newY + "}");
-                        }
-                        mDragEnded = true;
-                    } break;
-
-                    case MotionEvent.ACTION_CANCEL: {
-                        if (DEBUG_TASK_POSITIONING) {
-                            Slog.w(TAG, "ACTION_CANCEL @ {" + newX + ", " + newY + "}");
-                        }
-                        mDragEnded = true;
-                    } break;
-                }
-
-                if (mDragEnded) {
-                    final boolean wasResizing = mResizing;
-                    synchronized (mService.mGlobalLock) {
-                        endDragLocked();
-                        mTask.getDimBounds(mTmpRect);
-                    }
-                    if (wasResizing && !mTmpRect.equals(mWindowDragBounds)) {
-                        // We were using fullscreen surface during resizing. Request
-                        // resizeTask() one last time to restore surface to window size.
-                        mService.mAtmService.resizeTask(
-                                mTask.mTaskId, mWindowDragBounds, RESIZE_MODE_USER_FORCED);
-                    }
-
-                    // Post back to WM to handle clean-ups. We still need the input
-                    // event handler for the last finishInputEvent()!
-                    mService.mTaskPositioningController.finishTaskPositioning();
-                }
-                handled = true;
-            } catch (Exception e) {
-                Slog.e(TAG, "Exception caught by drag handleMotion", e);
-            } finally {
-                finishInputEvent(event, handled);
-            }
-        }
-    }
 
     /** Use {@link #create(WindowManagerService)} instead. */
     @VisibleForTesting
     TaskPositioner(WindowManagerService service) {
         mService = service;
+    }
+
+    private boolean onInputEvent(InputEvent event) {
+        // All returns need to be in the try block to make sure the finishInputEvent is
+        // called correctly.
+        if (!(event instanceof MotionEvent)
+                || (event.getSource() & InputDevice.SOURCE_CLASS_POINTER) == 0) {
+            return false;
+        }
+        final MotionEvent motionEvent = (MotionEvent) event;
+        if (mDragEnded) {
+            // The drag has ended but the clean-up message has not been processed by
+            // window manager. Drop events that occur after this until window manager
+            // has a chance to clean-up the input handle.
+            return true;
+        }
+
+        final float newX = motionEvent.getRawX();
+        final float newY = motionEvent.getRawY();
+
+        switch (motionEvent.getAction()) {
+            case MotionEvent.ACTION_DOWN: {
+                if (DEBUG_TASK_POSITIONING) {
+                    Slog.w(TAG, "ACTION_DOWN @ {" + newX + ", " + newY + "}");
+                }
+            }
+            break;
+
+            case MotionEvent.ACTION_MOVE: {
+                if (DEBUG_TASK_POSITIONING) {
+                    Slog.w(TAG, "ACTION_MOVE @ {" + newX + ", " + newY + "}");
+                }
+                synchronized (mService.mGlobalLock) {
+                    mDragEnded = notifyMoveLocked(newX, newY);
+                    mTask.getDimBounds(mTmpRect);
+                }
+                if (!mTmpRect.equals(mWindowDragBounds)) {
+                    Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER,
+                            "wm.TaskPositioner.resizeTask");
+                    mService.mAtmService.resizeTask(
+                            mTask.mTaskId, mWindowDragBounds, RESIZE_MODE_USER);
+                    Trace.traceEnd(Trace.TRACE_TAG_WINDOW_MANAGER);
+                }
+            }
+            break;
+
+            case MotionEvent.ACTION_UP: {
+                if (DEBUG_TASK_POSITIONING) {
+                    Slog.w(TAG, "ACTION_UP @ {" + newX + ", " + newY + "}");
+                }
+                mDragEnded = true;
+            }
+            break;
+
+            case MotionEvent.ACTION_CANCEL: {
+                if (DEBUG_TASK_POSITIONING) {
+                    Slog.w(TAG, "ACTION_CANCEL @ {" + newX + ", " + newY + "}");
+                }
+                mDragEnded = true;
+            }
+            break;
+        }
+
+        if (mDragEnded) {
+            final boolean wasResizing = mResizing;
+            synchronized (mService.mGlobalLock) {
+                endDragLocked();
+                mTask.getDimBounds(mTmpRect);
+            }
+            if (wasResizing && !mTmpRect.equals(mWindowDragBounds)) {
+                // We were using fullscreen surface during resizing. Request
+                // resizeTask() one last time to restore surface to window size.
+                mService.mAtmService.resizeTask(
+                        mTask.mTaskId, mWindowDragBounds, RESIZE_MODE_USER_FORCED);
+            }
+
+            // Post back to WM to handle clean-ups. We still need the input
+            // event handler for the last finishInputEvent()!
+            mService.mTaskPositioningController.finishTaskPositioning();
+        }
+        return true;
     }
 
     @VisibleForTesting
@@ -219,48 +207,29 @@ class TaskPositioner implements IBinder.DeathRecipient {
         }
 
         mDisplayContent = displayContent;
-        final InputChannel[] channels = InputChannel.openInputChannelPair(TAG);
-        mServerChannel = channels[0];
-        mClientChannel = channels[1];
-        mService.mInputManager.registerInputChannel(mServerChannel);
+        mClientChannel = mService.mInputManager.createInputChannel(TAG);
 
-        mInputEventReceiver = new WindowPositionerEventReceiver(
+        mInputEventReceiver = new BatchedInputEventReceiver.SimpleBatchedInputEventReceiver(
                 mClientChannel, mService.mAnimationHandler.getLooper(),
-                mService.mAnimator.getChoreographer());
+                mService.mAnimator.getChoreographer(), this::onInputEvent);
 
-        mDragApplicationHandle = new InputApplicationHandle(new Binder());
-        mDragApplicationHandle.name = TAG;
-        mDragApplicationHandle.dispatchingTimeoutNanos =
-                WindowManagerService.DEFAULT_INPUT_DISPATCHING_TIMEOUT_NANOS;
+        mDragApplicationHandle = new InputApplicationHandle(new Binder(), TAG,
+                DEFAULT_DISPATCHING_TIMEOUT_MILLIS);
 
         mDragWindowHandle = new InputWindowHandle(mDragApplicationHandle,
                 displayContent.getDisplayId());
         mDragWindowHandle.name = TAG;
-        mDragWindowHandle.token = mServerChannel.getToken();
-        mDragWindowHandle.layoutParamsFlags = 0;
+        mDragWindowHandle.token = mClientChannel.getToken();
         mDragWindowHandle.layoutParamsType = WindowManager.LayoutParams.TYPE_DRAG;
-        mDragWindowHandle.dispatchingTimeoutNanos =
-                WindowManagerService.DEFAULT_INPUT_DISPATCHING_TIMEOUT_NANOS;
-        mDragWindowHandle.visible = true;
-        mDragWindowHandle.canReceiveKeys = false;
-        mDragWindowHandle.hasFocus = true;
-        mDragWindowHandle.hasWallpaper = false;
-        mDragWindowHandle.paused = false;
+        mDragWindowHandle.dispatchingTimeoutMillis = DEFAULT_DISPATCHING_TIMEOUT_MILLIS;
         mDragWindowHandle.ownerPid = Process.myPid();
         mDragWindowHandle.ownerUid = Process.myUid();
-        mDragWindowHandle.inputFeatures = 0;
         mDragWindowHandle.scaleFactor = 1.0f;
+        // When dragging the window around, we do not want to steal focus for the window.
+        mDragWindowHandle.inputConfig = InputConfig.NOT_FOCUSABLE;
 
         // The drag window cannot receive new touches.
         mDragWindowHandle.touchableRegion.setEmpty();
-
-        // The drag window covers the entire display.
-        final Rect displayBounds = mTmpRect;
-        displayContent.getBounds(mTmpRect);
-        mDragWindowHandle.frameLeft = displayBounds.left;
-        mDragWindowHandle.frameTop = displayBounds.top;
-        mDragWindowHandle.frameRight = displayBounds.right;
-        mDragWindowHandle.frameBottom = displayBounds.bottom;
 
         // Pause rotations before a drag.
         ProtoLog.d(WM_DEBUG_ORIENTATION, "Pausing rotation during re-position");
@@ -269,6 +238,8 @@ class TaskPositioner implements IBinder.DeathRecipient {
         // Notify InputMonitor to take mDragWindowHandle.
         mService.mTaskPositioningController.showInputSurface(win.getDisplayId());
 
+        final Rect displayBounds = mTmpRect;
+        displayContent.getBounds(displayBounds);
         final DisplayMetrics displayMetrics = displayContent.getDisplayMetrics();
         mMinVisibleWidth = dipToPixel(MINIMUM_VISIBLE_WIDTH_IN_DP, displayMetrics);
         mMinVisibleHeight = dipToPixel(MINIMUM_VISIBLE_HEIGHT_IN_DP, displayMetrics);
@@ -299,14 +270,12 @@ class TaskPositioner implements IBinder.DeathRecipient {
         }
 
         mService.mTaskPositioningController.hideInputSurface(mDisplayContent.getDisplayId());
-        mService.mInputManager.unregisterInputChannel(mServerChannel);
+        mService.mInputManager.removeInputChannel(mClientChannel.getToken());
 
         mInputEventReceiver.dispose();
         mInputEventReceiver = null;
         mClientChannel.dispose();
-        mServerChannel.dispose();
         mClientChannel = null;
-        mServerChannel = null;
 
         mDragWindowHandle = null;
         mDragApplicationHandle = null;
@@ -473,18 +442,18 @@ class TaskPositioner implements IBinder.DeathRecipient {
         }
     }
 
-    private void updateWindowDragBounds(int x, int y, Rect stackBounds) {
+    private void updateWindowDragBounds(int x, int y, Rect rootTaskBounds) {
         final int offsetX = Math.round(x - mStartDragX);
         final int offsetY = Math.round(y - mStartDragY);
         mWindowDragBounds.set(mWindowOriginalBounds);
         // Horizontally, at least mMinVisibleWidth pixels of the window should remain visible.
-        final int maxLeft = stackBounds.right - mMinVisibleWidth;
-        final int minLeft = stackBounds.left + mMinVisibleWidth - mWindowOriginalBounds.width();
+        final int maxLeft = rootTaskBounds.right - mMinVisibleWidth;
+        final int minLeft = rootTaskBounds.left + mMinVisibleWidth - mWindowOriginalBounds.width();
 
         // Vertically, the top mMinVisibleHeight of the window should remain visible.
         // (This assumes that the window caption bar is at the top of the window).
-        final int minTop = stackBounds.top;
-        final int maxTop = stackBounds.bottom - mMinVisibleHeight;
+        final int minTop = rootTaskBounds.top;
+        final int maxTop = rootTaskBounds.bottom - mMinVisibleHeight;
 
         mWindowDragBounds.offsetTo(
                 Math.min(Math.max(mWindowOriginalBounds.left + offsetX, minLeft), maxLeft),

@@ -16,17 +16,17 @@
 
 package com.android.systemui.statusbar.notification;
 
-import static android.provider.Settings.Secure.NOTIFICATION_NEW_INTERRUPTION_MODEL;
-
 import android.annotation.Nullable;
 import android.content.Context;
 import android.graphics.Color;
-import android.provider.Settings;
 import android.view.View;
 import android.widget.ImageView;
 
 import com.android.internal.util.ContrastColorUtil;
 import com.android.systemui.R;
+import com.android.systemui.statusbar.notification.collection.ListEntry;
+import com.android.systemui.statusbar.notification.row.ExpandableNotificationRow;
+import com.android.systemui.util.Compile;
 
 /**
  * A util class for various reusable functions
@@ -76,15 +76,31 @@ public class NotificationUtils {
         return (int) (dimensionPixelSize * factor);
     }
 
-    /**
-     * Returns the value of the new interruption model setting. This result is cached and cannot
-     * change except through reboots/process restarts.
-     */
-    public static boolean useNewInterruptionModel(Context context) {
-        if (sUseNewInterruptionModel == null) {
-            sUseNewInterruptionModel = Settings.Secure.getInt(context.getContentResolver(),
-                    NOTIFICATION_NEW_INTERRUPTION_MODEL, 1) != 0;
+    private static final boolean INCLUDE_HASH_CODE_IN_LIST_ENTRY_LOG_KEY = false;
+
+    /** Get the notification key, reformatted for logging, for the (optional) entry */
+    public static String logKey(ListEntry entry) {
+        if (entry == null) {
+            return "null";
         }
-        return sUseNewInterruptionModel;
+        if (Compile.IS_DEBUG && INCLUDE_HASH_CODE_IN_LIST_ENTRY_LOG_KEY) {
+            return logKey(entry.getKey()) + "@" + Integer.toHexString(entry.hashCode());
+        } else {
+            return logKey(entry.getKey());
+        }
     }
+
+    /** Get the notification key, reformatted for logging, for the (optional) row */
+    public static String logKey(ExpandableNotificationRow row) {
+        return row == null ? "null" : logKey(row.getEntry());
+    }
+
+    /** Removes newlines from the notification key to prettify apps that have these in the tag */
+    public static String logKey(String key) {
+        if (key == null) {
+            return "null";
+        }
+        return key.replace("\n", "");
+    }
+
 }

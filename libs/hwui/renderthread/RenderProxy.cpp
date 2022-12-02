@@ -16,6 +16,7 @@
 
 #include "RenderProxy.h"
 
+#include <gui/TraceUtils.h>
 #include "DeferredLayerUpdater.h"
 #include "DisplayList.h"
 #include "Properties.h"
@@ -27,7 +28,8 @@
 #include "renderthread/RenderThread.h"
 #include "utils/Macros.h"
 #include "utils/TimeUtils.h"
-#include "utils/TraceUtils.h"
+
+#include <pthread.h>
 
 namespace android {
 namespace uirenderer {
@@ -39,7 +41,8 @@ RenderProxy::RenderProxy(bool translucent, RenderNode* rootRenderNode,
     mContext = mRenderThread.queue().runSync([&]() -> CanvasContext* {
         return CanvasContext::create(mRenderThread, translucent, rootRenderNode, contextFactory);
     });
-    mDrawFrameTask.setContext(&mRenderThread, mContext, rootRenderNode);
+    mDrawFrameTask.setContext(&mRenderThread, mContext, rootRenderNode,
+                              pthread_gettid_np(pthread_self()), getRenderThreadTid());
 }
 
 RenderProxy::~RenderProxy() {
@@ -48,7 +51,7 @@ RenderProxy::~RenderProxy() {
 
 void RenderProxy::destroyContext() {
     if (mContext) {
-        mDrawFrameTask.setContext(nullptr, nullptr, nullptr);
+        mDrawFrameTask.setContext(nullptr, nullptr, nullptr, -1, -1);
         // This is also a fence as we need to be certain that there are no
         // outstanding mDrawFrame tasks posted before it is destroyed
         mRenderThread.queue().runSync([this]() { delete mContext; });
@@ -77,10 +80,23 @@ void RenderProxy::setName(const char* name) {
 }
 
 void RenderProxy::setSurface(ANativeWindow* window, bool enableTimeout) {
-    ANativeWindow_acquire(window);
+    if (window) { ANativeWindow_acquire(window); }
     mRenderThread.queue().post([this, win = window, enableTimeout]() mutable {
         mContext->setSurface(win, enableTimeout);
-        ANativeWindow_release(win);
+        if (win) { ANativeWindow_release(win); }
+    });
+}
+
+void RenderProxy::setSurfaceControl(ASurfaceControl* surfaceControl) {
+    auto funcs = mRenderThread.getASurfaceControlFunctions();
+    if (surfaceControl) {
+        funcs.acquireFunc(surfaceControl);
+    }
+    mRenderThread.queue().post([this, control = surfaceControl, funcs]() mutable {
+        mContext->setSurfaceControl(control);
+        if (control) {
+            funcs.releaseFunc(control);
+        }
     });
 }
 
@@ -109,12 +125,16 @@ void RenderProxy::setOpaque(bool opaque) {
     mRenderThread.queue().post([=]() { mContext->setOpaque(opaque); });
 }
 
-void RenderProxy::setWideGamut(bool wideGamut) {
-    mRenderThread.queue().post([=]() { mContext->setWideGamut(wideGamut); });
+void RenderProxy::setColorMode(ColorMode mode) {
+    mRenderThread.queue().post([=]() { mContext->setColorMode(mode); });
 }
 
 int64_t* RenderProxy::frameInfo() {
     return mDrawFrameTask.frameInfo();
+}
+
+void RenderProxy::forceDrawNextFrame() {
+    mDrawFrameTask.forceDrawNextFrame();
 }
 
 int RenderProxy::syncAndDrawFrame() {
@@ -126,20 +146,6 @@ void RenderProxy::destroy() {
     // underlying BufferQueue is going to be released from under
     // the render thread.
     mRenderThread.queue().runSync([=]() { mContext->destroy(); });
-}
-
-void RenderProxy::invokeFunctor(Functor* functor, bool waitForCompletion) {
-    ATRACE_CALL();
-    RenderThread& thread = RenderThread::getInstance();
-    auto invoke = [&thread, functor]() { CanvasContext::invokeFunctor(thread, functor); };
-    if (waitForCompletion) {
-        // waitForCompletion = true is expected to be fairly rare and only
-        // happen in destruction. Thus it should be fine to temporarily
-        // create a Mutex
-        thread.queue().runSync(std::move(invoke));
-    } else {
-        thread.queue().post(std::move(invoke));
-    }
 }
 
 void RenderProxy::destroyFunctor(int functor) {
@@ -190,6 +196,17 @@ void RenderProxy::trimMemory(int level) {
     }
 }
 
+void RenderProxy::purgeCaches() {
+    if (RenderThread::hasInstance()) {
+        RenderThread& thread = RenderThread::getInstance();
+        thread.queue().post([&thread]() {
+            if (thread.getGrContext()) {
+                thread.cacheManager().trimMemory(CacheManager::TrimMemoryMode::Complete);
+            }
+        });
+    }
+}
+
 void RenderProxy::overrideProperty(const char* name, const char* value) {
     // expensive, but block here since name/value pointers owned by caller
     RenderThread::getInstance().queue().runSync(
@@ -216,6 +233,7 @@ void RenderProxy::notifyFramePending() {
 
 void RenderProxy::dumpProfileInfo(int fd, int dumpFlags) {
     mRenderThread.queue().runSync([&]() {
+        std::lock_guard lock(mRenderThread.getJankDataMutex());
         mContext->profiler().dumpData(fd);
         if (dumpFlags & DumpFlags::FrameStats) {
             mContext->dumpFrames(fd);
@@ -230,19 +248,35 @@ void RenderProxy::dumpProfileInfo(int fd, int dumpFlags) {
 }
 
 void RenderProxy::resetProfileInfo() {
-    mRenderThread.queue().runSync([=]() { mContext->resetFrameStats(); });
+    mRenderThread.queue().runSync([=]() {
+        std::lock_guard lock(mRenderThread.getJankDataMutex());
+        mContext->resetFrameStats();
+    });
 }
 
 uint32_t RenderProxy::frameTimePercentile(int percentile) {
     return mRenderThread.queue().runSync([&]() -> auto {
+        std::lock_guard lock(mRenderThread.globalProfileData().getDataMutex());
         return mRenderThread.globalProfileData()->findPercentile(percentile);
     });
 }
 
-void RenderProxy::dumpGraphicsMemory(int fd) {
+void RenderProxy::dumpGraphicsMemory(int fd, bool includeProfileData, bool resetProfile) {
     if (RenderThread::hasInstance()) {
         auto& thread = RenderThread::getInstance();
-        thread.queue().runSync([&]() { thread.dumpGraphicsMemory(fd); });
+        thread.queue().runSync([&]() {
+            thread.dumpGraphicsMemory(fd, includeProfileData);
+            if (resetProfile) {
+                thread.globalProfileData()->reset();
+            }
+        });
+    }
+}
+
+void RenderProxy::getMemoryUsage(size_t* cpuUsage, size_t* gpuUsage) {
+    if (RenderThread::hasInstance()) {
+        auto& thread = RenderThread::getInstance();
+        thread.queue().runSync([&]() { thread.getMemoryUsage(cpuUsage, gpuUsage); });
     }
 }
 
@@ -285,11 +319,28 @@ void RenderProxy::setPictureCapturedCallback(
             [this, cb = callback]() { mContext->setPictureCapturedCallback(cb); });
 }
 
-void RenderProxy::setFrameCallback(std::function<void(int64_t)>&& callback) {
+void RenderProxy::setASurfaceTransactionCallback(
+        const std::function<bool(int64_t, int64_t, int64_t)>& callback) {
+    mRenderThread.queue().post(
+            [this, cb = callback]() { mContext->setASurfaceTransactionCallback(cb); });
+}
+
+void RenderProxy::setPrepareSurfaceControlForWebviewCallback(
+        const std::function<void()>& callback) {
+    mRenderThread.queue().post(
+            [this, cb = callback]() { mContext->setPrepareSurfaceControlForWebviewCallback(cb); });
+}
+
+void RenderProxy::setFrameCallback(
+        std::function<std::function<void(bool)>(int32_t, int64_t)>&& callback) {
     mDrawFrameTask.setFrameCallback(std::move(callback));
 }
 
-void RenderProxy::setFrameCompleteCallback(std::function<void(int64_t)>&& callback) {
+void RenderProxy::setFrameCommitCallback(std::function<void(bool)>&& callback) {
+    mDrawFrameTask.setFrameCommitCallback(std::move(callback));
+}
+
+void RenderProxy::setFrameCompleteCallback(std::function<void()>&& callback) {
     mDrawFrameTask.setFrameCompleteCallback(std::move(callback));
 }
 
@@ -307,11 +358,6 @@ void RenderProxy::removeFrameMetricsObserver(FrameMetricsObserver* observerPtr) 
 
 void RenderProxy::setForceDark(bool enable) {
     mRenderThread.queue().post([this, enable]() { mContext->setForceDark(enable); });
-}
-
-void RenderProxy::setRenderAheadDepth(int renderAhead) {
-    mRenderThread.queue().post(
-            [context = mContext, renderAhead] { context->setRenderAheadDepth(renderAhead); });
 }
 
 int RenderProxy::copySurfaceInto(ANativeWindow* window, int left, int top, int right, int bottom,
@@ -361,6 +407,17 @@ int RenderProxy::copyHWBitmapInto(Bitmap* hwBitmap, SkBitmap* bitmap) {
     }
 }
 
+int RenderProxy::copyImageInto(const sk_sp<SkImage>& image, SkBitmap* bitmap) {
+    RenderThread& thread = RenderThread::getInstance();
+    if (gettid() == thread.getTid()) {
+        // TODO: fix everything that hits this. We should never be triggering a readback ourselves.
+        return (int)thread.readback().copyImageInto(image, bitmap);
+    } else {
+        return thread.queue().runSync(
+                [&]() -> int { return (int)thread.readback().copyImageInto(image, bitmap); });
+    }
+}
+
 void RenderProxy::disableVsync() {
     Properties::disableVsync = true;
 }
@@ -369,6 +426,15 @@ void RenderProxy::preload() {
     // Create RenderThread object and start the thread. Then preload Vulkan/EGL driver.
     auto& thread = RenderThread::getInstance();
     thread.queue().post([&thread]() { thread.preload(); });
+}
+
+void RenderProxy::setRtAnimationsEnabled(bool enabled) {
+    if (RenderThread::hasInstance()) {
+        RenderThread::getInstance().queue().post(
+                [enabled]() { Properties::enableRTAnimations = enabled; });
+    } else {
+        Properties::enableRTAnimations = enabled;
+    }
 }
 
 } /* namespace renderthread */

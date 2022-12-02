@@ -2,6 +2,15 @@
 // Build FrameworksServicesTests package
 //########################################################################
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_base_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_base_license"],
+}
+
 android_test {
     name: "FrameworksServicesTests",
 
@@ -9,9 +18,6 @@ android_test {
     srcs: [
         "src/**/*.java",
         "src/**/*.kt",
-
-        "aidl/com/android/servicestests/aidl/INetworkStateObserver.aidl",
-        "aidl/com/android/servicestests/aidl/ICmdReceiverService.aidl",
 
         "test-apps/JobTestApp/src/**/*.java",
 
@@ -23,16 +29,20 @@ android_test {
         "services.appwidget",
         "services.autofill",
         "services.backup",
+        "services.companion",
         "services.core",
         "services.devicepolicy",
         "services.net",
         "services.people",
         "services.usage",
         "guava",
+        "guava-android-testlib",
         "androidx.test.core",
         "androidx.test.ext.truth",
         "androidx.test.runner",
         "androidx.test.rules",
+        "cts-wm-util",
+        "platform-compat-test-rules",
         "mockito-target-minus-junit4",
         "platform-test-annotations",
         "ShortcutManagerTestUtils",
@@ -41,6 +51,7 @@ android_test {
         "testng",
         "ub-uiautomator",
         "platformprotosnano",
+        "framework-protos",
         "hamcrest-library",
         "servicestests-utils",
         "service-jobscheduler",
@@ -48,16 +59,16 @@ android_test {
         // TODO: remove once Android migrates to JUnit 4.12,
         // which provides assertThrows
         "testng",
-
+        "junit",
+        "platform-compat-test-rules",
+        "ActivityContext",
     ],
 
-    aidl: {
-        local_include_dirs: ["aidl"],
-    },
-
     libs: [
-        "android.hidl.manager-V1.0-java",
+        "android.hardware.power-V1-java",
         "android.hardware.tv.cec-V1.0-java",
+        "android.hardware.vibrator-V2-java",
+        "android.hidl.manager-V1.0-java",
         "android.test.mock",
         "android.test.base",
         "android.test.runner",
@@ -70,7 +81,6 @@ android_test {
 
     // These are not normally accessible from apps so they must be explicitly included.
     jni_libs: [
-        "libbacktrace",
         "libbase",
         "libbinder",
         "libc++",
@@ -82,7 +92,7 @@ android_test {
         "libui",
         "libunwindstack",
         "libutils",
-        "netd_aidl_interface-cpp",
+        "netd_aidl_interface-V5-cpp",
     ],
 
     dxflags: ["--multi-dex"],
@@ -93,15 +103,35 @@ android_test {
 
     data: [
         ":JobTestApp",
+        ":StubTestApp",
     ],
 
     java_resources: [
         ":PackageParserTestApp1",
         ":PackageParserTestApp2",
         ":PackageParserTestApp3",
+        ":PackageParserTestApp4",
+        ":PackageParserTestApp5",
         ":apex.test",
+        ":test.rebootless_apex_v1",
+        ":test.rebootless_apex_v2",
+        ":com.android.apex.cts.shim.v1_prebuilt",
+        ":com.android.apex.cts.shim.v2_different_certificate_prebuilt",
+        ":com.android.apex.cts.shim.v2_unsigned_apk_container_prebuilt",
     ],
     resource_zips: [":FrameworksServicesTests_apks_as_resources"],
+}
+
+java_library {
+    name: "servicestests-core-utils",
+    srcs: [
+        "src/com/android/server/pm/PackageSettingBuilder.java",
+        "src/com/android/server/am/DeviceConfigSession.java",
+    ],
+    static_libs: [
+        "services.core",
+        "compatibility-device-util-axt",
+    ],
 }
 
 java_library {
@@ -147,15 +177,41 @@ filegroup {
 java_genrule {
     name: "FrameworksServicesTests_apks_as_resources",
     srcs: [
-        ":FrameworksCoreTests_install_complete_package_info",
+        ":FrameworksServicesTests_install",
+        ":FrameworksServicesTests_install_bad_dex",
+        ":FrameworksServicesTests_install_complete_package_info",
+        ":FrameworksServicesTests_install_decl_perm",
         ":FrameworksServicesTests_install_intent_filters",
+        ":FrameworksServicesTests_install_loc_auto",
+        ":FrameworksServicesTests_install_loc_internal",
+        ":FrameworksServicesTests_install_loc_sdcard",
+        ":FrameworksServicesTests_install_loc_unspecified",
         ":FrameworksServicesTests_install_split_base",
         ":FrameworksServicesTests_install_split_feature_a",
+        ":FrameworksServicesTests_install_use_perm_good",
+        ":FrameworksServicesTests_install_uses_feature",
         ":FrameworksServicesTests_install_uses_sdk_0",
         ":FrameworksServicesTests_install_uses_sdk_q0",
-        ":FrameworksServicesTests_install_uses_sdk_r",
+        ":FrameworksServicesTests_install_uses_sdk_q0_r0",
         ":FrameworksServicesTests_install_uses_sdk_r0",
         ":FrameworksServicesTests_install_uses_sdk_r5",
+        ":FrameworksServicesTests_install_uses_sdk_r_none",
+        ":FrameworksServicesTests_install_uses_sdk_r0_s0",
+        ":FrameworksServicesTests_install_uses_sdk_r0_s5",
+        ":FrameworksServicesTests_keyset_permdef_sa_unone",
+        ":FrameworksServicesTests_keyset_permuse_sa_ua_ub",
+        ":FrameworksServicesTests_keyset_permuse_sb_ua_ub",
+        ":FrameworksServicesTests_keyset_sa_ua",
+        ":FrameworksServicesTests_keyset_sa_ua_ub",
+        ":FrameworksServicesTests_keyset_sa_uab",
+        ":FrameworksServicesTests_keyset_sa_ub",
+        ":FrameworksServicesTests_keyset_sa_unone",
+        ":FrameworksServicesTests_keyset_sab_ua",
+        ":FrameworksServicesTests_keyset_sau_ub",
+        ":FrameworksServicesTests_keyset_sb_ua",
+        ":FrameworksServicesTests_keyset_sb_ub",
+        ":FrameworksServicesTests_keyset_splat_api",
+        ":FrameworksServicesTests_keyset_splata_api",
     ],
     out: ["FrameworkServicesTests_apks_as_resources.res.zip"],
     tools: ["soong_zip"],

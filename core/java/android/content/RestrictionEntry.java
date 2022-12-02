@@ -17,6 +17,7 @@
 package android.content;
 
 import android.annotation.ArrayRes;
+import android.annotation.Nullable;
 import android.os.Parcel;
 import android.os.Parcelable;
 
@@ -452,7 +453,7 @@ public class RestrictionEntry implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (o == this) return true;
         if (!(o instanceof RestrictionEntry)) return false;
         final RestrictionEntry other = (RestrictionEntry) o;
@@ -504,7 +505,7 @@ public class RestrictionEntry implements Parcelable {
         mChoiceValues = in.readStringArray();
         mCurrentValue = in.readString();
         mCurrentValues = in.readStringArray();
-        Parcelable[] parcelables = in.readParcelableArray(null);
+        Parcelable[] parcelables = in.readParcelableArray(null, RestrictionEntry.class);
         if (parcelables != null) {
             mRestrictions = new RestrictionEntry[parcelables.length];
             for (int i = 0; i < parcelables.length; i++) {

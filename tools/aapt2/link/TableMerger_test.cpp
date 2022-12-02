@@ -55,16 +55,13 @@ struct TableMergerTest : public ::testing::Test {
 TEST_F(TableMergerTest, SimpleMerge) {
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .AddReference("com.app.a:id/foo", "com.app.a:id/bar")
           .AddReference("com.app.a:id/bar", "com.app.b:id/foo")
-          .AddValue(
-              "com.app.a:styleable/view",
-              test::StyleableBuilder().AddItem("com.app.b:id/foo").Build())
+          .AddValue("com.app.a:styleable/view",
+                    test::StyleableBuilder().AddItem("com.app.b:id/foo").Build())
           .Build();
 
   std::unique_ptr<ResourceTable> table_b = test::ResourceTableBuilder()
-                                               .SetPackageId("com.app.b", 0x7f)
                                                .AddSimple("com.app.b:id/foo")
                                                .Build();
 
@@ -129,12 +126,10 @@ TEST_F(TableMergerTest, MergeFileReferences) {
 
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .AddFileReference("com.app.a:xml/file", "res/xml/file.xml", &file_a)
           .Build();
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.b", 0x7f)
           .AddFileReference("com.app.b:xml/file", "res/xml/file.xml", &file_b)
           .Build();
 
@@ -158,12 +153,10 @@ TEST_F(TableMergerTest, MergeFileReferences) {
 TEST_F(TableMergerTest, OverrideResourceWithOverlay) {
   std::unique_ptr<ResourceTable> base =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x00)
           .AddValue("bool/foo", ResourceUtils::TryParseBool("true"))
           .Build();
   std::unique_ptr<ResourceTable> overlay =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x00)
           .AddValue("bool/foo", ResourceUtils::TryParseBool("false"))
           .Build();
 
@@ -194,14 +187,12 @@ TEST_F(TableMergerTest, DoNotOverrideResourceComment) {
 
   std::unique_ptr<ResourceTable> base =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x00)
           .AddValue("bool/foo", std::move(foo_original))
           .AddValue("bool/bar", std::move(bar_original))
           .Build();
 
   std::unique_ptr<ResourceTable> overlay =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x00)
           .AddValue("bool/foo", std::move(foo_overlay))
           .AddValue("bool/bar", std::move(bar_overlay))
           .AddValue("bool/baz", std::move(baz_overlay))
@@ -226,12 +217,10 @@ TEST_F(TableMergerTest, DoNotOverrideResourceComment) {
 TEST_F(TableMergerTest, OverrideSameResourceIdsWithOverlay) {
   std::unique_ptr<ResourceTable> base =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", ResourceId(0x7f, 0x01, 0x0001), Visibility::Level::kPublic)
           .Build();
   std::unique_ptr<ResourceTable> overlay =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", ResourceId(0x7f, 0x01, 0x0001), Visibility::Level::kPublic)
           .Build();
 
@@ -247,12 +236,10 @@ TEST_F(TableMergerTest, OverrideSameResourceIdsWithOverlay) {
 TEST_F(TableMergerTest, FailToOverrideConflictingTypeIdsWithOverlay) {
   std::unique_ptr<ResourceTable> base =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", ResourceId(0x7f, 0x01, 0x0001), Visibility::Level::kPublic)
           .Build();
   std::unique_ptr<ResourceTable> overlay =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", ResourceId(0x7f, 0x02, 0x0001), Visibility::Level::kPublic)
           .Build();
 
@@ -268,12 +255,10 @@ TEST_F(TableMergerTest, FailToOverrideConflictingTypeIdsWithOverlay) {
 TEST_F(TableMergerTest, FailToOverrideConflictingEntryIdsWithOverlay) {
   std::unique_ptr<ResourceTable> base =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", ResourceId(0x7f, 0x01, 0x0001), Visibility::Level::kPublic)
           .Build();
   std::unique_ptr<ResourceTable> overlay =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", ResourceId(0x7f, 0x01, 0x0002), Visibility::Level::kPublic)
           .Build();
 
@@ -289,12 +274,10 @@ TEST_F(TableMergerTest, FailToOverrideConflictingEntryIdsWithOverlay) {
 TEST_F(TableMergerTest, FailConflictingVisibility) {
   std::unique_ptr<ResourceTable> base =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", ResourceId(0x7f, 0x01, 0x0001), Visibility::Level::kPublic)
           .Build();
   std::unique_ptr<ResourceTable> overlay =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", ResourceId(0x7f, 0x01, 0x0001), Visibility::Level::kPrivate)
           .Build();
 
@@ -318,11 +301,9 @@ TEST_F(TableMergerTest, FailConflictingVisibility) {
 }
 
 TEST_F(TableMergerTest, MergeAddResourceFromOverlay) {
-  std::unique_ptr<ResourceTable> table_a =
-      test::ResourceTableBuilder().SetPackageId("", 0x7f).Build();
+  std::unique_ptr<ResourceTable> table_a = test::ResourceTableBuilder().Build();
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .SetSymbolState("bool/foo", {}, Visibility::Level::kUndefined, true /*allow new overlay*/)
           .AddValue("bool/foo", ResourceUtils::TryParseBool("true"))
           .Build();
@@ -337,11 +318,9 @@ TEST_F(TableMergerTest, MergeAddResourceFromOverlay) {
 }
 
 TEST_F(TableMergerTest, MergeAddResourceFromOverlayWithAutoAddOverlay) {
-  std::unique_ptr<ResourceTable> table_a =
-      test::ResourceTableBuilder().SetPackageId("", 0x7f).Build();
+  std::unique_ptr<ResourceTable> table_a = test::ResourceTableBuilder().Build();
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .AddValue("bool/foo", ResourceUtils::TryParseBool("true"))
           .Build();
 
@@ -355,11 +334,9 @@ TEST_F(TableMergerTest, MergeAddResourceFromOverlayWithAutoAddOverlay) {
 }
 
 TEST_F(TableMergerTest, FailToMergeNewResourceWithoutAutoAddOverlay) {
-  std::unique_ptr<ResourceTable> table_a =
-      test::ResourceTableBuilder().SetPackageId("", 0x7f).Build();
+  std::unique_ptr<ResourceTable> table_a = test::ResourceTableBuilder().Build();
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("", 0x7f)
           .AddValue("bool/foo", ResourceUtils::TryParseBool("true"))
           .Build();
 
@@ -375,7 +352,6 @@ TEST_F(TableMergerTest, FailToMergeNewResourceWithoutAutoAddOverlay) {
 TEST_F(TableMergerTest, OverlaidStyleablesAndStylesShouldBeMerged) {
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .AddValue("com.app.a:styleable/Foo",
                     test::StyleableBuilder()
                         .AddItem("com.app.a:attr/bar")
@@ -391,7 +367,6 @@ TEST_F(TableMergerTest, OverlaidStyleablesAndStylesShouldBeMerged) {
 
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .AddValue("com.app.a:styleable/Foo", test::StyleableBuilder()
                                                    .AddItem("com.app.a:attr/bat")
                                                    .AddItem("com.app.a:attr/foo")
@@ -434,14 +409,12 @@ TEST_F(TableMergerTest, OverlaidStyleablesAndStylesShouldBeMerged) {
 
   const auto expected = ResourceUtils::MakeBool(true);
   EXPECT_THAT(style->entries, Contains(Field(&Style::Entry::value, Pointee(ValueEq(*expected)))));
-  EXPECT_THAT(style->parent,
-              Eq(make_value(Reference(test::ParseNameOrDie("com.app.a:style/OverlayParent")))));
+  EXPECT_THAT(style->parent, Reference(test::ParseNameOrDie("com.app.a:style/OverlayParent")));
 }
 
 TEST_F(TableMergerTest, OverrideStyleInsteadOfOverlaying) {
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .AddValue(
               "com.app.a:styleable/MyWidget",
               test::StyleableBuilder().AddItem("com.app.a:attr/foo", ResourceId(0x1234)).Build())
@@ -452,7 +425,6 @@ TEST_F(TableMergerTest, OverrideStyleInsteadOfOverlaying) {
           .Build();
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .AddValue(
               "com.app.a:styleable/MyWidget",
               test::StyleableBuilder().AddItem("com.app.a:attr/bar", ResourceId(0x5678)).Build())
@@ -494,13 +466,11 @@ TEST_F(TableMergerTest, SetOverlayable) {
 
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item)
           .Build();
 
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .AddSimple("bool/foo")
           .Build();
 
@@ -512,7 +482,7 @@ TEST_F(TableMergerTest, SetOverlayable) {
   ASSERT_TRUE(merger.Merge({}, table_b.get(), false /*overlay*/));
 
   const ResourceName name = test::ParseNameOrDie("com.app.a:bool/foo");
-  Maybe<ResourceTable::SearchResult> search_result = final_table.FindResource(name);
+  std::optional<ResourceTable::SearchResult> search_result = final_table.FindResource(name);
   ASSERT_TRUE(search_result);
   ASSERT_TRUE(search_result.value().entry->overlayable_item);
   OverlayableItem& result_overlayable_item = search_result.value().entry->overlayable_item.value();
@@ -527,7 +497,6 @@ TEST_F(TableMergerTest, SetOverlayableLater) {
                                                   "overlay://customization");
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .AddSimple("bool/foo")
           .Build();
 
@@ -536,7 +505,6 @@ TEST_F(TableMergerTest, SetOverlayableLater) {
   overlayable_item.policies |= PolicyFlags::SYSTEM_PARTITION;
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item)
           .Build();
 
@@ -548,7 +516,7 @@ TEST_F(TableMergerTest, SetOverlayableLater) {
   ASSERT_TRUE(merger.Merge({}, table_b.get(), false /*overlay*/));
 
   const ResourceName name = test::ParseNameOrDie("com.app.a:bool/foo");
-  Maybe<ResourceTable::SearchResult> search_result = final_table.FindResource(name);
+  std::optional<ResourceTable::SearchResult> search_result = final_table.FindResource(name);
   ASSERT_TRUE(search_result);
   ASSERT_TRUE(search_result.value().entry->overlayable_item);
   OverlayableItem& result_overlayable_item = search_result.value().entry->overlayable_item.value();
@@ -565,7 +533,6 @@ TEST_F(TableMergerTest, SameResourceDifferentNameFail) {
   overlayable_item_first.policies |= PolicyFlags::PRODUCT_PARTITION;
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item_first)
           .Build();
 
@@ -575,7 +542,6 @@ TEST_F(TableMergerTest, SameResourceDifferentNameFail) {
   overlayable_item_second.policies |= PolicyFlags::PRODUCT_PARTITION;
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item_second)
           .Build();
 
@@ -594,7 +560,6 @@ TEST_F(TableMergerTest, SameResourceDifferentActorFail) {
   overlayable_item_first.policies |= PolicyFlags::PRODUCT_PARTITION;
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item_first)
           .Build();
 
@@ -604,7 +569,6 @@ TEST_F(TableMergerTest, SameResourceDifferentActorFail) {
   overlayable_item_second.policies |= PolicyFlags::PRODUCT_PARTITION;
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item_second)
           .Build();
 
@@ -623,7 +587,6 @@ TEST_F(TableMergerTest, SameResourceDifferentPoliciesFail) {
   overlayable_item_first.policies |= PolicyFlags::PRODUCT_PARTITION;
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item_first)
           .Build();
 
@@ -633,7 +596,6 @@ TEST_F(TableMergerTest, SameResourceDifferentPoliciesFail) {
   overlayable_item_second.policies |= PolicyFlags::SIGNATURE;
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item_second)
           .Build();
 
@@ -653,7 +615,6 @@ TEST_F(TableMergerTest, SameResourceSameOverlayable) {
   overlayable_item_first.policies |= PolicyFlags::PRODUCT_PARTITION;
   std::unique_ptr<ResourceTable> table_a =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item_first)
           .Build();
 
@@ -661,7 +622,6 @@ TEST_F(TableMergerTest, SameResourceSameOverlayable) {
   overlayable_item_second.policies |= PolicyFlags::PRODUCT_PARTITION;
   std::unique_ptr<ResourceTable> table_b =
       test::ResourceTableBuilder()
-          .SetPackageId("com.app.a", 0x7f)
           .SetOverlayable("bool/foo", overlayable_item_second)
           .Build();
 

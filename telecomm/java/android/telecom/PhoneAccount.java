@@ -21,13 +21,14 @@ import static android.Manifest.permission.MODIFY_PHONE_STATE;
 import android.annotation.NonNull;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.content.Intent;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.telephony.CarrierConfigManager;
+import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 
 import java.util.ArrayList;
@@ -48,12 +49,20 @@ import java.util.Objects;
 public final class PhoneAccount implements Parcelable {
 
     /**
-     * String extra which determines the order in which {@link PhoneAccount}s are sorted
+     * Integer extra which determines the order in which {@link PhoneAccount}s are sorted
      *
      * This is an extras key set via {@link Builder#setExtras} which determines the order in which
      * {@link PhoneAccount}s from the same {@link ConnectionService} are sorted. The accounts
-     * are sorted by this key via standard lexicographical order, and this ordering is used to
+     * are sorted in ascending order by this key, and this ordering is used to
      * determine priority when a call can be placed via multiple accounts.
+     *
+     * When multiple {@link PhoneAccount}s are supplied with the same sort order key, no ordering is
+     * guaranteed between those {@link PhoneAccount}s. Additionally, no ordering is guaranteed
+     * between {@link PhoneAccount}s that do not supply this extra, and all such accounts
+     * will be sorted after the accounts that do supply this extra.
+     *
+     * An example of a sort order key is slot index (see {@link TelephonyManager#getSlotIndex()}),
+     * which is the one used by the cell Telephony stack.
      * @hide
      */
     @SystemApi
@@ -180,6 +189,15 @@ public final class PhoneAccount implements Parcelable {
         "android.telecom.extra.SKIP_CALL_FILTERING";
 
     /**
+     * Boolean {@link PhoneAccount} extras key (see {@link PhoneAccount#getExtras()}) which
+     * indicates whether a Self-managed {@link PhoneAccount} want to expose its calls to all
+     * {@link InCallService} which declares the metadata
+     * {@link TelecomManager#METADATA_INCLUDE_SELF_MANAGED_CALLS}.
+     */
+    public static final String EXTRA_ADD_SELF_MANAGED_CALLS_TO_INCALLSERVICE =
+            "android.telecom.extra.ADD_SELF_MANAGED_CALLS_TO_INCALLSERVICE";
+
+    /**
      * Flag indicating that this {@code PhoneAccount} can act as a connection manager for
      * other connections. The {@link ConnectionService} associated with this {@code PhoneAccount}
      * will be allowed to manage phone calls including using its own proprietary phone-call
@@ -266,10 +284,13 @@ public final class PhoneAccount implements Parcelable {
      * number relies on presence.  Should only be set if the {@code PhoneAccount} also has
      * {@link #CAPABILITY_VIDEO_CALLING}.
      * <p>
-     * When set, the {@link ConnectionService} is responsible for toggling the
+     * Note: As of Android 12, using the
      * {@link android.provider.ContactsContract.Data#CARRIER_PRESENCE_VT_CAPABLE} bit on the
      * {@link android.provider.ContactsContract.Data#CARRIER_PRESENCE} column to indicate whether
-     * a contact's phone number supports video calling.
+     * a contact's phone number supports video calling has been deprecated and should only be used
+     * on devices where {@link CarrierConfigManager#KEY_USE_RCS_PRESENCE_BOOL} is set. On newer
+     * devices, applications must use {@link android.telephony.ims.RcsUceAdapter} instead to
+     * determine whether or not a contact's phone number supports carrier video calling.
      * <p>
      * See {@link #getCapabilities}
      */
@@ -353,7 +374,51 @@ public final class PhoneAccount implements Parcelable {
      */
     public static final int CAPABILITY_ADHOC_CONFERENCE_CALLING = 0x4000;
 
-    /* NEXT CAPABILITY: 0x8000 */
+    /**
+     * Flag indicating whether this {@link PhoneAccount} is capable of supporting the call composer
+     * functionality for enriched calls.
+     */
+    public static final int CAPABILITY_CALL_COMPOSER = 0x8000;
+
+    /**
+     * Flag indicating that this {@link PhoneAccount} provides SIM-based voice calls, potentially as
+     * an over-the-top solution such as wi-fi calling.
+     *
+     * <p>Similar to {@link #CAPABILITY_SUPPORTS_VIDEO_CALLING}, this capability indicates this
+     * {@link PhoneAccount} has the ability to make voice calls (but not necessarily at this time).
+     * Whether this {@link PhoneAccount} can make a voice call is ultimately controlled by {@link
+     * #CAPABILITY_VOICE_CALLING_AVAILABLE}, which indicates whether this {@link PhoneAccount} is
+     * currently capable of making a voice call. Consider a case where, for example, a {@link
+     * PhoneAccount} supports making voice calls (e.g. {@link
+     * #CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS}), but a current lack of network connectivity
+     * prevents voice calls from being made (e.g. {@link #CAPABILITY_VOICE_CALLING_AVAILABLE}).
+     *
+     * <p>In order to declare this capability, this {@link PhoneAccount} must also declare {@link
+     * #CAPABILITY_SIM_SUBSCRIPTION} or {@link #CAPABILITY_CONNECTION_MANAGER} and satisfy the
+     * associated requirements.
+     *
+     * @see #CAPABILITY_VOICE_CALLING_AVAILABLE
+     * @see #getCapabilities
+     */
+    public static final int CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS = 0x10000;
+
+    /**
+     * Flag indicating that this {@link PhoneAccount} is <em>currently</em> able to place SIM-based
+     * voice calls, similar to {@link #CAPABILITY_VIDEO_CALLING}.
+     *
+     * <p>See also {@link #CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS}, which indicates whether
+     * the {@code PhoneAccount} supports placing SIM-based voice calls or not.
+     *
+     * <p>In order to declare this capability, this {@link PhoneAccount} must also declare {@link
+     * #CAPABILITY_SIM_SUBSCRIPTION} or {@link #CAPABILITY_CONNECTION_MANAGER} and satisfy the
+     * associated requirements.
+     *
+     * @see #CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS
+     * @see #getCapabilities
+     */
+    public static final int CAPABILITY_VOICE_CALLING_AVAILABLE = 0x20000;
+
+    /* NEXT CAPABILITY: 0x40000 */
 
     /**
      * URI scheme for telephone number URIs.
@@ -626,7 +691,6 @@ public final class PhoneAccount implements Parcelable {
          * @hide
          */
         @SystemApi
-        @TestApi
         @RequiresPermission(MODIFY_PHONE_STATE)
         public @NonNull Builder setGroupId(@NonNull String groupId) {
             if (groupId != null) {
@@ -1076,10 +1140,19 @@ public final class PhoneAccount implements Parcelable {
             sb.append("SimSub ");
         }
         if (hasCapabilities(CAPABILITY_RTT)) {
-            sb.append("Rtt");
+            sb.append("Rtt ");
         }
         if (hasCapabilities(CAPABILITY_ADHOC_CONFERENCE_CALLING)) {
-            sb.append("AdhocConf");
+            sb.append("AdhocConf ");
+        }
+        if (hasCapabilities(CAPABILITY_CALL_COMPOSER)) {
+            sb.append("CallComposer ");
+        }
+        if (hasCapabilities(CAPABILITY_SUPPORTS_VOICE_CALLING_INDICATIONS)) {
+            sb.append("SuppVoice ");
+        }
+        if (hasCapabilities(CAPABILITY_VOICE_CALLING_AVAILABLE)) {
+            sb.append("Voice ");
         }
         return sb.toString();
     }

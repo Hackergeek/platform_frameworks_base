@@ -28,24 +28,29 @@ final class BroadcastFilter extends IntentFilter {
     final ReceiverList receiverList;
     final String packageName;
     final String featureId;
+    final String receiverId;
     final String requiredPermission;
     final int owningUid;
     final int owningUserId;
     final boolean instantApp;
     final boolean visibleToInstantApp;
+    final boolean exported;
 
     BroadcastFilter(IntentFilter _filter, ReceiverList _receiverList,
-            String _packageName, String _featureId, String _requiredPermission, int _owningUid, int _userId,
-            boolean _instantApp, boolean _visibleToInstantApp) {
+            String _packageName, String _featureId, String _receiverId, String _requiredPermission,
+            int _owningUid, int _userId, boolean _instantApp, boolean _visibleToInstantApp,
+            boolean _exported) {
         super(_filter);
         receiverList = _receiverList;
         packageName = _packageName;
         featureId = _featureId;
+        receiverId = _receiverId;
         requiredPermission = _requiredPermission;
         owningUid = _owningUid;
         owningUserId = _userId;
         instantApp = _instantApp;
         visibleToInstantApp = _visibleToInstantApp;
+        exported = _exported;
     }
 
     public void dumpDebug(ProtoOutputStream proto, long fieldId) {

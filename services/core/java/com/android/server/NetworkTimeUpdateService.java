@@ -16,6 +16,8 @@
 
 package com.android.server;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.app.timedetector.NetworkTimeSuggestion;
@@ -35,17 +37,21 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
 import android.os.PowerManager;
+import android.os.ResultReceiver;
+import android.os.ShellCallback;
 import android.os.SystemClock;
 import android.os.TimestampedValue;
 import android.provider.Settings;
+import android.util.LocalLog;
 import android.util.Log;
 import android.util.NtpTrustedTime;
-import android.util.TimeUtils;
+import android.util.NtpTrustedTime.TimeResult;
 
 import com.android.internal.util.DumpUtils;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
+import java.time.Duration;
 
 /**
  * Monitors the network time. If looking up the network time fails for some reason, it tries a few
@@ -95,6 +101,13 @@ public class NetworkTimeUpdateService extends Binder {
     // connection to happen.
     private int mTryAgainCounter;
 
+    /**
+     * A log that records the decisions to fetch a network time update.
+     * This is logged in bug reports to assist with debugging issues with network time suggestions.
+     */
+    @NonNull
+    private final LocalLog mLocalLog = new LocalLog(30, false /* useLocalTimestamps */);
+
     public NetworkTimeUpdateService(Context context) {
         mContext = context;
         mTime = NtpTrustedTime.getInstance(context);
@@ -103,7 +116,9 @@ public class NetworkTimeUpdateService extends Binder {
         mCM = mContext.getSystemService(ConnectivityManager.class);
 
         Intent pollIntent = new Intent(ACTION_POLL, null);
-        mPendingPollIntent = PendingIntent.getBroadcast(mContext, POLL_REQUEST, pollIntent, 0);
+        // Broadcast alarms sent by system are immutable
+        mPendingPollIntent = PendingIntent.getBroadcast(mContext, POLL_REQUEST, pollIntent,
+                PendingIntent.FLAG_IMMUTABLE);
 
         mPollingIntervalMs = mContext.getResources().getInteger(
                 com.android.internal.R.integer.config_ntpPollingInterval);
@@ -141,6 +156,71 @@ public class NetworkTimeUpdateService extends Binder {
                 }, new IntentFilter(ACTION_POLL));
     }
 
+    /**
+     * Clears the cached NTP time. For use during tests to simulate when no NTP time is available.
+     *
+     * <p>This operation takes place in the calling thread rather than the service's handler thread.
+     */
+    void clearTimeForTests() {
+        mContext.enforceCallingPermission(
+                android.Manifest.permission.SET_TIME, "clear latest network time");
+
+        final long token = Binder.clearCallingIdentity();
+        try {
+            mTime.clearCachedTimeResult();
+
+            mLocalLog.log("clearTimeForTests");
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    /**
+     * Forces the service to refresh the NTP time.
+     *
+     * <p>This operation takes place in the calling thread rather than the service's handler thread.
+     * This method does not affect currently scheduled refreshes. If the NTP request is successful
+     * it will make an (asynchronously handled) suggestion to the time detector.
+     */
+    boolean forceRefreshForTests() {
+        mContext.enforceCallingPermission(
+                android.Manifest.permission.SET_TIME, "force network time refresh");
+
+        final long token = Binder.clearCallingIdentity();
+        try {
+            boolean success = mTime.forceRefresh();
+            mLocalLog.log("forceRefreshForTests: success=" + success);
+
+            if (success) {
+                makeNetworkTimeSuggestion(mTime.getCachedTimeResult(),
+                        "Origin: NetworkTimeUpdateService: forceRefreshForTests");
+            }
+            return success;
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    /**
+     * Overrides the NTP server config for tests. Passing {@code null} to a parameter clears the
+     * test value, i.e. so the normal value will be used next time.
+     */
+    void setServerConfigForTests(
+            @Nullable String hostname, @Nullable Integer port, @Nullable Duration timeout) {
+        mContext.enforceCallingPermission(
+                android.Manifest.permission.SET_TIME, "set NTP server config for tests");
+
+        final long token = Binder.clearCallingIdentity();
+        try {
+            mLocalLog.log("Setting server config for tests: hostname=" + hostname
+                    + ", port=" + port
+                    + ", timeout=" + timeout);
+            mTime.setServerConfigForTests(hostname, port, timeout);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
     private void onPollNetworkTime(int event) {
         // If we don't have any default network, don't bother.
         if (mDefaultNetwork == null) return;
@@ -153,24 +233,37 @@ public class NetworkTimeUpdateService extends Binder {
     }
 
     private void onPollNetworkTimeUnderWakeLock(int event) {
+        long currentElapsedRealtimeMillis = SystemClock.elapsedRealtime();
         // Force an NTP fix when outdated
         NtpTrustedTime.TimeResult cachedNtpResult = mTime.getCachedTimeResult();
-        if (cachedNtpResult == null || cachedNtpResult.getAgeMillis() >= mPollingIntervalMs) {
+        if (cachedNtpResult == null || cachedNtpResult.getAgeMillis(currentElapsedRealtimeMillis)
+                >= mPollingIntervalMs) {
             if (DBG) Log.d(TAG, "Stale NTP fix; forcing refresh");
-            mTime.forceRefresh();
+            boolean isSuccessful = mTime.forceRefresh();
+            if (isSuccessful) {
+                mTryAgainCounter = 0;
+            } else {
+                String logMsg = "forceRefresh() returned false: cachedNtpResult=" + cachedNtpResult
+                        + ", currentElapsedRealtimeMillis=" + currentElapsedRealtimeMillis;
+
+                if (DBG) {
+                    Log.d(TAG, logMsg);
+                }
+                mLocalLog.log(logMsg);
+            }
+
             cachedNtpResult = mTime.getCachedTimeResult();
         }
 
-        if (cachedNtpResult != null && cachedNtpResult.getAgeMillis() < mPollingIntervalMs) {
+        if (cachedNtpResult != null
+                && cachedNtpResult.getAgeMillis(currentElapsedRealtimeMillis)
+                < mPollingIntervalMs) {
             // Obtained fresh fix; schedule next normal update
-            resetAlarm(mPollingIntervalMs);
+            resetAlarm(mPollingIntervalMs
+                    - cachedNtpResult.getAgeMillis(currentElapsedRealtimeMillis));
 
-            // Suggest the time to the time detector. It may choose use it to set the system clock.
-            TimestampedValue<Long> timeSignal = new TimestampedValue<>(
-                    cachedNtpResult.getElapsedRealtimeMillis(), cachedNtpResult.getTimeMillis());
-            NetworkTimeSuggestion timeSuggestion = new NetworkTimeSuggestion(timeSignal);
-            timeSuggestion.addDebugInfo("Origin: NetworkTimeUpdateService. event=" + event);
-            mTimeDetector.suggestNetworkTime(timeSuggestion);
+            makeNetworkTimeSuggestion(cachedNtpResult,
+                    "Origin: NetworkTimeUpdateService. event=" + event);
         } else {
             // No fresh fix; schedule retry
             mTryAgainCounter++;
@@ -178,10 +271,24 @@ public class NetworkTimeUpdateService extends Binder {
                 resetAlarm(mPollingIntervalShorterMs);
             } else {
                 // Try much later
+                String logMsg = "mTryAgainTimesMax exceeded, cachedNtpResult=" + cachedNtpResult;
+                if (DBG) {
+                    Log.d(TAG, logMsg);
+                }
+                mLocalLog.log(logMsg);
                 mTryAgainCounter = 0;
                 resetAlarm(mPollingIntervalMs);
             }
         }
+    }
+
+    /** Suggests the time to the time detector. It may choose use it to set the system clock. */
+    private void makeNetworkTimeSuggestion(TimeResult ntpResult, String debugInfo) {
+        TimestampedValue<Long> timeSignal = new TimestampedValue<>(
+                ntpResult.getElapsedRealtimeMillis(), ntpResult.getTimeMillis());
+        NetworkTimeSuggestion timeSuggestion = new NetworkTimeSuggestion(timeSignal);
+        timeSuggestion.addDebugInfo(debugInfo);
+        mTimeDetector.suggestNetworkTime(timeSuggestion);
     }
 
     /**
@@ -272,17 +379,23 @@ public class NetworkTimeUpdateService extends Binder {
     @Override
     protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
         if (!DumpUtils.checkDumpPermission(mContext, TAG, pw)) return;
-        pw.print("PollingIntervalMs: ");
-        TimeUtils.formatDuration(mPollingIntervalMs, pw);
-        pw.print("\nPollingIntervalShorterMs: ");
-        TimeUtils.formatDuration(mPollingIntervalShorterMs, pw);
-        pw.println("\nTryAgainTimesMax: " + mTryAgainTimesMax);
-        pw.println("\nTryAgainCounter: " + mTryAgainCounter);
-        NtpTrustedTime.TimeResult ntpResult = mTime.getCachedTimeResult();
-        pw.println("NTP cache result: " + ntpResult);
-        if (ntpResult != null) {
-            pw.println("NTP result age: " + ntpResult.getAgeMillis());
-        }
+        pw.println("mPollingIntervalMs=" + Duration.ofMillis(mPollingIntervalMs));
+        pw.println("mPollingIntervalShorterMs=" + Duration.ofMillis(mPollingIntervalShorterMs));
+        pw.println("mTryAgainTimesMax=" + mTryAgainTimesMax);
+        pw.println("mTryAgainCounter=" + mTryAgainCounter);
         pw.println();
+        pw.println("NtpTrustedTime:");
+        mTime.dump(pw);
+        pw.println();
+        pw.println("Local logs:");
+        mLocalLog.dump(fd, pw, args);
+        pw.println();
+    }
+
+    @Override
+    public void onShellCommand(FileDescriptor in, FileDescriptor out, FileDescriptor err,
+            String[] args, ShellCallback callback, ResultReceiver resultReceiver) {
+        new NetworkTimeUpdateServiceShellCommand(this).exec(
+                this, in, out, err, args, callback, resultReceiver);
     }
 }

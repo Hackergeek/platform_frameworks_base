@@ -37,6 +37,8 @@ import com.android.internal.os.BaseCommand;
 import com.android.internal.telecom.ITelecomService;
 
 import java.io.PrintStream;
+import java.util.Arrays;
+import java.util.stream.Collectors;
 
 public final class Telecom extends BaseCommand {
 
@@ -66,10 +68,14 @@ public final class Telecom extends BaseCommand {
     private static final String COMMAND_SET_PHONE_ACCOUNT_SUGGESTION_COMPONENT =
             "set-phone-acct-suggestion-component";
     private static final String COMMAND_UNREGISTER_PHONE_ACCOUNT = "unregister-phone-account";
+    private static final String COMMAND_SET_CALL_DIAGNOSTIC_SERVICE = "set-call-diagnostic-service";
     private static final String COMMAND_SET_DEFAULT_DIALER = "set-default-dialer";
     private static final String COMMAND_GET_DEFAULT_DIALER = "get-default-dialer";
     private static final String COMMAND_STOP_BLOCK_SUPPRESSION = "stop-block-suppression";
     private static final String COMMAND_CLEANUP_STUCK_CALLS = "cleanup-stuck-calls";
+    private static final String COMMAND_CLEANUP_ORPHAN_PHONE_ACCOUNTS =
+            "cleanup-orphan-phone-accounts";
+    private static final String COMMAND_RESET_CAR_MODE = "reset-car-mode";
 
     /**
      * Change the system dialer package name if a package name was specified,
@@ -86,6 +92,10 @@ public final class Telecom extends BaseCommand {
     private static final String COMMAND_GET_MAX_PHONES = "get-max-phones";
     private static final String COMMAND_SET_TEST_EMERGENCY_PHONE_ACCOUNT_PACKAGE_FILTER =
             "set-test-emergency-phone-account-package-filter";
+    /**
+     * Command used to emit a distinct "mark" in the logs.
+     */
+    private static final String COMMAND_LOG_MARK = "log-mark";
 
     private ComponentName mComponent;
     private String mAccountId;
@@ -111,6 +121,7 @@ public final class Telecom extends BaseCommand {
                 + "usage: telecom register-sim-phone-account <COMPONENT> <ID> <USER_SN>"
                 + " <LABEL> <ADDRESS>\n"
                 + "usage: telecom unregister-phone-account <COMPONENT> <ID> <USER_SN>\n"
+                + "usage: telecom set-call-diagnostic-service <PACKAGE>\n"
                 + "usage: telecom set-default-dialer <PACKAGE>\n"
                 + "usage: telecom get-default-dialer\n"
                 + "usage: telecom get-system-dialer\n"
@@ -122,6 +133,9 @@ public final class Telecom extends BaseCommand {
                         + " provider after a call to emergency services.\n"
                 + "usage: telecom cleanup-stuck-calls: Clear any disconnected calls that have"
                 + " gotten wedged in Telecom.\n"
+                + "usage: telecom cleanup-orphan-phone-accounts: remove any phone accounts that"
+                + " no longer have a valid UserHandle or accounts that no longer belongs to an"
+                + " installed package.\n"
                 + "usage: telecom set-emer-phone-account-filter <PACKAGE>\n"
                 + "\n"
                 + "telecom set-phone-account-enabled: Enables the given phone account, if it has"
@@ -130,6 +144,7 @@ public final class Telecom extends BaseCommand {
                 + "telecom set-phone-account-disabled: Disables the given phone account, if it"
                         + " has already been registered with telecom.\n"
                 + "\n"
+                + "telecom set-call-diagnostic-service: overrides call diagnostic service.\n"
                 + "telecom set-default-dialer: Sets the override default dialer to the given"
                         + " component; this will override whatever the dialer role is set to.\n"
                 + "\n"
@@ -152,6 +167,8 @@ public final class Telecom extends BaseCommand {
                         + " package name that will be used for test emergency calls. To clear,"
                         + " send an empty package name. Real emergency calls will still be placed"
                         + " over Telephony.\n"
+                + "telecom log-mark <MESSAGE>: emits a message into the telecom logs.  Useful for "
+                        + "testers to indicate where in the logs various test steps take place.\n"
         );
     }
 
@@ -205,6 +222,9 @@ public final class Telecom extends BaseCommand {
             case COMMAND_SET_PHONE_ACCOUNT_SUGGESTION_COMPONENT:
                 runSetTestPhoneAcctSuggestionComponent();
                 break;
+            case COMMAND_SET_CALL_DIAGNOSTIC_SERVICE:
+                runSetCallDiagnosticService();
+                break;
             case COMMAND_REGISTER_SIM_PHONE_ACCOUNT:
                 runRegisterSimPhoneAccount();
                 break;
@@ -219,6 +239,12 @@ public final class Telecom extends BaseCommand {
                 break;
             case COMMAND_CLEANUP_STUCK_CALLS:
                 runCleanupStuckCalls();
+                break;
+            case COMMAND_CLEANUP_ORPHAN_PHONE_ACCOUNTS:
+                runCleanupOrphanPhoneAccounts();
+                break;
+            case COMMAND_RESET_CAR_MODE:
+                runResetCarMode();
                 break;
             case COMMAND_SET_DEFAULT_DIALER:
                 runSetDefaultDialer();
@@ -246,6 +272,9 @@ public final class Telecom extends BaseCommand {
                 break;
             case COMMAND_SET_TEST_EMERGENCY_PHONE_ACCOUNT_PACKAGE_FILTER:
                 runSetEmergencyPhoneAccountPackageFilter();
+                break;
+            case COMMAND_LOG_MARK:
+                runLogMark();
                 break;
             default:
                 Log.w(this, "onRun: unknown command: %s", command);
@@ -319,6 +348,13 @@ public final class Telecom extends BaseCommand {
         mTelecomService.addOrRemoveTestCallCompanionApp(packageName, isAddedBool);
     }
 
+    private void runSetCallDiagnosticService() throws RemoteException {
+        String packageName = nextArg();
+        if ("default".equals(packageName)) packageName = null;
+        mTelecomService.setTestCallDiagnosticService(packageName);
+        System.out.println("Success - " + packageName + " set as call diagnostic service.");
+    }
+
     private void runSetTestPhoneAcctSuggestionComponent() throws RemoteException {
         final String componentName = nextArg();
         mTelecomService.setTestPhoneAcctSuggestionComponent(componentName);
@@ -343,6 +379,15 @@ public final class Telecom extends BaseCommand {
 
     private void runCleanupStuckCalls() throws RemoteException {
         mTelecomService.cleanupStuckCalls();
+    }
+
+    private void runCleanupOrphanPhoneAccounts() throws RemoteException {
+        System.out.println("Success - cleaned up " + mTelecomService.cleanupOrphanPhoneAccounts()
+                + "  phone accounts.");
+    }
+
+    private void runResetCarMode() throws RemoteException {
+        mTelecomService.resetCarMode();
     }
 
     private void runSetDefaultDialer() throws RemoteException {
@@ -406,6 +451,11 @@ public final class Telecom extends BaseCommand {
             System.out.println("Success = filter set to " + packageName);
         }
 
+    }
+
+    private void runLogMark() throws RemoteException {
+        String message = Arrays.stream(mArgs.peekRemainingArgs()).collect(Collectors.joining(" "));
+        mTelecomService.requestLogMark(message);
     }
 
     private PhoneAccountHandle getPhoneAccountHandleFromArgs() throws RemoteException {

@@ -50,12 +50,12 @@ public class DataServiceCallback {
      */
     @Retention(RetentionPolicy.SOURCE)
     @IntDef({RESULT_SUCCESS, RESULT_ERROR_UNSUPPORTED, RESULT_ERROR_INVALID_ARG, RESULT_ERROR_BUSY,
-            RESULT_ERROR_ILLEGAL_STATE})
+            RESULT_ERROR_ILLEGAL_STATE, RESULT_ERROR_TEMPORARILY_UNAVAILABLE})
     public @interface ResultCode {}
 
     /** Request is completed successfully */
     public static final int RESULT_SUCCESS              = 0;
-    /** Request is not support */
+    /** Request is not supported */
     public static final int RESULT_ERROR_UNSUPPORTED    = 1;
     /** Request contains invalid arguments */
     public static final int RESULT_ERROR_INVALID_ARG    = 2;
@@ -63,6 +63,11 @@ public class DataServiceCallback {
     public static final int RESULT_ERROR_BUSY           = 3;
     /** Request sent in illegal state */
     public static final int RESULT_ERROR_ILLEGAL_STATE  = 4;
+    /**
+     * Service is temporarily unavailable. Frameworks should retry the request again.
+     * @hide
+     */
+    public static final int RESULT_ERROR_TEMPORARILY_UNAVAILABLE = 5;
 
     private final IDataServiceCallback mCallback;
 
@@ -79,7 +84,7 @@ public class DataServiceCallback {
      * @param response Setup data call response.
      */
     public void onSetupDataCallComplete(@ResultCode int result,
-                                        @Nullable DataCallResponse response) {
+            @Nullable DataCallResponse response) {
         if (mCallback != null) {
             try {
                 if (DBG) Rlog.d(TAG, "onSetupDataCallComplete");
@@ -156,7 +161,7 @@ public class DataServiceCallback {
      * set it to an empty list.
      */
     public void onRequestDataCallListComplete(@ResultCode int result,
-                                              @NonNull List<DataCallResponse> dataCallList) {
+            @NonNull List<DataCallResponse> dataCallList) {
         if (mCallback != null) {
             try {
                 mCallback.onRequestDataCallListComplete(result, dataCallList);
@@ -184,6 +189,120 @@ public class DataServiceCallback {
             }
         } else {
             Rlog.e(TAG, "onDataCallListChanged: callback is null!");
+        }
+    }
+
+    /**
+     * Called to indicate result for the request {@link DataService#startHandover}.
+     *
+     * @param result The result code. Must be one of the {@link ResultCode}
+     *
+     * @hide
+     */
+    public void onHandoverStarted(@ResultCode int result) {
+        if (mCallback != null) {
+            try {
+                if (DBG) Rlog.d(TAG, "onHandoverStarted");
+                mCallback.onHandoverStarted(result);
+            } catch (RemoteException e) {
+                Rlog.e(TAG, "Failed to onHandoverStarted on the remote");
+            }
+        } else {
+            Rlog.e(TAG, "onHandoverStarted: callback is null!");
+        }
+    }
+
+    /**
+     * Called to indicate result for the request {@link DataService#cancelHandover}.
+     *
+     * @param result The result code. Must be one of the {@link ResultCode}
+     *
+     * @hide
+     */
+    public void onHandoverCancelled(@ResultCode int result) {
+        if (mCallback != null) {
+            try {
+                if (DBG) Rlog.d(TAG, "onHandoverCancelled");
+                mCallback.onHandoverCancelled(result);
+            } catch (RemoteException e) {
+                Rlog.e(TAG, "Failed to onHandoverCancelled on the remote");
+            }
+        } else {
+            Rlog.e(TAG, "onHandoverCancelled: callback is null!");
+        }
+    }
+
+    /**
+     * Get the result code as a string
+     *
+     * @param resultCode The result code. Must be one of the {@link ResultCode}
+     * @return the string representation
+     *
+     * @hide
+     */
+    @NonNull
+    public static String resultCodeToString(@DataServiceCallback.ResultCode int resultCode) {
+        switch (resultCode) {
+            case RESULT_SUCCESS:
+                return "RESULT_SUCCESS";
+            case RESULT_ERROR_UNSUPPORTED:
+                return "RESULT_ERROR_UNSUPPORTED";
+            case RESULT_ERROR_INVALID_ARG:
+                return "RESULT_ERROR_INVALID_ARG";
+            case RESULT_ERROR_BUSY:
+                return "RESULT_ERROR_BUSY";
+            case RESULT_ERROR_ILLEGAL_STATE:
+                return "RESULT_ERROR_ILLEGAL_STATE";
+            case RESULT_ERROR_TEMPORARILY_UNAVAILABLE:
+                return "RESULT_ERROR_TEMPORARILY_UNAVAILABLE";
+            default:
+                return "Unknown(" + resultCode + ")";
+        }
+    }
+
+    /**
+     * Unthrottles the APN on the current transport.
+     * The APN is throttled when {@link IDataService#setupDataCall} fails within
+     * the time specified by {@link DataCallResponse#getRetryDurationMillis} and will remain
+     * throttled until this method is called.
+     * <p/>
+     * see: {@link DataCallResponse#getRetryDurationMillis}
+     *
+     * @param apn Access Point Name defined by the carrier.
+     */
+    public void onApnUnthrottled(final @NonNull String apn) {
+        if (mCallback != null) {
+            try {
+                if (DBG) Rlog.d(TAG, "onApnUnthrottled");
+                mCallback.onApnUnthrottled(apn);
+            } catch (RemoteException e) {
+                Rlog.e(TAG, "onApnUnthrottled: remote exception", e);
+            }
+        } else {
+            Rlog.e(TAG, "onApnUnthrottled: callback is null!");
+        }
+    }
+
+    /**
+     * Unthrottles the DataProfile on the current transport.
+     * The DataProfile is throttled when {@link IDataService#setupDataCall} fails within
+     * the time specified by {@link DataCallResponse#getRetryDurationMillis} and will remain
+     * throttled until this method is called.
+     * <p/>
+     * see: {@link DataCallResponse#getRetryDurationMillis}
+     *
+     * @param dataProfile DataProfile containing the APN to be throttled
+     */
+    public void onDataProfileUnthrottled(final @NonNull DataProfile dataProfile) {
+        if (mCallback != null) {
+            try {
+                if (DBG) Rlog.d(TAG, "onDataProfileUnthrottled");
+                mCallback.onDataProfileUnthrottled(dataProfile);
+            } catch (RemoteException e) {
+                Rlog.e(TAG, "onDataProfileUnthrottled: remote exception", e);
+            }
+        } else {
+            Rlog.e(TAG, "onDataProfileUnthrottled: callback is null!");
         }
     }
 }

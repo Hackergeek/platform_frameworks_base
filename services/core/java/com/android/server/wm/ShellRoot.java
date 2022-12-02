@@ -16,21 +16,24 @@
 
 package com.android.server.wm;
 
+import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
 import static android.view.WindowManager.LayoutParams.TYPE_DOCK_DIVIDER;
+import static android.view.WindowManager.SHELL_ROOT_LAYER_DIVIDER;
+import static android.view.WindowManager.SHELL_ROOT_LAYER_PIP;
 
 import static com.android.server.wm.SurfaceAnimator.ANIMATION_TYPE_WINDOW_ANIMATION;
 import static com.android.server.wm.WindowManagerService.MAX_ANIMATION_DURATION;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.graphics.Point;
-import android.graphics.Rect;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.util.Slog;
 import android.view.DisplayInfo;
 import android.view.IWindow;
 import android.view.SurfaceControl;
-import android.view.WindowInfo;
+import android.view.WindowManager;
 import android.view.animation.Animation;
 
 /**
@@ -39,32 +42,54 @@ import android.view.animation.Animation;
 public class ShellRoot {
     private static final String TAG = "ShellRoot";
     private final DisplayContent mDisplayContent;
+    private final int mShellRootLayer;
     private IWindow mClient;
     private WindowToken mToken;
     private final IBinder.DeathRecipient mDeathRecipient;
     private SurfaceControl mSurfaceControl = null;
     private IWindow mAccessibilityWindow;
     private IBinder.DeathRecipient mAccessibilityWindowDeath;
+    private int mWindowType;
 
-    ShellRoot(@NonNull IWindow client, @NonNull DisplayContent dc, final int windowType) {
+    ShellRoot(@NonNull IWindow client, @NonNull DisplayContent dc,
+            @WindowManager.ShellRootLayer final int shellRootLayer) {
         mDisplayContent = dc;
-        mDeathRecipient = () -> mDisplayContent.removeShellRoot(windowType);
+        mShellRootLayer = shellRootLayer;
+        mDeathRecipient = () -> mDisplayContent.removeShellRoot(shellRootLayer);
         try {
             client.asBinder().linkToDeath(mDeathRecipient, 0);
         } catch (RemoteException e) {
-            Slog.e(TAG, "Unable to add shell root for layer " + windowType + " on display "
+            Slog.e(TAG, "Unable to add shell root layer " + shellRootLayer + " on display "
                     + dc.getDisplayId(), e);
             return;
         }
         mClient = client;
-        mToken = new WindowToken(
-                dc.mWmService, client.asBinder(), windowType, true, dc, true, false);
+        switch (shellRootLayer) {
+            case SHELL_ROOT_LAYER_DIVIDER:
+                mWindowType = TYPE_DOCK_DIVIDER;
+                break;
+            case SHELL_ROOT_LAYER_PIP:
+                mWindowType = TYPE_APPLICATION_OVERLAY;
+                break;
+            default:
+                throw new IllegalArgumentException(shellRootLayer
+                        + " is not an acceptable shell root layer.");
+        }
+        mToken = new WindowToken.Builder(dc.mWmService, client.asBinder(), mWindowType)
+                .setDisplayContent(dc)
+                .setPersistOnEmpty(true)
+                .setOwnerCanManageAppTokens(true)
+                .build();
         mSurfaceControl = mToken.makeChildSurface(null)
                 .setContainerLayer()
                 .setName("Shell Root Leash " + dc.getDisplayId())
                 .setCallsite("ShellRoot")
                 .build();
         mToken.getPendingTransaction().show(mSurfaceControl);
+    }
+
+    int getWindowType() {
+        return mWindowType;
     }
 
     void clear() {
@@ -110,29 +135,12 @@ public class ShellRoot {
                 ANIMATION_TYPE_WINDOW_ANIMATION);
     }
 
-    WindowInfo getWindowInfo() {
-        if (mToken.windowType != TYPE_DOCK_DIVIDER) {
-            return null;
+    @Nullable
+    IBinder getAccessibilityWindowToken() {
+        if (mAccessibilityWindow != null) {
+            return mAccessibilityWindow.asBinder();
         }
-        if (!mDisplayContent.getDefaultTaskDisplayArea().isSplitScreenModeActivated()) {
-            return null;
-        }
-        if (mAccessibilityWindow == null) {
-            return null;
-        }
-        WindowInfo windowInfo = WindowInfo.obtain();
-        windowInfo.displayId = mToken.getDisplayArea().getDisplayContent().mDisplayId;
-        windowInfo.type = mToken.windowType;
-        windowInfo.layer = mToken.getWindowLayerFromType();
-        windowInfo.token = mAccessibilityWindow.asBinder();
-        windowInfo.title = "Splitscreen Divider";
-        windowInfo.focused = false;
-        windowInfo.inPictureInPicture = false;
-        windowInfo.hasFlagWatchOutsideTouch = false;
-        final Rect regionRect = new Rect();
-        mDisplayContent.getDockedDividerController().getTouchRegion(regionRect);
-        windowInfo.regionInScreen.set(regionRect);
-        return windowInfo;
+        return null;
     }
 
     void setAccessibilityWindow(IWindow window) {
@@ -152,10 +160,6 @@ public class ShellRoot {
             } catch (RemoteException e) {
                 mAccessibilityWindow = null;
             }
-        }
-        if (mDisplayContent.mWmService.mAccessibilityController != null) {
-            mDisplayContent.mWmService.mAccessibilityController.onSomeWindowResizedOrMovedLocked(
-                    mDisplayContent.getDisplayId());
         }
     }
 }

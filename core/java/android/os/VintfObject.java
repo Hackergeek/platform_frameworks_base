@@ -16,6 +16,7 @@
 
 package android.os;
 
+import android.annotation.NonNull;
 import android.annotation.TestApi;
 import android.util.Slog;
 
@@ -96,8 +97,11 @@ public class VintfObject {
      * ["android.hidl.manager@1.0", "android.hardware.camera.device@1.0",
      *  "android.hardware.camera.device@3.2"]. There are no duplicates.
      *
-     * For AIDL HALs, the version is stripped away
-     * (e.g. "android.hardware.light").
+     * For AIDL HALs, the version is a single number
+     * (e.g. "android.hardware.light@1"). Historically, this API strips the
+     * version number for AIDL HALs (e.g. "android.hardware.light"). Users
+     * of this API must be able to handle both for backwards compatibility.
+     *
      * @hide
      */
     @TestApi
@@ -110,6 +114,15 @@ public class VintfObject {
      */
     @TestApi
     public static native String getSepolicyVersion();
+
+    /**
+     * @return the PLATFORM_SEPOLICY_VERSION build flag available in framework
+     * compatibility matrix.
+     *
+     * @hide
+     */
+    @TestApi
+    public static native @NonNull String getPlatformSepolicyVersion();
 
     /**
      * @return a list of VNDK snapshots supported by the framework, as

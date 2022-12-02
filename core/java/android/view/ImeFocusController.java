@@ -16,15 +16,22 @@
 
 package android.view;
 
+import static android.view.ImeFocusControllerProto.HAS_IME_FOCUS;
+import static android.view.ImeFocusControllerProto.NEXT_SERVED_VIEW;
+import static android.view.ImeFocusControllerProto.SERVED_VIEW;
+
 import android.annotation.AnyThread;
 import android.annotation.NonNull;
 import android.annotation.UiThread;
 import android.util.Log;
+import android.util.proto.ProtoOutputStream;
 import android.view.inputmethod.InputMethodManager;
 
 import com.android.internal.inputmethod.InputMethodDebug;
 import com.android.internal.inputmethod.StartInputFlags;
 import com.android.internal.inputmethod.StartInputReason;
+
+import java.util.Objects;
 
 /**
  * Responsible for IME focus handling inside {@link ViewRootImpl}.
@@ -47,13 +54,11 @@ public final class ImeFocusController {
 
     @NonNull
     private InputMethodManagerDelegate getImmDelegate() {
-        InputMethodManagerDelegate delegate = mDelegate;
-        if (delegate != null) {
-            return delegate;
+        if (mDelegate == null) {
+            mDelegate = mViewRootImpl.mContext.getSystemService(
+                    InputMethodManager.class).getDelegate();
         }
-        delegate = mViewRootImpl.mContext.getSystemService(InputMethodManager.class).getDelegate();
-        mDelegate = delegate;
-        return delegate;
+        return mDelegate;
     }
 
     /** Called when the view root is moved to a different display. */
@@ -109,8 +114,9 @@ public final class ImeFocusController {
         if (!hasWindowFocus || !mHasImeFocus || isInLocalFocusMode(windowAttribute)) {
             return;
         }
+        View viewForWindowFocus = focusedView != null ? focusedView : mViewRootImpl.mView;
         if (DEBUG) {
-            Log.v(TAG, "onWindowFocus: " + focusedView
+            Log.v(TAG, "onWindowFocus: " + viewForWindowFocus
                     + " softInputMode=" + InputMethodDebug.softInputModeToString(
                     windowAttribute.softInputMode));
         }
@@ -121,8 +127,8 @@ public final class ImeFocusController {
             if (DEBUG) Log.v(TAG, "Restarting due to isRestartOnNextWindowFocus as true");
             forceFocus = true;
         }
+
         // Update mNextServedView when focusedView changed.
-        final View viewForWindowFocus = focusedView != null ? focusedView : mViewRootImpl.mView;
         onViewFocusChanged(viewForWindowFocus, true);
 
         // Starting new input when the next focused view is same as served view but the currently
@@ -195,8 +201,10 @@ public final class ImeFocusController {
         if (!getImmDelegate().isCurrentRootView(view.getViewRootImpl())) {
             return;
         }
-        if (mServedView == view) {
+        if (mNextServedView == view) {
             mNextServedView = null;
+        }
+        if (mServedView == view) {
             mViewRootImpl.dispatchCheckFocus();
         }
     }
@@ -212,6 +220,25 @@ public final class ImeFocusController {
         }
         immDelegate.setCurrentRootView(null);
         mHasImeFocus = false;
+    }
+
+    /**
+     * To handle the lifecycle of the input connection when the device interactivity state changed.
+     * (i.e. Calling IMS#onFinishInput when the device screen-off and Calling IMS#onStartInput
+     * when the device screen-on again).
+     */
+    @UiThread
+    public void onInteractiveChanged(boolean interactive) {
+        final InputMethodManagerDelegate immDelegate = getImmDelegate();
+        if (!immDelegate.isCurrentRootView(mViewRootImpl)) {
+            return;
+        }
+        if (interactive) {
+            final View focusedView = mViewRootImpl.mView.findFocus();
+            onViewFocusChanged(focusedView, focusedView != null);
+        } else {
+            mDelegate.finishInputAndReportToIme();
+        }
     }
 
     /**
@@ -249,6 +276,7 @@ public final class ImeFocusController {
                 @WindowManager.LayoutParams.SoftInputModeFlags int softInputMode, int windowFlags,
                 boolean forceNewFocus);
         void finishInput();
+        void finishInputAndReportToIme();
         void closeCurrentIme();
         void finishComposingText();
         void setCurrentRootView(ViewRootImpl rootView);
@@ -279,5 +307,13 @@ public final class ImeFocusController {
     @UiThread
     boolean hasImeFocus() {
         return mHasImeFocus;
+    }
+
+    void dumpDebug(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        proto.write(HAS_IME_FOCUS, mHasImeFocus);
+        proto.write(SERVED_VIEW, Objects.toString(mServedView));
+        proto.write(NEXT_SERVED_VIEW, Objects.toString(mNextServedView));
+        proto.end(token);
     }
 }

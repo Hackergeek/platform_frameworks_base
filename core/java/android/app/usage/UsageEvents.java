@@ -15,6 +15,7 @@
  */
 package android.app.usage;
 
+import android.annotation.CurrentTimeMillisLong;
 import android.annotation.IntDef;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
@@ -334,10 +335,19 @@ public final class UsageEvents implements Parcelable {
         public static final int LOCUS_ID_SET = 30;
 
         /**
+         * An event type denoting that a component in the package has been used (e.g. broadcast
+         * receiver, service, content provider). This generally matches up with usage that would
+         * cause an app to leave force stop. The component itself is not provided as we are only
+         * interested in whether the package is used, not the component itself.
+         * @hide
+         */
+        public static final int APP_COMPONENT_USED = 31;
+
+        /**
          * Keep in sync with the greatest event type value.
          * @hide
          */
-        public static final int MAX_EVENT_TYPE = 30;
+        public static final int MAX_EVENT_TYPE = 31;
 
         /** @hide */
         public static final int FLAG_IS_PACKAGE_INSTANT_APP = 1 << 0;
@@ -383,6 +393,10 @@ public final class UsageEvents implements Parcelable {
         public int mClassToken = UNASSIGNED_TOKEN;
 
         /**
+         * Uniquely identifies an activity. It's possible for two activities with the same
+         * pkg/class name to be in lifecycle at the same time. The mInstanceId is guaranteed to be
+         * unique per activity across all apps (not just within a single app).
+         *
          * {@hide}
          */
         public int mInstanceId;
@@ -571,6 +585,7 @@ public final class UsageEvents implements Parcelable {
          * <p/>
          * See {@link System#currentTimeMillis()}.
          */
+        @CurrentTimeMillisLong
         public long getTimeStamp() {
             return mTimeStamp;
         }
@@ -612,17 +627,6 @@ public final class UsageEvents implements Parcelable {
          * Returns the standby bucket of the app, if the event is of type
          * {@link #STANDBY_BUCKET_CHANGED}, otherwise returns 0.
          * @return the standby bucket associated with the event.
-         * @hide
-         */
-        public int getStandbyBucket() {
-            return (mBucketAndReason & 0xFFFF0000) >>> 16;
-        }
-
-        /**
-         * Returns the standby bucket of the app, if the event is of type
-         * {@link #STANDBY_BUCKET_CHANGED}, otherwise returns 0.
-         * @return the standby bucket associated with the event.
-         *
          */
         public int getAppStandbyBucket() {
             return (mBucketAndReason & 0xFFFF0000) >>> 16;
@@ -799,6 +803,9 @@ public final class UsageEvents implements Parcelable {
      * @return true if an event was available, false if there are no more events.
      */
     public boolean getNextEvent(Event eventOut) {
+        if (eventOut == null) {
+            throw new IllegalArgumentException("Given eventOut must not be null");
+        }
         if (mIndex >= mEventCount) {
             return false;
         }
@@ -1030,6 +1037,7 @@ public final class UsageEvents implements Parcelable {
         // Data can be too large for a transact. Write the data as a Blob, which will be written to
         // ashmem if too large.
         dest.writeBlob(data.marshall());
+        data.recycle();
     }
 
     public static final @android.annotation.NonNull Creator<UsageEvents> CREATOR = new Creator<UsageEvents>() {

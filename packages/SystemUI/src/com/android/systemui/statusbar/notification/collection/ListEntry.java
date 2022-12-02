@@ -17,9 +17,11 @@
 package com.android.systemui.statusbar.notification.collection;
 
 
+import android.annotation.UptimeMillisLong;
+
 import androidx.annotation.Nullable;
 
-import com.android.systemui.statusbar.notification.collection.listbuilder.pluggable.NotifSection;
+import com.android.systemui.statusbar.notification.collection.listbuilder.NotifSection;
 
 /**
  * Abstract superclass for top-level entries, i.e. things that can appear in the final notification
@@ -27,18 +29,31 @@ import com.android.systemui.statusbar.notification.collection.listbuilder.plugga
  */
 public abstract class ListEntry {
     private final String mKey;
-
-    int mFirstAddedIteration = -1;
+    private final long mCreationTime;
 
     private final ListAttachState mPreviousAttachState = ListAttachState.create();
     private final ListAttachState mAttachState = ListAttachState.create();
 
-    ListEntry(String key) {
+    protected ListEntry(String key, long creationTime) {
         mKey = key;
+        mCreationTime = creationTime;
     }
 
     public String getKey() {
         return mKey;
+    }
+
+    /**
+     * The SystemClock.uptimeMillis() when this object was created. In general, this means the
+     * moment when NotificationManager notifies our listener about the existence of this entry.
+     *
+     * This value will not change if the notification is updated, although it will change if the
+     * notification is removed and then re-posted. It is also wholly independent from
+     * Notification#when.
+     */
+    @UptimeMillisLong
+    public long getCreationTime() {
+        return mCreationTime;
     }
 
     /**
@@ -61,13 +76,12 @@ public abstract class ListEntry {
         return mPreviousAttachState.getParent();
     }
 
-    /** The section this notification was assigned to (0 to N-1, where N is number of sections). */
-    public int getSection() {
-        return mAttachState.getSectionIndex();
+    @Nullable public NotifSection getSection() {
+        return mAttachState.getSection();
     }
 
-    @Nullable public NotifSection getNotifSection() {
-        return mAttachState.getSection();
+    public int getSectionIndex() {
+        return mAttachState.getSection() != null ? mAttachState.getSection().getIndex() : -1;
     }
 
     ListAttachState getAttachState() {
@@ -85,5 +99,12 @@ public abstract class ListEntry {
     void beginNewAttachState() {
         mPreviousAttachState.clone(mAttachState);
         mAttachState.reset();
+    }
+
+    /**
+     * True if this entry was attached in the last pass, else false.
+     */
+    public boolean wasAttachedInPreviousPass() {
+        return getPreviousAttachState().getParent() != null;
     }
 }

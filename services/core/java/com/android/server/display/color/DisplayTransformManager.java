@@ -59,6 +59,10 @@ public class DisplayTransformManager {
      */
     public static final int LEVEL_COLOR_MATRIX_GRAYSCALE = 200;
     /**
+     * Color transform level used by A11y services to reduce bright colors.
+     */
+    public static final int LEVEL_COLOR_MATRIX_REDUCE_BRIGHT_COLORS = 250;
+    /**
      * Color transform level used by A11y services to invert the display colors.
      */
     public static final int LEVEL_COLOR_MATRIX_INVERT_COLOR = 300;
@@ -97,7 +101,7 @@ public class DisplayTransformManager {
      * Map of level -> color transformation matrix.
      */
     @GuardedBy("mColorMatrix")
-    private final SparseArray<float[]> mColorMatrix = new SparseArray<>(5);
+    private final SparseArray<float[]> mColorMatrix = new SparseArray<>(6);
     /**
      * Temporary matrix used internally by {@link #computeColorMatrixLocked()}.
      */
@@ -235,7 +239,7 @@ public class DisplayTransformManager {
     /**
      * Return true when the color matrix works in linear space.
      */
-    public static boolean needsLinearColorMatrix() {
+    public boolean needsLinearColorMatrix() {
         return SystemProperties.getInt(PERSISTENT_PROPERTY_DISPLAY_COLOR,
                 DISPLAY_COLOR_UNMANAGED) != DISPLAY_COLOR_UNMANAGED;
     }
@@ -243,7 +247,7 @@ public class DisplayTransformManager {
     /**
      * Return true when the specified colorMode requires the color matrix to work in linear space.
      */
-    public static boolean needsLinearColorMatrix(int colorMode) {
+    public boolean needsLinearColorMatrix(int colorMode) {
         return colorMode != ColorDisplayManager.COLOR_MODE_SATURATED;
     }
 

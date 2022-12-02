@@ -28,6 +28,7 @@ import android.app.Activity;
 import android.app.ActivityManagerInternal;
 import android.app.AppGlobals;
 import android.app.PendingIntent;
+import android.app.PendingIntentStats;
 import android.content.IIntentSender;
 import android.content.Intent;
 import android.os.Binder;
@@ -36,6 +37,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
+import android.os.PowerWhitelistManager;
 import android.os.RemoteCallbackList;
 import android.os.RemoteException;
 import android.os.UserHandle;
@@ -59,6 +61,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 
 /**
  * Helper class for {@link ActivityManagerService} responsible for managing pending intents.
@@ -270,9 +273,11 @@ public class PendingIntentController {
         }
     }
 
-    void registerIntentSenderCancelListener(IIntentSender sender, IResultReceiver receiver) {
+    boolean registerIntentSenderCancelListener(IIntentSender sender, IResultReceiver receiver) {
         if (!(sender instanceof PendingIntentRecord)) {
-            return;
+            Slog.w(TAG, "registerIntentSenderCancelListener called on non-PendingIntentRecord");
+            // In this case, it's not "success", but we don't know if it's canceld either.
+            return true;
         }
         boolean isCancelled;
         synchronized (mLock) {
@@ -280,12 +285,9 @@ public class PendingIntentController {
             isCancelled = pendingIntent.canceled;
             if (!isCancelled) {
                 pendingIntent.registerCancelListenerLocked(receiver);
-            }
-        }
-        if (isCancelled) {
-            try {
-                receiver.send(Activity.RESULT_CANCELED, null);
-            } catch (RemoteException e) {
+                return true;
+            } else {
+                return false;
             }
         }
     }
@@ -300,14 +302,26 @@ public class PendingIntentController {
         }
     }
 
-    void setPendingIntentWhitelistDuration(IIntentSender target, IBinder whitelistToken,
-            long duration) {
+    void setPendingIntentAllowlistDuration(IIntentSender target, IBinder allowlistToken,
+            long duration, int type, @PowerWhitelistManager.ReasonCode int reasonCode,
+            @Nullable String reason) {
         if (!(target instanceof PendingIntentRecord)) {
             Slog.w(TAG, "markAsSentFromNotification(): not a PendingIntentRecord: " + target);
             return;
         }
         synchronized (mLock) {
-            ((PendingIntentRecord) target).setWhitelistDurationLocked(whitelistToken, duration);
+            ((PendingIntentRecord) target).setAllowlistDurationLocked(allowlistToken, duration,
+                    type, reasonCode, reason);
+        }
+    }
+
+    int getPendingIntentFlags(IIntentSender target) {
+        if (!(target instanceof PendingIntentRecord)) {
+            Slog.w(TAG, "markAsSentFromNotification(): not a PendingIntentRecord: " + target);
+            return 0;
+        }
+        synchronized (mLock) {
+            return ((PendingIntentRecord) target).key.flags;
         }
     }
 
@@ -407,6 +421,55 @@ public class PendingIntentController {
                 pw.println("  (nothing)");
             }
         }
+    }
+
+    /**
+     * Provides some stats tracking of the current state of the PendingIntent queue.
+     *
+     * Data about the pending intent queue is intended to be used for memory impact tracking.
+     * Returned data (one per uid) will consist of instances of PendingIntentStats containing
+     * (I) number of PendingIntents and (II) total size of all bundled extras in the PIs.
+     *
+     * @hide
+     */
+    public List<PendingIntentStats> dumpPendingIntentStatsForStatsd() {
+        List<PendingIntentStats> pendingIntentStats = new ArrayList<>();
+
+        synchronized (mLock) {
+            if (mIntentSenderRecords.size() > 0) {
+                // First, aggregate PendingIntent data by package uid.
+                final SparseIntArray countsByUid = new SparseIntArray();
+                final SparseIntArray bundleSizesByUid = new SparseIntArray();
+
+                for (WeakReference<PendingIntentRecord> reference : mIntentSenderRecords.values()) {
+                    if (reference == null || reference.get() == null) {
+                        continue;
+                    }
+                    PendingIntentRecord record = reference.get();
+                    int index = countsByUid.indexOfKey(record.uid);
+
+                    if (index < 0) { // ie. the key was not found
+                        countsByUid.put(record.uid, 1);
+                        bundleSizesByUid.put(record.uid,
+                                record.key.requestIntent.getExtrasTotalSize());
+                    } else {
+                        countsByUid.put(record.uid, countsByUid.valueAt(index) + 1);
+                        bundleSizesByUid.put(record.uid,
+                                bundleSizesByUid.valueAt(index)
+                                + record.key.requestIntent.getExtrasTotalSize());
+                    }
+                }
+
+                // Now generate the output.
+                for (int i = 0, size = countsByUid.size(); i < size; i++) {
+                    pendingIntentStats.add(new PendingIntentStats(
+                            countsByUid.keyAt(i),
+                            countsByUid.valueAt(i),
+                            /* NB: int conversion here */ bundleSizesByUid.valueAt(i) / 1024));
+                }
+            }
+        }
+        return pendingIntentStats;
     }
 
     /**

@@ -21,7 +21,6 @@
 #include <gui/DisplayEventReceiver.h>
 #include <input/DisplayViewport.h>
 #include <input/Input.h>
-#include <ui/DisplayInfo.h>
 #include <utils/BitSet.h>
 #include <utils/Looper.h>
 #include <utils/RefBase.h>
@@ -80,6 +79,7 @@ public:
             std::map<int32_t, PointerAnimation>* outAnimationResources, int32_t displayId) = 0;
     virtual int32_t getDefaultPointerIconId() = 0;
     virtual int32_t getCustomPointerIconId() = 0;
+    virtual void onPointerDisplayIdChanged(int32_t displayId, float xPos, float yPos) = 0;
 };
 
 /*

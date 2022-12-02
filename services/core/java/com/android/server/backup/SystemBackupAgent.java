@@ -20,6 +20,7 @@ import android.app.IWallpaperManager;
 import android.app.backup.BackupAgentHelper;
 import android.app.backup.BackupDataInput;
 import android.app.backup.BackupHelper;
+import android.app.backup.BackupManager;
 import android.app.backup.FullBackup;
 import android.app.backup.FullBackupDataOutput;
 import android.app.backup.WallpaperBackupHelper;
@@ -56,6 +57,7 @@ public class SystemBackupAgent extends BackupAgentHelper {
     private static final String ACCOUNT_MANAGER_HELPER = "account_manager";
     private static final String SLICES_HELPER = "slices";
     private static final String PEOPLE_HELPER = "people";
+    private static final String APP_LOCALES_HELPER = "app_locales";
 
     // These paths must match what the WallpaperManagerService uses.  The leaf *_FILENAME
     // are also used in the full-backup file format, so must not change unless steps are
@@ -82,18 +84,18 @@ public class SystemBackupAgent extends BackupAgentHelper {
     private static final String WALLPAPER_IMAGE_KEY = WallpaperBackupHelper.WALLPAPER_IMAGE_KEY;
 
     private static final Set<String> sEligibleForMultiUser = Sets.newArraySet(
-            PERMISSION_HELPER, NOTIFICATION_HELPER, SYNC_SETTINGS_HELPER);
+            PERMISSION_HELPER, NOTIFICATION_HELPER, SYNC_SETTINGS_HELPER, APP_LOCALES_HELPER);
 
     private int mUserId = UserHandle.USER_SYSTEM;
 
     @Override
-    public void onCreate(UserHandle user) {
-        super.onCreate(user);
+    public void onCreate(UserHandle user, @BackupManager.OperationType int operationType) {
+        super.onCreate(user, operationType);
 
         mUserId = user.getIdentifier();
 
         addHelper(SYNC_SETTINGS_HELPER, new AccountSyncSettingsBackupHelper(this, mUserId));
-        addHelper(PREFERRED_HELPER, new PreferredActivityBackupHelper());
+        addHelper(PREFERRED_HELPER, new PreferredActivityBackupHelper(mUserId));
         addHelper(NOTIFICATION_HELPER, new NotificationBackupHelper(mUserId));
         addHelper(PERMISSION_HELPER, new PermissionBackupHelper(mUserId));
         addHelper(USAGE_STATS_HELPER, new UsageStatsBackupHelper(this));
@@ -101,6 +103,7 @@ public class SystemBackupAgent extends BackupAgentHelper {
         addHelper(ACCOUNT_MANAGER_HELPER, new AccountManagerBackupHelper());
         addHelper(SLICES_HELPER, new SliceBackupHelper(this));
         addHelper(PEOPLE_HELPER, new PeopleBackupHelper(mUserId));
+        addHelper(APP_LOCALES_HELPER, new AppSpecificLocalesBackupHelper(mUserId));
     }
 
     @Override

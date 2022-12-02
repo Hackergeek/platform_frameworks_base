@@ -22,19 +22,19 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:background="?attr/colorBackgroundFloating">
+    android:background="?attr/colorBackground">
   <RelativeLayout
       android:id="@+id/content_preview_image_area"
       android:layout_width="wrap_content"
       android:layout_height="wrap_content"
       android:layout_gravity="center_horizontal"
       android:paddingBottom="@dimen/chooser_view_spacing"
-      android:background="?attr/colorBackgroundFloating">
+      android:background="?attr/colorBackground">
 
     <view class="com.android.internal.app.ChooserActivity$RoundedRectImageView"
           android:id="@+id/content_preview_image_1_large"
           android:layout_width="120dp"
-          android:layout_height="140dp"
+          android:layout_height="104dp"
           android:layout_alignParentTop="true"
           android:adjustViewBounds="true"
           android:gravity="center"
@@ -44,7 +44,7 @@
           android:id="@+id/content_preview_image_2_large"
           android:visibility="gone"
           android:layout_width="120dp"
-          android:layout_height="140dp"
+          android:layout_height="104dp"
           android:layout_alignParentTop="true"
           android:layout_toRightOf="@id/content_preview_image_1_large"
           android:layout_marginLeft="10dp"

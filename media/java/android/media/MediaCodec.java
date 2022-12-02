@@ -16,9 +16,12 @@
 
 package android.media;
 
+import android.Manifest;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresPermission;
+import android.annotation.SystemApi;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.graphics.ImageFormat;
 import android.graphics.Rect;
@@ -42,9 +45,11 @@ import java.nio.ByteOrder;
 import java.nio.ReadOnlyBufferException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -59,10 +64,10 @@ import java.util.concurrent.locks.ReentrantLock;
  with {@link MediaExtractor}, {@link MediaSync}, {@link MediaMuxer}, {@link MediaCrypto},
  {@link MediaDrm}, {@link Image}, {@link Surface}, and {@link AudioTrack}.)
  <p>
- <center><object style="width: 540px; height: 205px;" type="image/svg+xml"
-   data="../../../images/media/mediacodec_buffers.svg"><img
-   src="../../../images/media/mediacodec_buffers.png" style="width: 540px; height: 205px"
-   alt="MediaCodec buffer flow diagram"></object></center>
+ <center>
+   <img src="../../../images/media/mediacodec_buffers.svg" style="width: 540px; height: 205px"
+       alt="MediaCodec buffer flow diagram">
+ </center>
  <p>
  In broad terms, a codec processes input data to generate output data. It processes data
  asynchronously and uses a set of input and output buffers. At a simplistic level, you request
@@ -70,6 +75,37 @@ import java.util.concurrent.locks.ReentrantLock;
  processing. The codec uses up the data and transforms it into one of its empty output buffers.
  Finally, you request (or receive) a filled output buffer, consume its contents and release it
  back to the codec.
+
+ <h3 id=qualityFloor><a name="qualityFloor">Minimum Quality Floor for Video Encoding</h3>
+ <p>
+ Beginning with {@link android.os.Build.VERSION_CODES#S}, Android's Video MediaCodecs enforce a
+ minimum quality floor. The intent is to eliminate poor quality video encodings. This quality
+ floor is applied when the codec is in Variable Bitrate (VBR) mode; it is not applied when
+ the codec is in Constant Bitrate (CBR) mode. The quality floor enforcement is also restricted
+ to a particular size range; this size range is currently for video resolutions
+ larger than 320x240 up through 1920x1080.
+
+ <p>
+ When this quality floor is in effect, the codec and supporting framework code will work to
+ ensure that the generated video is of at least a "fair" or "good" quality. The metric
+ used to choose these targets is the VMAF (Video Multi-method Assessment Function) with a
+ target score of 70 for selected test sequences.
+
+ <p>
+ The typical effect is that
+ some videos will generate a higher bitrate than originally configured. This will be most
+ notable for videos which were configured with very low bitrates; the codec will use a bitrate
+ that is determined to be more likely to generate an "fair" or "good" quality video. Another
+ situation is where a video includes very complicated content (lots of motion and detail);
+ in such configurations, the codec will use extra bitrate as needed to avoid losing all of
+ the content's finer detail.
+
+ <p>
+ This quality floor will not impact content captured at high bitrates (a high bitrate should
+ already provide the codec with sufficient capacity to encode all of the detail).
+ The quality floor does not operate on CBR encodings.
+ The quality floor currently does not operate on resolutions of 320x240 or lower, nor on
+ videos with resolution above 1920x1080.
 
  <h3>Data Types</h3>
  <p>
@@ -188,19 +224,19 @@ import java.util.concurrent.locks.ReentrantLock;
   </thead>
   <tbody>
    <tr>
-    <td>{@code "crop-left"}</td>
+    <td>{@link MediaFormat#KEY_CROP_LEFT}</td>
     <td>Integer</td>
     <td>The left-coordinate (x) of the crop rectangle</td>
    </tr><tr>
-    <td>{@code "crop-top"}</td>
+    <td>{@link MediaFormat#KEY_CROP_TOP}</td>
     <td>Integer</td>
     <td>The top-coordinate (y) of the crop rectangle</td>
    </tr><tr>
-    <td>{@code "crop-right"}</td>
+    <td>{@link MediaFormat#KEY_CROP_RIGHT}</td>
     <td>Integer</td>
     <td>The right-coordinate (x) <strong>MINUS 1</strong> of the crop rectangle</td>
    </tr><tr>
-    <td>{@code "crop-bottom"}</td>
+    <td>{@link MediaFormat#KEY_CROP_BOTTOM}</td>
     <td>Integer</td>
     <td>The bottom-coordinate (y) <strong>MINUS 1</strong> of the crop rectangle</td>
    </tr><tr>
@@ -216,12 +252,16 @@ import java.util.concurrent.locks.ReentrantLock;
  <pre class=prettyprint>
  MediaFormat format = decoder.getOutputFormat(&hellip;);
  int width = format.getInteger(MediaFormat.KEY_WIDTH);
- if (format.containsKey("crop-left") && format.containsKey("crop-right")) {
-     width = format.getInteger("crop-right") + 1 - format.getInteger("crop-left");
+ if (format.containsKey(MediaFormat.KEY_CROP_LEFT)
+         && format.containsKey(MediaFormat.KEY_CROP_RIGHT)) {
+     width = format.getInteger(MediaFormat.KEY_CROP_RIGHT) + 1
+                 - format.getInteger(MediaFormat.KEY_CROP_LEFT);
  }
  int height = format.getInteger(MediaFormat.KEY_HEIGHT);
- if (format.containsKey("crop-top") && format.containsKey("crop-bottom")) {
-     height = format.getInteger("crop-bottom") + 1 - format.getInteger("crop-top");
+ if (format.containsKey(MediaFormat.KEY_CROP_TOP)
+         && format.containsKey(MediaFormat.KEY_CROP_BOTTOM)) {
+     height = format.getInteger(MediaFormat.KEY_CROP_BOTTOM) + 1
+                  - format.getInteger(MediaFormat.KEY_CROP_TOP);
  }
  </pre>
  <p class=note>
@@ -236,10 +276,10 @@ import java.util.concurrent.locks.ReentrantLock;
  Uninitialized, Configured and Error, whereas the Executing state conceptually progresses through
  three sub-states: Flushed, Running and End-of-Stream.
  <p>
- <center><object style="width: 516px; height: 353px;" type="image/svg+xml"
-   data="../../../images/media/mediacodec_states.svg"><img
-   src="../../../images/media/mediacodec_states.png" style="width: 519px; height: 356px"
-   alt="MediaCodec state diagram"></object></center>
+ <center>
+   <img src="../../../images/media/mediacodec_states.svg" style="width: 519px; height: 356px"
+       alt="MediaCodec state diagram">
+ </center>
  <p>
  When you create a codec using one of the factory methods, the codec is in the Uninitialized
  state. First, you need to configure it via {@link #configure configure(&hellip;)}, which brings
@@ -252,8 +292,11 @@ import java.util.concurrent.locks.ReentrantLock;
  most of its life. When you queue an input buffer with the {@linkplain #BUFFER_FLAG_END_OF_STREAM
  end-of-stream marker}, the codec transitions to the End-of-Stream sub-state. In this state the
  codec no longer accepts further input buffers, but still generates output buffers until the
- end-of-stream is reached on the output. You can move back to the Flushed sub-state at any time
- while in the Executing state using {@link #flush}.
+ end-of-stream is reached on the output. For decoders, you can move back to the Flushed sub-state
+ at any time while in the Executing state using {@link #flush}.
+ <p class=note>
+ <strong>Note:</strong> Going back to Flushed state is only supported for decoders, and may not
+ work for encoders (the behavior is undefined).
  <p>
  Call {@link #stop} to return the codec to the Uninitialized state, whereupon it may be configured
  again. When you are done using a codec, you must release it by calling {@link #release}.
@@ -481,10 +524,10 @@ import java.util.concurrent.locks.ReentrantLock;
  Similarly, upon an initial call to {@code start} the codec will move directly to the Running
  sub-state and start passing available input buffers via the callback.
  <p>
- <center><object style="width: 516px; height: 353px;" type="image/svg+xml"
-   data="../../../images/media/mediacodec_async_states.svg"><img
-   src="../../../images/media/mediacodec_async_states.png" style="width: 516px; height: 353px"
-   alt="MediaCodec state diagram for asynchronous operation"></object></center>
+ <center>
+   <img src="../../../images/media/mediacodec_async_states.svg" style="width: 516px; height: 353px"
+       alt="MediaCodec state diagram for asynchronous operation">
+ </center>
  <p>
  MediaCodec is typically used like this in asynchronous mode:
  <pre class=prettyprint>
@@ -662,7 +705,8 @@ import java.util.concurrent.locks.ReentrantLock;
  excessive frames. Since {@link android.os.Build.VERSION_CODES#Q} the default behavior is to drop
  excessive frames. Applications can opt out of this behavior for non-View surfaces (such as
  ImageReader or SurfaceTexture) by targeting SDK {@link android.os.Build.VERSION_CODES#Q} and
- setting the key {@code "allow-frame-drop"} to {@code 0} in their configure format.
+ setting the key {@link MediaFormat#KEY_ALLOW_FRAME_DROP} to {@code 0}
+ in their configure format.
 
  <h4>Transformations When Rendering onto Surface</h4>
 
@@ -1538,6 +1582,7 @@ import java.util.concurrent.locks.ReentrantLock;
  </table>
  */
 final public class MediaCodec {
+
     /**
      * Per buffer metadata includes an offset and size specifying
      * the range of valid data in the associated codec (output) buffer.
@@ -1671,9 +1716,11 @@ final public class MediaCodec {
     public @interface BufferFlag {}
 
     private EventHandler mEventHandler;
+    private EventHandler mOnFirstTunnelFrameReadyHandler;
     private EventHandler mOnFrameRenderedHandler;
     private EventHandler mCallbackHandler;
     private Callback mCallback;
+    private OnFirstTunnelFrameReadyListener mOnFirstTunnelFrameReadyListener;
     private OnFrameRenderedListener mOnFrameRenderedListener;
     private final Object mListenerLock = new Object();
     private MediaCodecInfo mCodecInfo;
@@ -1683,6 +1730,7 @@ final public class MediaCodec {
     private static final int EVENT_CALLBACK = 1;
     private static final int EVENT_SET_CALLBACK = 2;
     private static final int EVENT_FRAME_RENDERED = 3;
+    private static final int EVENT_FIRST_TUNNEL_FRAME_READY = 4;
 
     private static final int CB_INPUT_AVAILABLE = 1;
     private static final int CB_OUTPUT_AVAILABLE = 2;
@@ -1727,6 +1775,16 @@ final public class MediaCodec {
                                 mCodec, (long)mediaTimeUs, (long)systemNano);
                     }
                     break;
+                case EVENT_FIRST_TUNNEL_FRAME_READY:
+                    OnFirstTunnelFrameReadyListener onFirstTunnelFrameReadyListener;
+                    synchronized (mListenerLock) {
+                        onFirstTunnelFrameReadyListener = mOnFirstTunnelFrameReadyListener;
+                    }
+                    if (onFirstTunnelFrameReadyListener == null) {
+                        break;
+                    }
+                    onFirstTunnelFrameReadyListener.onFirstTunnelFrameReady(mCodec);
+                    break;
                 default:
                 {
                     break;
@@ -1746,7 +1804,7 @@ final public class MediaCodec {
                     synchronized(mBufferLock) {
                         switch (mBufferMode) {
                             case BUFFER_MODE_LEGACY:
-                                validateInputByteBuffer(mCachedInputBuffers, index);
+                                validateInputByteBufferLocked(mCachedInputBuffers, index);
                                 break;
                             case BUFFER_MODE_BLOCK:
                                 while (mQueueRequests.size() <= index) {
@@ -1775,7 +1833,7 @@ final public class MediaCodec {
                     synchronized(mBufferLock) {
                         switch (mBufferMode) {
                             case BUFFER_MODE_LEGACY:
-                                validateOutputByteBuffer(mCachedOutputBuffers, index, info);
+                                validateOutputByteBufferLocked(mCachedOutputBuffers, index, info);
                                 break;
                             case BUFFER_MODE_BLOCK:
                                 while (mOutputFrames.size() <= index) {
@@ -1887,12 +1945,41 @@ final public class MediaCodec {
     @NonNull
     public static MediaCodec createByCodecName(@NonNull String name)
             throws IOException {
-        return new MediaCodec(
-                name, false /* nameIsType */, false /* unused */);
+        return new MediaCodec(name, false /* nameIsType */, false /* encoder */);
     }
 
-    private MediaCodec(
-            @NonNull String name, boolean nameIsType, boolean encoder) {
+    /**
+     * This is the same as createByCodecName, but allows for instantiating a codec on behalf of a
+     * client process. This is used for system apps or system services that create MediaCodecs on
+     * behalf of other processes and will reclaim resources as necessary from processes with lower
+     * priority than the client process, rather than processes with lower priority than the system
+     * app or system service. Likely to be used with information obtained from
+     * {@link android.media.MediaCodecList}.
+     * @param name
+     * @param clientPid
+     * @param clientUid
+     * @throws IOException if the codec cannot be created.
+     * @throws IllegalArgumentException if name is not valid.
+     * @throws NullPointerException if name is null.
+     * @throws SecurityException if the MEDIA_RESOURCE_OVERRIDE_PID permission is not granted.
+     *
+     * @hide
+     */
+    @NonNull
+    @SystemApi
+    @RequiresPermission(Manifest.permission.MEDIA_RESOURCE_OVERRIDE_PID)
+    public static MediaCodec createByCodecNameForClient(@NonNull String name, int clientPid,
+            int clientUid) throws IOException {
+        return new MediaCodec(name, false /* nameIsType */, false /* encoder */, clientPid,
+                clientUid);
+    }
+
+    private MediaCodec(@NonNull String name, boolean nameIsType, boolean encoder) {
+        this(name, nameIsType, encoder, -1 /* pid */, -1 /* uid */);
+    }
+
+    private MediaCodec(@NonNull String name, boolean nameIsType, boolean encoder, int pid,
+            int uid) {
         Looper looper;
         if ((looper = Looper.myLooper()) != null) {
             mEventHandler = new EventHandler(this, looper);
@@ -1902,6 +1989,7 @@ final public class MediaCodec {
             mEventHandler = null;
         }
         mCallbackHandler = mEventHandler;
+        mOnFirstTunnelFrameReadyHandler = mEventHandler;
         mOnFrameRenderedHandler = mEventHandler;
 
         mBufferLock = new Object();
@@ -1909,7 +1997,7 @@ final public class MediaCodec {
         // save name used at creation
         mNameAtCreation = nameIsType ? null : name;
 
-        native_setup(name, nameIsType, encoder);
+        native_setup(name, nameIsType, encoder, pid, uid);
     }
 
     private String mNameAtCreation;
@@ -2233,10 +2321,6 @@ final public class MediaCodec {
      */
     public final void start() {
         native_start();
-        synchronized(mBufferLock) {
-            cacheBuffers(true /* input */);
-            cacheBuffers(false /* input */);
-        }
     }
     private native final void native_start();
 
@@ -2255,6 +2339,9 @@ final public class MediaCodec {
             if (mCallbackHandler != null) {
                 mCallbackHandler.removeMessages(EVENT_SET_CALLBACK);
                 mCallbackHandler.removeMessages(EVENT_CALLBACK);
+            }
+            if (mOnFirstTunnelFrameReadyHandler != null) {
+                mOnFirstTunnelFrameReadyHandler.removeMessages(EVENT_FIRST_TUNNEL_FRAME_READY);
             }
             if (mOnFrameRenderedHandler != null) {
                 mOnFrameRenderedHandler.removeMessages(EVENT_FRAME_RENDERED);
@@ -2290,8 +2377,10 @@ final public class MediaCodec {
      */
     public final void flush() {
         synchronized(mBufferLock) {
-            invalidateByteBuffers(mCachedInputBuffers);
-            invalidateByteBuffers(mCachedOutputBuffers);
+            invalidateByteBuffersLocked(mCachedInputBuffers);
+            invalidateByteBuffersLocked(mCachedOutputBuffers);
+            mValidInputIndices.clear();
+            mValidOutputIndices.clear();
             mDequeuedInputBuffers.clear();
             mDequeuedOutputBuffers.clear();
         }
@@ -2393,37 +2482,44 @@ final public class MediaCodec {
          * This indicates that the requested key was not found when trying to
          * perform a decrypt operation.  The operation can be retried after adding
          * the correct decryption key.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_NO_KEY}.
          */
-        public static final int ERROR_NO_KEY = 1;
+        public static final int ERROR_NO_KEY = MediaDrm.ErrorCodes.ERROR_NO_KEY;
 
         /**
          * This indicates that the key used for decryption is no longer
          * valid due to license term expiration.  The operation can be retried
          * after updating the expired keys.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_KEY_EXPIRED}.
          */
-        public static final int ERROR_KEY_EXPIRED = 2;
+        public static final int ERROR_KEY_EXPIRED = MediaDrm.ErrorCodes.ERROR_KEY_EXPIRED;
 
         /**
          * This indicates that a required crypto resource was not able to be
          * allocated while attempting the requested operation.  The operation
          * can be retried if the app is able to release resources.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_RESOURCE_BUSY}
          */
-        public static final int ERROR_RESOURCE_BUSY = 3;
+        public static final int ERROR_RESOURCE_BUSY = MediaDrm.ErrorCodes.ERROR_RESOURCE_BUSY;
 
         /**
          * This indicates that the output protection levels supported by the
          * device are not sufficient to meet the requirements set by the
          * content owner in the license policy.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_INSUFFICIENT_OUTPUT_PROTECTION}
          */
-        public static final int ERROR_INSUFFICIENT_OUTPUT_PROTECTION = 4;
+        public static final int ERROR_INSUFFICIENT_OUTPUT_PROTECTION =
+                MediaDrm.ErrorCodes.ERROR_INSUFFICIENT_OUTPUT_PROTECTION;
 
         /**
          * This indicates that decryption was attempted on a session that is
          * not opened, which could be due to a failure to open the session,
          * closing the session prematurely, or the session being reclaimed
          * by the resource manager.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_SESSION_NOT_OPENED}
          */
-        public static final int ERROR_SESSION_NOT_OPENED = 5;
+        public static final int ERROR_SESSION_NOT_OPENED =
+                MediaDrm.ErrorCodes.ERROR_SESSION_NOT_OPENED;
 
         /**
          * This indicates that an operation was attempted that could not be
@@ -2432,23 +2528,28 @@ final public class MediaCodec {
          * device security features that aren't supported by the device,
          * or due to an internal error in the crypto system that prevents
          * the specified security policy from being met.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_UNSUPPORTED_OPERATION}
          */
-        public static final int ERROR_UNSUPPORTED_OPERATION = 6;
+        public static final int ERROR_UNSUPPORTED_OPERATION =
+                MediaDrm.ErrorCodes.ERROR_UNSUPPORTED_OPERATION;
 
         /**
          * This indicates that the security level of the device is not
          * sufficient to meet the requirements set by the content owner
          * in the license policy.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_INSUFFICIENT_SECURITY}
          */
-        public static final int ERROR_INSUFFICIENT_SECURITY = 7;
+        public static final int ERROR_INSUFFICIENT_SECURITY =
+                MediaDrm.ErrorCodes.ERROR_INSUFFICIENT_SECURITY;
 
         /**
          * This indicates that the video frame being decrypted exceeds
          * the size of the device's protected output buffers. When
          * encountering this error the app should try playing content
          * of a lower resolution.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_FRAME_TOO_LARGE}
          */
-        public static final int ERROR_FRAME_TOO_LARGE = 8;
+        public static final int ERROR_FRAME_TOO_LARGE = MediaDrm.ErrorCodes.ERROR_FRAME_TOO_LARGE;
 
         /**
          * This error indicates that session state has been
@@ -2456,26 +2557,37 @@ final public class MediaCodec {
          * of retaining crypto session state across device
          * suspend/resume. The session must be closed and a new
          * session opened to resume operation.
+         * @deprecated Please use {@link MediaDrm.ErrorCodes#ERROR_LOST_STATE}
          */
-        public static final int ERROR_LOST_STATE = 9;
+        public static final int ERROR_LOST_STATE = MediaDrm.ErrorCodes.ERROR_LOST_STATE;
 
         /** @hide */
         @IntDef({
-            ERROR_NO_KEY,
-            ERROR_KEY_EXPIRED,
-            ERROR_RESOURCE_BUSY,
-            ERROR_INSUFFICIENT_OUTPUT_PROTECTION,
-            ERROR_SESSION_NOT_OPENED,
-            ERROR_UNSUPPORTED_OPERATION,
-            ERROR_INSUFFICIENT_SECURITY,
-            ERROR_FRAME_TOO_LARGE,
-            ERROR_LOST_STATE
+            MediaDrm.ErrorCodes.ERROR_NO_KEY,
+            MediaDrm.ErrorCodes.ERROR_KEY_EXPIRED,
+            MediaDrm.ErrorCodes.ERROR_RESOURCE_BUSY,
+            MediaDrm.ErrorCodes.ERROR_INSUFFICIENT_OUTPUT_PROTECTION,
+            MediaDrm.ErrorCodes.ERROR_SESSION_NOT_OPENED,
+            MediaDrm.ErrorCodes.ERROR_UNSUPPORTED_OPERATION,
+            MediaDrm.ErrorCodes.ERROR_INSUFFICIENT_SECURITY,
+            MediaDrm.ErrorCodes.ERROR_FRAME_TOO_LARGE,
+            MediaDrm.ErrorCodes.ERROR_LOST_STATE,
+            MediaDrm.ErrorCodes.ERROR_GENERIC_OEM,
+            MediaDrm.ErrorCodes.ERROR_GENERIC_PLUGIN,
+            MediaDrm.ErrorCodes.ERROR_LICENSE_PARSE,
+            MediaDrm.ErrorCodes.ERROR_MEDIA_FRAMEWORK,
+            MediaDrm.ErrorCodes.ERROR_ZERO_SUBSAMPLES
         })
         @Retention(RetentionPolicy.SOURCE)
         public @interface CryptoErrorCode {}
 
         /**
-         * Retrieve the error code associated with a CryptoException
+         * Returns error code associated with this {@link CryptoException}.
+         * <p>
+         * Please refer to {@link MediaDrm.ErrorCodes} for the general error
+         * handling strategy and details about each possible return value.
+         *
+         * @return an error code defined in {@link MediaDrm.ErrorCodes}.
          */
         @CryptoErrorCode
         public int getErrorCode() {
@@ -2552,14 +2664,14 @@ final public class MediaCodec {
                         + "is not compatible with CONFIGURE_FLAG_USE_BLOCK_MODEL. "
                         + "Please use getQueueRequest() to queue buffers");
             }
-            invalidateByteBuffer(mCachedInputBuffers, index);
+            invalidateByteBufferLocked(mCachedInputBuffers, index, true /* input */);
             mDequeuedInputBuffers.remove(index);
         }
         try {
             native_queueInputBuffer(
                     index, offset, size, presentationTimeUs, flags);
         } catch (CryptoException | IllegalStateException e) {
-            revalidateByteBuffer(mCachedInputBuffers, index);
+            revalidateByteBuffer(mCachedInputBuffers, index, true /* input */);
             throw e;
         }
     }
@@ -2710,12 +2822,12 @@ final public class MediaCodec {
             }
         };
 
-        private final Pattern zeroPattern = new Pattern(0, 0);
+        private static final Pattern ZERO_PATTERN = new Pattern(0, 0);
 
         /**
          * The pattern applicable to the protected data in each subsample.
          */
-        private Pattern pattern;
+        private Pattern mPattern = ZERO_PATTERN;
 
         /**
          * Set the subsample count, clear/encrypted sizes, key, IV and mode fields of
@@ -2734,22 +2846,30 @@ final public class MediaCodec {
             key = newKey;
             iv = newIV;
             mode = newMode;
-            pattern = zeroPattern;
+            mPattern = ZERO_PATTERN;
+        }
+
+        /**
+         * Returns the {@link Pattern encryption pattern}.
+         */
+        public @NonNull Pattern getPattern() {
+            return new Pattern(mPattern.getEncryptBlocks(), mPattern.getSkipBlocks());
         }
 
         /**
          * Set the encryption pattern on a {@link MediaCodec.CryptoInfo} instance.
-         * See {@link MediaCodec.CryptoInfo.Pattern}.
+         * See {@link Pattern}.
          */
         public void setPattern(Pattern newPattern) {
             if (newPattern == null) {
-                newPattern = zeroPattern;
+                newPattern = ZERO_PATTERN;
             }
-            pattern = newPattern;
+            setPattern(newPattern.getEncryptBlocks(), newPattern.getSkipBlocks());
         }
 
+        // Accessed from android_media_MediaExtractor.cpp.
         private void setPattern(int blocksToEncrypt, int blocksToSkip) {
-            pattern = new Pattern(blocksToEncrypt, blocksToSkip);
+            mPattern = new Pattern(blocksToEncrypt, blocksToSkip);
         }
 
         @Override
@@ -2771,9 +2891,9 @@ final public class MediaCodec {
             builder.append(", encrypted ");
             builder.append(Arrays.toString(numBytesOfEncryptedData));
             builder.append(", pattern (encrypt: ");
-            builder.append(pattern.mEncryptBlocks);
+            builder.append(mPattern.mEncryptBlocks);
             builder.append(", skip: ");
-            builder.append(pattern.mSkipBlocks);
+            builder.append(mPattern.mSkipBlocks);
             builder.append(")");
             return builder.toString();
         }
@@ -2814,14 +2934,14 @@ final public class MediaCodec {
                         + "is not compatible with CONFIGURE_FLAG_USE_BLOCK_MODEL. "
                         + "Please use getQueueRequest() to queue buffers");
             }
-            invalidateByteBuffer(mCachedInputBuffers, index);
+            invalidateByteBufferLocked(mCachedInputBuffers, index, true /* input */);
             mDequeuedInputBuffers.remove(index);
         }
         try {
             native_queueSecureInputBuffer(
                     index, offset, info, presentationTimeUs, flags);
         } catch (CryptoException | IllegalStateException e) {
-            revalidateByteBuffer(mCachedInputBuffers, index);
+            revalidateByteBuffer(mCachedInputBuffers, index, true /* input */);
             throw e;
         }
     }
@@ -2855,7 +2975,7 @@ final public class MediaCodec {
         int res = native_dequeueInputBuffer(timeoutUs);
         if (res >= 0) {
             synchronized(mBufferLock) {
-                validateInputByteBuffer(mCachedInputBuffers, res);
+                validateInputByteBufferLocked(mCachedInputBuffers, res);
             }
         }
         return res;
@@ -3452,10 +3572,10 @@ final public class MediaCodec {
         int res = native_dequeueOutputBuffer(info, timeoutUs);
         synchronized (mBufferLock) {
             if (res == INFO_OUTPUT_BUFFERS_CHANGED) {
-                cacheBuffers(false /* input */);
+                cacheBuffersLocked(false /* input */);
             } else if (res >= 0) {
-                validateOutputByteBuffer(mCachedOutputBuffers, res, info);
-                if (mHasSurface) {
+                validateOutputByteBufferLocked(mCachedOutputBuffers, res, info);
+                if (mHasSurface || mCachedOutputBuffers == null) {
                     mDequeuedOutputInfos.put(res, info.dup());
                 }
             }
@@ -3549,9 +3669,9 @@ final public class MediaCodec {
         synchronized(mBufferLock) {
             switch (mBufferMode) {
                 case BUFFER_MODE_LEGACY:
-                    invalidateByteBuffer(mCachedOutputBuffers, index);
+                    invalidateByteBufferLocked(mCachedOutputBuffers, index, false /* input */);
                     mDequeuedOutputBuffers.remove(index);
-                    if (mHasSurface) {
+                    if (mHasSurface || mCachedOutputBuffers == null) {
                         info = mDequeuedOutputInfos.remove(index);
                     }
                     break;
@@ -3703,15 +3823,24 @@ final public class MediaCodec {
 
     private ByteBuffer[] mCachedInputBuffers;
     private ByteBuffer[] mCachedOutputBuffers;
+    private BitSet mValidInputIndices = new BitSet();
+    private BitSet mValidOutputIndices = new BitSet();
+
     private final BufferMap mDequeuedInputBuffers = new BufferMap();
     private final BufferMap mDequeuedOutputBuffers = new BufferMap();
     private final Map<Integer, BufferInfo> mDequeuedOutputInfos =
         new HashMap<Integer, BufferInfo>();
     final private Object mBufferLock;
 
-    private final void invalidateByteBuffer(
-            @Nullable ByteBuffer[] buffers, int index) {
-        if (buffers != null && index >= 0 && index < buffers.length) {
+    private void invalidateByteBufferLocked(
+            @Nullable ByteBuffer[] buffers, int index, boolean input) {
+        if (buffers == null) {
+            if (index < 0) {
+                throw new IllegalStateException("index is negative (" + index + ")");
+            }
+            BitSet indices = input ? mValidInputIndices : mValidOutputIndices;
+            indices.clear(index);
+        } else if (index >= 0 && index < buffers.length) {
             ByteBuffer buffer = buffers[index];
             if (buffer != null) {
                 buffer.setAccessible(false);
@@ -3719,9 +3848,14 @@ final public class MediaCodec {
         }
     }
 
-    private final void validateInputByteBuffer(
+    private void validateInputByteBufferLocked(
             @Nullable ByteBuffer[] buffers, int index) {
-        if (buffers != null && index >= 0 && index < buffers.length) {
+        if (buffers == null) {
+            if (index < 0) {
+                throw new IllegalStateException("index is negative (" + index + ")");
+            }
+            mValidInputIndices.set(index);
+        } else if (index >= 0 && index < buffers.length) {
             ByteBuffer buffer = buffers[index];
             if (buffer != null) {
                 buffer.setAccessible(true);
@@ -3730,10 +3864,16 @@ final public class MediaCodec {
         }
     }
 
-    private final void revalidateByteBuffer(
-            @Nullable ByteBuffer[] buffers, int index) {
+    private void revalidateByteBuffer(
+            @Nullable ByteBuffer[] buffers, int index, boolean input) {
         synchronized(mBufferLock) {
-            if (buffers != null && index >= 0 && index < buffers.length) {
+            if (buffers == null) {
+                if (index < 0) {
+                    throw new IllegalStateException("index is negative (" + index + ")");
+                }
+                BitSet indices = input ? mValidInputIndices : mValidOutputIndices;
+                indices.set(index);
+            } else if (index >= 0 && index < buffers.length) {
                 ByteBuffer buffer = buffers[index];
                 if (buffer != null) {
                     buffer.setAccessible(true);
@@ -3742,9 +3882,14 @@ final public class MediaCodec {
         }
     }
 
-    private final void validateOutputByteBuffer(
+    private void validateOutputByteBufferLocked(
             @Nullable ByteBuffer[] buffers, int index, @NonNull BufferInfo info) {
-        if (buffers != null && index >= 0 && index < buffers.length) {
+        if (buffers == null) {
+            if (index < 0) {
+                throw new IllegalStateException("index is negative (" + index + ")");
+            }
+            mValidOutputIndices.set(index);
+        } else if (index >= 0 && index < buffers.length) {
             ByteBuffer buffer = buffers[index];
             if (buffer != null) {
                 buffer.setAccessible(true);
@@ -3753,7 +3898,7 @@ final public class MediaCodec {
         }
     }
 
-    private final void invalidateByteBuffers(@Nullable ByteBuffer[] buffers) {
+    private void invalidateByteBuffersLocked(@Nullable ByteBuffer[] buffers) {
         if (buffers != null) {
             for (ByteBuffer buffer: buffers) {
                 if (buffer != null) {
@@ -3763,27 +3908,29 @@ final public class MediaCodec {
         }
     }
 
-    private final void freeByteBuffer(@Nullable ByteBuffer buffer) {
+    private void freeByteBufferLocked(@Nullable ByteBuffer buffer) {
         if (buffer != null /* && buffer.isDirect() */) {
             // all of our ByteBuffers are direct
             java.nio.NioUtils.freeDirectBuffer(buffer);
         }
     }
 
-    private final void freeByteBuffers(@Nullable ByteBuffer[] buffers) {
+    private void freeByteBuffersLocked(@Nullable ByteBuffer[] buffers) {
         if (buffers != null) {
             for (ByteBuffer buffer: buffers) {
-                freeByteBuffer(buffer);
+                freeByteBufferLocked(buffer);
             }
         }
     }
 
-    private final void freeAllTrackedBuffers() {
+    private void freeAllTrackedBuffers() {
         synchronized(mBufferLock) {
-            freeByteBuffers(mCachedInputBuffers);
-            freeByteBuffers(mCachedOutputBuffers);
+            freeByteBuffersLocked(mCachedInputBuffers);
+            freeByteBuffersLocked(mCachedOutputBuffers);
             mCachedInputBuffers = null;
             mCachedOutputBuffers = null;
+            mValidInputIndices.clear();
+            mValidOutputIndices.clear();
             mDequeuedInputBuffers.clear();
             mDequeuedOutputBuffers.clear();
             mQueueRequests.clear();
@@ -3791,13 +3938,30 @@ final public class MediaCodec {
         }
     }
 
-    private final void cacheBuffers(boolean input) {
+    private void cacheBuffersLocked(boolean input) {
         ByteBuffer[] buffers = null;
         try {
             buffers = getBuffers(input);
-            invalidateByteBuffers(buffers);
+            invalidateByteBuffersLocked(buffers);
         } catch (IllegalStateException e) {
             // we don't get buffers in async mode
+        }
+        if (buffers != null) {
+            BitSet indices = input ? mValidInputIndices : mValidOutputIndices;
+            for (int i = 0; i < buffers.length; ++i) {
+                ByteBuffer buffer = buffers[i];
+                if (buffer == null || !indices.get(i)) {
+                    continue;
+                }
+                buffer.setAccessible(true);
+                if (!input) {
+                    BufferInfo info = mDequeuedOutputInfos.get(i);
+                    if (info != null) {
+                        buffer.limit(info.offset + info.size).position(info.offset);
+                    }
+                }
+            }
+            indices.clear();
         }
         if (input) {
             mCachedInputBuffers = buffers;
@@ -3832,6 +3996,9 @@ final public class MediaCodec {
                         + "is not compatible with CONFIGURE_FLAG_USE_BLOCK_MODEL. "
                         + "Please obtain MediaCodec.LinearBlock or HardwareBuffer "
                         + "objects and attach to QueueRequest objects.");
+            }
+            if (mCachedInputBuffers == null) {
+                cacheBuffersLocked(true /* input */);
             }
             if (mCachedInputBuffers == null) {
                 throw new IllegalStateException();
@@ -3872,6 +4039,9 @@ final public class MediaCodec {
                         + "Please use getOutputFrame to get output frames.");
             }
             if (mCachedOutputBuffers == null) {
+                cacheBuffersLocked(false /* input */);
+            }
+            if (mCachedOutputBuffers == null) {
                 throw new IllegalStateException();
             }
             // FIXME: check codec status
@@ -3909,7 +4079,7 @@ final public class MediaCodec {
         }
         ByteBuffer newBuffer = getBuffer(true /* input */, index);
         synchronized (mBufferLock) {
-            invalidateByteBuffer(mCachedInputBuffers, index);
+            invalidateByteBufferLocked(mCachedInputBuffers, index, true /* input */);
             mDequeuedInputBuffers.put(index, newBuffer);
         }
         return newBuffer;
@@ -3946,7 +4116,7 @@ final public class MediaCodec {
         }
         Image newImage = getImage(true /* input */, index);
         synchronized (mBufferLock) {
-            invalidateByteBuffer(mCachedInputBuffers, index);
+            invalidateByteBufferLocked(mCachedInputBuffers, index, true /* input */);
             mDequeuedInputBuffers.put(index, newImage);
         }
         return newImage;
@@ -3982,7 +4152,7 @@ final public class MediaCodec {
         }
         ByteBuffer newBuffer = getBuffer(false /* input */, index);
         synchronized (mBufferLock) {
-            invalidateByteBuffer(mCachedOutputBuffers, index);
+            invalidateByteBufferLocked(mCachedOutputBuffers, index, false /* input */);
             mDequeuedOutputBuffers.put(index, newBuffer);
         }
         return newBuffer;
@@ -4017,7 +4187,7 @@ final public class MediaCodec {
         }
         Image newImage = getImage(false /* input */, index);
         synchronized (mBufferLock) {
-            invalidateByteBuffer(mCachedOutputBuffers, index);
+            invalidateByteBufferLocked(mCachedOutputBuffers, index, false /* input */);
             mDequeuedOutputBuffers.put(index, newImage);
         }
         return newImage;
@@ -4395,6 +4565,41 @@ final public class MediaCodec {
             MediaFormat.KEY_LOW_LATENCY;
 
     /**
+     * Control video peek of the first frame when a codec is configured for tunnel mode with
+     * {@link MediaFormat#KEY_AUDIO_SESSION_ID} while the {@link AudioTrack} is paused.
+     *<p>
+     * When disabled (1) after a {@link #flush} or {@link #start}, (2) while the corresponding
+     * {@link AudioTrack} is paused and (3) before any buffers are queued, the first frame is not to
+     * be rendered until either this parameter is enabled or the corresponding {@link AudioTrack}
+     * has begun playback. Once the frame is decoded and ready to be rendered,
+     * {@link OnFirstTunnelFrameReadyListener#onFirstTunnelFrameReady} is called but the frame is
+     * not rendered. The surface continues to show the previously-rendered content, or black if the
+     * surface is new. A subsequent call to {@link AudioTrack#play} renders this frame and triggers
+     * a callback to {@link OnFrameRenderedListener#onFrameRendered}, and video playback begins.
+     *<p>
+     * <b>Note</b>: To clear any previously rendered content and show black, configure the
+     * MediaCodec with {@code KEY_PUSH_BLANK_BUFFERS_ON_STOP(1)}, and call {@link #stop} before
+     * pushing new video frames to the codec.
+     *<p>
+     * When enabled (1) after a {@link #flush} or {@link #start} and (2) while the corresponding
+     * {@link AudioTrack} is paused, the first frame is rendered as soon as it is decoded, or
+     * immediately, if it has already been decoded. If not already decoded, when the frame is
+     * decoded and ready to be rendered,
+     * {@link OnFirstTunnelFrameReadyListener#onFirstTunnelFrameReady} is called. The frame is then
+     * immediately rendered and {@link OnFrameRenderedListener#onFrameRendered} is subsequently
+     * called.
+     *<p>
+     * The value is an Integer object containing the value 1 to enable or the value 0 to disable.
+     *<p>
+     * The default for this parameter is <b>enabled</b>. Once a frame has been rendered, changing
+     * this parameter has no effect until a subsequent {@link #flush} or
+     * {@link #stop}/{@link #start}.
+     *
+     * @see #setParameters(Bundle)
+     */
+    public static final String PARAMETER_KEY_TUNNEL_PEEK = "tunnel-peek";
+
+    /**
      * Communicate additional parameter changes to the component instance.
      * <b>Note:</b> Some of these parameter changes may silently fail to apply.
      *
@@ -4411,14 +4616,25 @@ final public class MediaCodec {
 
         int i = 0;
         for (final String key: params.keySet()) {
-            keys[i] = key;
-            Object value = params.get(key);
-
-            // Bundle's byte array is a byte[], JNI layer only takes ByteBuffer
-            if (value instanceof byte[]) {
-                values[i] = ByteBuffer.wrap((byte[])value);
+            if (key.equals(MediaFormat.KEY_AUDIO_SESSION_ID)) {
+                int sessionId = 0;
+                try {
+                    sessionId = (Integer)params.get(key);
+                } catch (Exception e) {
+                    throw new IllegalArgumentException("Wrong Session ID Parameter!");
+                }
+                keys[i] = "audio-hw-sync";
+                values[i] = AudioSystem.getAudioHwSyncForSession(sessionId);
             } else {
-                values[i] = value;
+                keys[i] = key;
+                Object value = params.get(key);
+
+                // Bundle's byte array is a byte[], JNI layer only takes ByteBuffer
+                if (value instanceof byte[]) {
+                    values[i] = ByteBuffer.wrap((byte[])value);
+                } else {
+                    values[i] = value;
+                }
             }
             ++i;
         }
@@ -4493,6 +4709,55 @@ final public class MediaCodec {
     }
 
     /**
+     * Listener to be called when the first output frame has been decoded
+     * and is ready to be rendered for a codec configured for tunnel mode with
+     * {@code KEY_AUDIO_SESSION_ID}.
+     *
+     * @see MediaCodec#setOnFirstTunnelFrameReadyListener
+     */
+    public interface OnFirstTunnelFrameReadyListener {
+
+        /**
+         * Called when the first output frame has been decoded and is ready to be
+         * rendered.
+         */
+        void onFirstTunnelFrameReady(@NonNull MediaCodec codec);
+    }
+
+    /**
+     * Registers a callback to be invoked when the first output frame has been decoded
+     * and is ready to be rendered on a codec configured for tunnel mode with {@code
+     * KEY_AUDIO_SESSION_ID}.
+     *
+     * @param handler the callback will be run on the handler's thread. If {@code
+     * null}, the callback will be run on the default thread, which is the looper from
+     * which the codec was created, or a new thread if there was none.
+     *
+     * @param listener the callback that will be run. If {@code null}, clears any registered
+     * listener.
+     */
+    public void setOnFirstTunnelFrameReadyListener(
+            @Nullable Handler handler, @Nullable OnFirstTunnelFrameReadyListener listener) {
+        synchronized (mListenerLock) {
+            mOnFirstTunnelFrameReadyListener = listener;
+            if (listener != null) {
+                EventHandler newHandler = getEventHandlerOn(
+                        handler,
+                        mOnFirstTunnelFrameReadyHandler);
+                if (newHandler != mOnFirstTunnelFrameReadyHandler) {
+                    mOnFirstTunnelFrameReadyHandler.removeMessages(EVENT_FIRST_TUNNEL_FRAME_READY);
+                }
+                mOnFirstTunnelFrameReadyHandler = newHandler;
+            } else if (mOnFirstTunnelFrameReadyHandler != null) {
+                mOnFirstTunnelFrameReadyHandler.removeMessages(EVENT_FIRST_TUNNEL_FRAME_READY);
+            }
+            native_enableOnFirstTunnelFrameReadyListener(listener != null);
+        }
+    }
+
+    private native void native_enableOnFirstTunnelFrameReadyListener(boolean enable);
+
+    /**
      * Listener to be called when an output frame has rendered on the output surface
      *
      * @see MediaCodec#setOnFrameRenderedListener
@@ -4553,6 +4818,150 @@ final public class MediaCodec {
     }
 
     private native void native_enableOnFrameRenderedListener(boolean enable);
+
+    /**
+     * Returns a list of vendor parameter names.
+     * <p>
+     * This method can be called in any codec state except for released state.
+     *
+     * @return a list containing supported vendor parameters; an empty
+     *         list if no vendor parameters are supported. The order of the
+     *         parameters is arbitrary.
+     * @throws IllegalStateException if in the Released state.
+     */
+    @NonNull
+    public List<String> getSupportedVendorParameters() {
+        return native_getSupportedVendorParameters();
+    }
+
+    @NonNull
+    private native List<String> native_getSupportedVendorParameters();
+
+    /**
+     * Contains description of a parameter.
+     */
+    public static class ParameterDescriptor {
+        private ParameterDescriptor() {}
+
+        /**
+         * Returns the name of the parameter.
+         */
+        @NonNull
+        public String getName() {
+            return mName;
+        }
+
+        /**
+         * Returns the type of the parameter.
+         * {@link MediaFormat#TYPE_NULL} is never returned.
+         */
+        @MediaFormat.Type
+        public int getType() {
+            return mType;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (o == null) {
+                return false;
+            }
+            if (!(o instanceof ParameterDescriptor)) {
+                return false;
+            }
+            ParameterDescriptor other = (ParameterDescriptor) o;
+            return this.mName.equals(other.mName) && this.mType == other.mType;
+        }
+
+        @Override
+        public int hashCode() {
+            return Arrays.asList(
+                    (Object) mName,
+                    (Object) Integer.valueOf(mType)).hashCode();
+        }
+
+        private String mName;
+        private @MediaFormat.Type int mType;
+    }
+
+    /**
+     * Describe a parameter with the name.
+     * <p>
+     * This method can be called in any codec state except for released state.
+     *
+     * @param name name of the parameter to describe, typically one from
+     *             {@link #getSupportedVendorParameters}.
+     * @return {@link ParameterDescriptor} object that describes the parameter.
+     *         {@code null} if unrecognized / not able to describe.
+     * @throws IllegalStateException if in the Released state.
+     */
+    @Nullable
+    public ParameterDescriptor getParameterDescriptor(@NonNull String name) {
+        return native_getParameterDescriptor(name);
+    }
+
+    @Nullable
+    private native ParameterDescriptor native_getParameterDescriptor(@NonNull String name);
+
+    /**
+     * Subscribe to vendor parameters, so that these parameters will be present in
+     * {@link #getOutputFormat} and changes to these parameters generate
+     * output format change event.
+     * <p>
+     * Unrecognized parameter names or standard (non-vendor) parameter names will be ignored.
+     * {@link #reset} also resets the list of subscribed parameters.
+     * If a parameter in {@code names} is already subscribed, it will remain subscribed.
+     * <p>
+     * This method can be called in any codec state except for released state. When called in
+     * running state with newly subscribed parameters, it takes effect no later than the
+     * processing of the subsequently queued buffer. For the new parameters, the codec will generate
+     * output format change event.
+     * <p>
+     * Note that any vendor parameters set in a {@link #configure} or
+     * {@link #setParameters} call are automatically subscribed.
+     * <p>
+     * See also {@link #INFO_OUTPUT_FORMAT_CHANGED} or {@link Callback#onOutputFormatChanged}
+     * for output format change events.
+     *
+     * @param names names of the vendor parameters to subscribe. This may be an empty list,
+     *              and in that case this method will not change the list of subscribed parameters.
+     * @throws IllegalStateException if in the Released state.
+     */
+    public void subscribeToVendorParameters(@NonNull List<String> names) {
+        native_subscribeToVendorParameters(names);
+    }
+
+    private native void native_subscribeToVendorParameters(@NonNull List<String> names);
+
+    /**
+     * Unsubscribe from vendor parameters, so that these parameters will not be present in
+     * {@link #getOutputFormat} and changes to these parameters no longer generate
+     * output format change event.
+     * <p>
+     * Unrecognized parameter names, standard (non-vendor) parameter names will be ignored.
+     * {@link #reset} also resets the list of subscribed parameters.
+     * If a parameter in {@code names} is already unsubscribed, it will remain unsubscribed.
+     * <p>
+     * This method can be called in any codec state except for released state. When called in
+     * running state with newly unsubscribed parameters, it takes effect no later than the
+     * processing of the subsequently queued buffer. For the removed parameters, the codec will
+     * generate output format change event.
+     * <p>
+     * Note that any vendor parameters set in a {@link #configure} or
+     * {@link #setParameters} call are automatically subscribed, and with this method
+     * they can be unsubscribed.
+     * <p>
+     * See also {@link #INFO_OUTPUT_FORMAT_CHANGED} or {@link Callback#onOutputFormatChanged}
+     * for output format change events.
+     *
+     * @param names names of the vendor parameters to unsubscribe. This may be an empty list,
+     *              and in that case this method will not change the list of subscribed parameters.
+     * @throws IllegalStateException if in the Released state.
+     */
+    public void unsubscribeFromVendorParameters(@NonNull List<String> names) {
+        native_unsubscribeFromVendorParameters(names);
+    }
+
+    private native void native_unsubscribeFromVendorParameters(@NonNull List<String> names);
 
     private EventHandler getEventHandlerOn(
             @Nullable Handler handler, @NonNull EventHandler lastHandler) {
@@ -4615,6 +5024,8 @@ final public class MediaCodec {
             EventHandler handler = mEventHandler;
             if (what == EVENT_CALLBACK) {
                 handler = mCallbackHandler;
+            } else if (what == EVENT_FIRST_TUNNEL_FRAME_READY) {
+                handler = mOnFirstTunnelFrameReadyHandler;
             } else if (what == EVENT_FRAME_RENDERED) {
                 handler = mOnFrameRenderedHandler;
             }
@@ -4668,7 +5079,7 @@ final public class MediaCodec {
     private static native final void native_init();
 
     private native final void native_setup(
-            @NonNull String name, boolean nameIsType, boolean encoder);
+            @NonNull String name, boolean nameIsType, boolean encoder, int pid, int uid);
 
     private native final void native_finalize();
 
@@ -4783,7 +5194,6 @@ final public class MediaCodec {
         public MediaImage(
                 @NonNull ByteBuffer buffer, @NonNull ByteBuffer info, boolean readOnly,
                 long timestamp, int xOffset, int yOffset, @Nullable Rect cropRect) {
-            mFormat = ImageFormat.YUV_420_888;
             mTimestamp = timestamp;
             mIsImageValid = true;
             mIsReadOnly = buffer.isReadOnly();
@@ -4795,6 +5205,11 @@ final public class MediaCodec {
             mInfo = info;
 
             mBufferContext = 0;
+
+            int cbPlaneOffset = -1;
+            int crPlaneOffset = -1;
+            int planeOffsetInc = -1;
+            int pixelStride = -1;
 
             // read media-info.  See MediaImage2
             if (info.remaining() == 104) {
@@ -4813,14 +5228,27 @@ final public class MediaCodec {
                             "unsupported size: " + mWidth + "x" + mHeight);
                 }
                 int bitDepth = info.getInt();
-                if (bitDepth != 8) {
+                if (bitDepth != 8 && bitDepth != 10) {
                     throw new UnsupportedOperationException("unsupported bit depth: " + bitDepth);
                 }
                 int bitDepthAllocated = info.getInt();
-                if (bitDepthAllocated != 8) {
+                if (bitDepthAllocated != 8 && bitDepthAllocated != 16) {
                     throw new UnsupportedOperationException(
                             "unsupported allocated bit depth: " + bitDepthAllocated);
                 }
+                if (bitDepth == 8 && bitDepthAllocated == 8) {
+                    mFormat = ImageFormat.YUV_420_888;
+                    planeOffsetInc = 1;
+                    pixelStride = 2;
+                } else if (bitDepth == 10 && bitDepthAllocated == 16) {
+                    mFormat = ImageFormat.YCBCR_P010;
+                    planeOffsetInc = 2;
+                    pixelStride = 4;
+                } else {
+                    throw new UnsupportedOperationException("couldn't infer ImageFormat"
+                      + " bitDepth: " + bitDepth + " bitDepthAllocated: " + bitDepthAllocated);
+                }
+
                 mPlanes = new MediaPlane[numPlanes];
                 for (int ix = 0; ix < numPlanes; ix++) {
                     int planeOffset = info.getInt();
@@ -4842,10 +5270,29 @@ final public class MediaCodec {
                     buffer.limit(buffer.position() + Utils.divUp(bitDepth, 8)
                             + (mHeight / vert - 1) * rowInc + (mWidth / horiz - 1) * colInc);
                     mPlanes[ix] = new MediaPlane(buffer.slice(), rowInc, colInc);
+                    if ((mFormat == ImageFormat.YUV_420_888 || mFormat == ImageFormat.YCBCR_P010)
+                            && ix == 1) {
+                        cbPlaneOffset = planeOffset;
+                    } else if ((mFormat == ImageFormat.YUV_420_888
+                            || mFormat == ImageFormat.YCBCR_P010) && ix == 2) {
+                        crPlaneOffset = planeOffset;
+                    }
                 }
             } else {
                 throw new UnsupportedOperationException(
                         "unsupported info length: " + info.remaining());
+            }
+
+            // Validate chroma semiplanerness.
+            if (mFormat == ImageFormat.YCBCR_P010) {
+                if (crPlaneOffset != cbPlaneOffset + planeOffsetInc) {
+                    throw new UnsupportedOperationException("Invalid plane offsets"
+                    + " cbPlaneOffset: " + cbPlaneOffset + " crPlaneOffset: " + crPlaneOffset);
+                }
+                if (mPlanes[1].getPixelStride() != pixelStride
+                        || mPlanes[2].getPixelStride() != pixelStride) {
+                    throw new UnsupportedOperationException("Invalid pixelStride");
+                }
             }
 
             if (cropRect == null) {

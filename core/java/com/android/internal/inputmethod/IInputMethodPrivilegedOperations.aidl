@@ -17,29 +17,31 @@
 package com.android.internal.inputmethod;
 
 import android.net.Uri;
-import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodSubtype;
 
-import com.android.internal.inputmethod.IInputContentUriToken;
+import com.android.internal.infra.AndroidFuture;
 
 /**
  * Defines priviledged operations that only the current IME is allowed to call.
  * Actual operations are implemented and handled by InputMethodManagerService.
  */
-interface IInputMethodPrivilegedOperations {
-    void setImeWindowStatus(int vis, int backDisposition);
-    void reportStartInput(in IBinder startInputToken);
-    IInputContentUriToken createInputContentUriToken(in Uri contentUri, in String packageName);
-    void reportFullscreenMode(boolean fullscreen);
-    void setInputMethod(String id);
-    void setInputMethodAndSubtype(String id, in InputMethodSubtype subtype);
-    void hideMySoftInput(int flags);
-    void showMySoftInput(int flags);
-    void updateStatusIcon(String packageName, int iconId);
-    boolean switchToPreviousInputMethod();
-    boolean switchToNextInputMethod(boolean onlyCurrentIme);
-    boolean shouldOfferSwitchingToNextInputMethod();
-    void notifyUserAction();
-    void reportPreRendered(in EditorInfo info);
-    void applyImeVisibility(IBinder showOrHideInputToken, boolean setVisible);
+oneway interface IInputMethodPrivilegedOperations {
+    void setImeWindowStatusAsync(int vis, int backDisposition);
+    void reportStartInputAsync(in IBinder startInputToken);
+    void createInputContentUriToken(in Uri contentUri, in String packageName,
+            in AndroidFuture future /* T=IBinder */);
+    void reportFullscreenModeAsync(boolean fullscreen);
+    void setInputMethod(String id, in AndroidFuture future /* T=Void */);
+    void setInputMethodAndSubtype(String id, in InputMethodSubtype subtype,
+            in AndroidFuture future /* T=Void */);
+    void hideMySoftInput(int flags, in AndroidFuture future /* T=Void */);
+    void showMySoftInput(int flags, in AndroidFuture future /* T=Void */);
+    void updateStatusIconAsync(String packageName, int iconId);
+    void switchToPreviousInputMethod(in AndroidFuture future /* T=Boolean */);
+    void switchToNextInputMethod(boolean onlyCurrentIme, in AndroidFuture future /* T=Boolean */);
+    void shouldOfferSwitchingToNextInputMethod(in AndroidFuture future /* T=Boolean */);
+    void notifyUserActionAsync();
+    void applyImeVisibilityAsync(IBinder showOrHideInputToken, boolean setVisible);
+    void onStylusHandwritingReady(int requestId, int pid);
+    void resetStylusHandwriting(int requestId);
 }

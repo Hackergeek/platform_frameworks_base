@@ -17,13 +17,15 @@
 <!-- Manifest for the system CTS shim -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
-    package="com.android.cts.ctsshim" >
+    package="com.android.cts.ctsshim"
+    android:sharedUserId="com.android.cts.ctsshim" >
 
-    <uses-sdk android:minSdkVersion="24"
+    <uses-sdk
+        android:minSdkVersion="24"
         android:targetSdkVersion="28" />
 
     <restrict-update
-        android:hash="__CAN_NOT_BE_UPDATED__" />
+        android:hash="__HASH__" />
 
     <application
         android:hasCode="false"
@@ -32,7 +34,8 @@
         <!-- These activities don't actually exist; define them just to test the filters !-->
 
         <!-- install test; high priority filter DENIED -->
-        <activity android:name=".InstallPriority">
+        <activity android:name=".InstallPriority"
+            android:exported="true">
             <intent-filter android:priority="100">
                 <action android:name="android.intent.action.SEARCH" />
                 <category android:name="android.intent.category.INFO" />
@@ -51,6 +54,9 @@
                 <action android:name="android.intent.action.SENDTO" />
             </intent-filter>
         </activity>
+
+        <!-- The stub shared library for package visibility test -->
+        <library android:name="com.android.cts.ctsshim.shared_library" />
 
     </application>
 </manifest>

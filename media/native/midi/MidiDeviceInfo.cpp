@@ -64,6 +64,7 @@ status_t MidiDeviceInfo::writeToParcel(Parcel* parcel) const {
     RETURN_IF_FAILED(writeStringVector(parcel, mInputPortNames));
     RETURN_IF_FAILED(writeStringVector(parcel, mOutputPortNames));
     RETURN_IF_FAILED(parcel->writeInt32(mIsPrivate ? 1 : 0));
+    RETURN_IF_FAILED(parcel->writeInt32(mDefaultProtocol));
     RETURN_IF_FAILED(mProperties.writeToParcel(parcel));
     // This corresponds to "extra" properties written by Java code
     RETURN_IF_FAILED(mProperties.writeToParcel(parcel));
@@ -83,6 +84,7 @@ status_t MidiDeviceInfo::readFromParcel(const Parcel* parcel) {
     int32_t isPrivate;
     RETURN_IF_FAILED(parcel->readInt32(&isPrivate));
     mIsPrivate = isPrivate == 1;
+    RETURN_IF_FAILED(parcel->readInt32(&mDefaultProtocol));
     RETURN_IF_FAILED(mProperties.readFromParcel(parcel));
     // Ignore "extra" properties as they may contain Java Parcelables
     return OK;
@@ -90,13 +92,13 @@ status_t MidiDeviceInfo::readFromParcel(const Parcel* parcel) {
 
 status_t MidiDeviceInfo::readStringVector(
         const Parcel* parcel, Vector<String16> *vectorPtr, size_t defaultLength) {
-    std::unique_ptr<std::vector<std::unique_ptr<String16>>> v;
+    std::optional<std::vector<std::optional<String16>>> v;
     status_t result = parcel->readString16Vector(&v);
     if (result != OK) return result;
     vectorPtr->clear();
-    if (v.get() != nullptr) {
+    if (v) {
         for (const auto& iter : *v) {
-            if (iter.get() != nullptr) {
+            if (iter) {
                 vectorPtr->push_back(*iter);
             } else {
                 vectorPtr->push_back(String16());
@@ -130,7 +132,8 @@ bool operator==(const MidiDeviceInfo& lhs, const MidiDeviceInfo& rhs) {
             areVectorsEqual(lhs.mInputPortNames, rhs.mInputPortNames) &&
             areVectorsEqual(lhs.mOutputPortNames, rhs.mOutputPortNames) &&
             lhs.mProperties == rhs.mProperties &&
-            lhs.mIsPrivate == rhs.mIsPrivate);
+            lhs.mIsPrivate == rhs.mIsPrivate &&
+            lhs.mDefaultProtocol == rhs.mDefaultProtocol);
 }
 
 }  // namespace midi

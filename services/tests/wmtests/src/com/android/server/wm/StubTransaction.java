@@ -17,14 +17,20 @@
 package com.android.server.wm;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.graphics.ColorSpace;
+import android.graphics.GraphicBuffer;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.graphics.Region;
+import android.hardware.HardwareBuffer;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.view.InputWindowHandle;
 import android.view.Surface;
 import android.view.SurfaceControl;
+
+import java.util.concurrent.Executor;
 
 /**
  * Stubbed {@link android.view.SurfaceControl.Transaction} class that can be used when unit
@@ -131,7 +137,18 @@ public class StubTransaction extends SurfaceControl.Transaction {
     }
 
     @Override
+    @NonNull
+    public SurfaceControl.Transaction setCrop(@NonNull SurfaceControl sc, @Nullable Rect crop) {
+        return this;
+    }
+
+    @Override
     public SurfaceControl.Transaction setCornerRadius(SurfaceControl sc, float cornerRadius) {
+        return this;
+    }
+
+    @Override
+    public SurfaceControl.Transaction setBackgroundBlurRadius(SurfaceControl sc, int radius) {
         return this;
     }
 
@@ -141,37 +158,7 @@ public class StubTransaction extends SurfaceControl.Transaction {
     }
 
     @Override
-    public SurfaceControl.Transaction deferTransactionUntil(SurfaceControl sc,
-            SurfaceControl barrier, long frameNumber) {
-        return this;
-    }
-
-    @Override
-    public SurfaceControl.Transaction deferTransactionUntilSurface(SurfaceControl sc,
-            Surface barrierSurface,
-            long frameNumber) {
-        return this;
-    }
-
-    @Override
-    public SurfaceControl.Transaction reparentChildren(SurfaceControl sc,
-            SurfaceControl newParent) {
-        return this;
-    }
-
-    @Override
     public SurfaceControl.Transaction reparent(SurfaceControl sc, SurfaceControl newParent) {
-        return this;
-    }
-
-    @Override
-    public SurfaceControl.Transaction detachChildren(SurfaceControl sc) {
-        return this;
-    }
-
-    @Override
-    public SurfaceControl.Transaction setOverrideScalingMode(SurfaceControl sc,
-            int overrideScalingMode) {
         return this;
     }
 
@@ -201,6 +188,11 @@ public class StubTransaction extends SurfaceControl.Transaction {
     }
 
     @Override
+    public SurfaceControl.Transaction setDisplayFlags(IBinder displayToken, int flags) {
+        return this;
+    }
+
+    @Override
     public SurfaceControl.Transaction setDisplayProjection(IBinder displayToken,
             int orientation, Rect layerStackRect, Rect displayRect) {
         return this;
@@ -213,11 +205,6 @@ public class StubTransaction extends SurfaceControl.Transaction {
 
     @Override
     public SurfaceControl.Transaction setAnimationTransaction() {
-        return this;
-    }
-
-    @Override
-    public SurfaceControl.Transaction setEarlyWakeup() {
         return this;
     }
 
@@ -242,6 +229,12 @@ public class StubTransaction extends SurfaceControl.Transaction {
     }
 
     @Override
+    public SurfaceControl.Transaction addTransactionCommittedListener(Executor executor,
+            SurfaceControl.TransactionCommittedListener listener) {
+        return this;
+    }
+
+    @Override
     public SurfaceControl.Transaction syncInputWindows() {
         return this;
     }
@@ -254,6 +247,12 @@ public class StubTransaction extends SurfaceControl.Transaction {
     @Override
     public SurfaceControl.Transaction setFrameRateSelectionPriority(SurfaceControl sc,
             int priority) {
+        return this;
+    }
+
+    @Override
+    public SurfaceControl.Transaction setFrameRate(SurfaceControl sc, float frameRate,
+            int compatibility, int changeFrameRateStrategy) {
         return this;
     }
 
@@ -275,6 +274,29 @@ public class StubTransaction extends SurfaceControl.Transaction {
 
     @Override
     public SurfaceControl.Transaction unsetFixedTransformHint(@NonNull SurfaceControl sc) {
+        return this;
+    }
+
+    @Override
+    public SurfaceControl.Transaction setBuffer(SurfaceControl sc, GraphicBuffer buffer) {
+        return this;
+    }
+
+    @Override
+    @NonNull
+    public SurfaceControl.Transaction setBuffer(@NonNull SurfaceControl sc,
+            @Nullable HardwareBuffer buffer) {
+        return this;
+    }
+
+    @Override
+    public SurfaceControl.Transaction setColorSpace(SurfaceControl sc, ColorSpace colorSpace) {
+        return this;
+    }
+
+    @Override
+    public SurfaceControl.Transaction setTrustedOverlay(SurfaceControl sc,
+            boolean isTrustedOverlay) {
         return this;
     }
 }

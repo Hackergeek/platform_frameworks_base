@@ -22,11 +22,12 @@ import android.app.job.JobScheduler;
 import android.app.job.JobService;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.pm.PackageManagerInternal;
 import android.os.Process;
-import android.os.ServiceManager;
 import android.util.EventLog;
 import android.util.Log;
 
+import com.android.server.LocalServices;
 import com.android.server.pm.dex.DynamicCodeLogger;
 
 import libcore.util.HexEncoding;
@@ -133,8 +134,7 @@ public class DynamicCodeLoggingService extends JobService {
     }
 
     private static DynamicCodeLogger getDynamicCodeLogger() {
-        PackageManagerService pm = (PackageManagerService) ServiceManager.getService("package");
-        return pm.getDexManager().getDynamicCodeLogger();
+        return LocalServices.getService(PackageManagerInternal.class).getDynamicCodeLogger();
     }
 
     private class IdleLoggingThread extends Thread {
@@ -234,7 +234,7 @@ public class DynamicCodeLoggingService extends JobService {
 
                 List<EventLog.Event> events = new ArrayList<>();
                 EventLog.readEvents(tags, events);
-
+                Matcher matcher = EXECUTE_NATIVE_AUDIT_PATTERN.matcher("");
                 for (int i = 0; i < events.size(); ++i) {
                     if (mAuditWatchingStopRequested) {
                         Log.w(TAG, "Stopping AuditWatchingJob run at scheduler request");
@@ -259,7 +259,9 @@ public class DynamicCodeLoggingService extends JobService {
 
                     // And then use a regular expression to verify it's one of the messages we're
                     // interested in and to extract the path of the file being loaded.
-                    Matcher matcher = EXECUTE_NATIVE_AUDIT_PATTERN.matcher(message);
+                    // Reuse the Matcher to avoid unnecessary string garbage caused by libcore's
+                    // regex matching.
+                    matcher.reset(message);
                     if (!matcher.matches()) {
                         continue;
                     }

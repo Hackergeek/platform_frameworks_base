@@ -20,8 +20,10 @@ import android.os.ResultReceiver;
 import android.view.inputmethod.InputMethodInfo;
 import android.view.inputmethod.InputMethodSubtype;
 import android.view.inputmethod.EditorInfo;
+import android.window.ImeOnBackInvokedDispatcher;
 
-import com.android.internal.view.InputBindResult;
+import com.android.internal.inputmethod.InputBindResult;
+import com.android.internal.inputmethod.IRemoteAccessibilityInputConnection;
 import com.android.internal.view.IInputContext;
 import com.android.internal.view.IInputMethodClient;
 
@@ -35,6 +37,7 @@ interface IInputMethodManager {
 
     // TODO: Use ParceledListSlice instead
     List<InputMethodInfo> getInputMethodList(int userId);
+    List<InputMethodInfo> getAwareLockedInputMethodList(int userId, int directBootAwareness);
     // TODO: Use ParceledListSlice instead
     List<InputMethodInfo> getEnabledInputMethodList(int userId);
     List<InputMethodSubtype> getEnabledInputMethodSubtypeList(in String imiId,
@@ -42,9 +45,9 @@ interface IInputMethodManager {
     InputMethodSubtype getLastInputMethodSubtype();
 
     boolean showSoftInput(in IInputMethodClient client, IBinder windowToken, int flags,
-            in ResultReceiver resultReceiver);
+            in ResultReceiver resultReceiver, int reason);
     boolean hideSoftInput(in IInputMethodClient client, IBinder windowToken, int flags,
-            in ResultReceiver resultReceiver);
+            in ResultReceiver resultReceiver, int reason);
     // If windowToken is null, this just does startInput().  Otherwise this reports that a window
     // has gained focus, and if 'attribute' is non-null then also does startInput.
     // @NonNull
@@ -53,28 +56,38 @@ interface IInputMethodManager {
             in IInputMethodClient client, in IBinder windowToken,
             /* @StartInputFlags */ int startInputFlags,
             /* @android.view.WindowManager.LayoutParams.SoftInputModeFlags */ int softInputMode,
-            int windowFlags, in EditorInfo attribute, IInputContext inputContext,
-            /* @InputConnectionInspector.MissingMethodFlags */ int missingMethodFlags,
-            int unverifiedTargetSdkVersion);
+            int windowFlags, in EditorInfo attribute, in IInputContext inputContext,
+            in IRemoteAccessibilityInputConnection remoteAccessibilityInputConnection,
+            int unverifiedTargetSdkVersion, in ImeOnBackInvokedDispatcher imeDispatcher);
 
     void showInputMethodPickerFromClient(in IInputMethodClient client,
             int auxiliarySubtypeMode);
-    void showInputMethodPickerFromSystem(in IInputMethodClient client, int auxiliarySubtypeMode,
-            int displayId);
+    void showInputMethodPickerFromSystem(in IInputMethodClient client,
+            int auxiliarySubtypeMode, int displayId);
     void showInputMethodAndSubtypeEnablerFromClient(in IInputMethodClient client, String topId);
     boolean isInputMethodPickerShownForTest();
     InputMethodSubtype getCurrentInputMethodSubtype();
     void setAdditionalInputMethodSubtypes(String id, in InputMethodSubtype[] subtypes);
     // This is kept due to @UnsupportedAppUsage.
     // TODO(Bug 113914148): Consider removing this.
-    int getInputMethodWindowVisibleHeight();
+    int getInputMethodWindowVisibleHeight(in IInputMethodClient client);
 
-    void reportActivityView(in IInputMethodClient parentClient, int childDisplayId,
-            in float[] matrixValues);
+    oneway void reportVirtualDisplayGeometryAsync(in IInputMethodClient parentClient,
+            int childDisplayId, in float[] matrixValues);
 
-    oneway void reportPerceptible(in IBinder windowToken, boolean perceptible);
+    oneway void reportPerceptibleAsync(in IBinder windowToken, boolean perceptible);
     /** Remove the IME surface. Requires INTERNAL_SYSTEM_WINDOW permission. */
     void removeImeSurface();
     /** Remove the IME surface. Requires passing the currently focused window. */
-    void removeImeSurfaceFromWindow(in IBinder windowToken);
+    oneway void removeImeSurfaceFromWindowAsync(in IBinder windowToken);
+    void startProtoDump(in byte[] protoDump, int source, String where);
+    boolean isImeTraceEnabled();
+
+    // Starts an ime trace.
+    void startImeTrace();
+    // Stops an ime trace.
+    void stopImeTrace();
+
+    /** Start Stylus handwriting session **/
+    void startStylusHandwriting(in IInputMethodClient client);
 }

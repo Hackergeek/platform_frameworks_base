@@ -43,14 +43,16 @@ enum {
 
 #define DEFAULT_DELAY_NS (1000000000LL)
 
-#define DEFAULT_BYTES_SIZE_LIMIT (96 * 1024 * 1024)        // 96MB
+#define DEFAULT_BYTES_SIZE_LIMIT (400 * 1024 * 1024)        // 400MB
 #define DEFAULT_REFACTORY_PERIOD_MS (24 * 60 * 60 * 1000)  // 1 Day
 
 // Skip these sections (for dumpstate only)
-// Skip logs (1100 - 1108) and traces (1200 - 1202) because they are already in the bug report.
+// Skip logs (1100 - 1108), traces (1200 - 1202), dumpsys (3000 - 3024, 3027 - 3056, 4000 - 4001)
+// because they are already in the bug report.
 #define SKIPPED_DUMPSTATE_SECTIONS { \
             1100, 1101, 1102, 1103, 1104, 1105, 1106, 1107, 1108, /* Logs */ \
-            1200, 1201, 1202, /* Native, hal, java traces */ }
+            1200, 1201, 1202, /* Native, hal, java traces */ \
+            3018, /* dumpsys meminfo*/ }
 
 namespace android {
 namespace os {
@@ -554,6 +556,10 @@ status_t IncidentService::command(FILE* in, FILE* out, FILE* err, Vector<String8
             return NO_ERROR;
         }
         if (!args[0].compare(String8("section"))) {
+            if (argCount == 1) {
+                fprintf(out, "Not enough arguments for section\n");
+                return NO_ERROR;
+            }
             int id = atoi(args[1]);
             int idx = 0;
             while (SECTION_LIST[idx] != NULL) {

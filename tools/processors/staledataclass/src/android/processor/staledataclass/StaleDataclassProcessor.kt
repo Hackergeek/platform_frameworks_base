@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+@file:Suppress("JAVA_MODULE_DOES_NOT_EXPORT_PACKAGE")
 
 package android.processor.staledataclass
 
@@ -21,8 +22,6 @@ import com.android.codegen.BASE_BUILDER_CLASS
 import com.android.codegen.CANONICAL_BUILDER_CLASS
 import com.android.codegen.CODEGEN_NAME
 import com.android.codegen.CODEGEN_VERSION
-import com.sun.tools.javac.code.Symbol
-import com.sun.tools.javac.code.Type
 import java.io.File
 import java.io.FileNotFoundException
 import javax.annotation.processing.AbstractProcessor
@@ -33,6 +32,7 @@ import javax.lang.model.element.AnnotationMirror
 import javax.lang.model.element.Element
 import javax.lang.model.element.ElementKind
 import javax.lang.model.element.TypeElement
+import javax.lang.model.type.ExecutableType
 import javax.tools.Diagnostic
 
 private const val STALE_FILE_THRESHOLD_MS = 1000
@@ -98,17 +98,26 @@ class StaleDataclassProcessor: AbstractProcessor() {
 
     private fun elemToString(elem: Element): String {
         return buildString {
-            append(elem.modifiers.joinToString(" ") { it.name.toLowerCase() }).append(" ")
-            append(elem.annotationMirrors.joinToString(" ")).append(" ")
-            if (elem is Symbol) {
-                if (elem.type is Type.MethodType) {
-                    append((elem.type as Type.MethodType).returnType)
-                } else {
-                    append(elem.type)
-                }
-                append(" ")
+            append(elem.modifiers.joinToString(" ") { it.name.lowercase() })
+            append(" ")
+            append(elem.annotationMirrors.joinToString(" ", transform = { annotationToString(it) }))
+            append(" ")
+            val type = elem.asType()
+            if (type is ExecutableType) {
+                append(type.returnType)
+            } else {
+                append(type)
             }
+            append(" ")
             append(elem)
+        }
+    }
+
+    private fun annotationToString(ann: AnnotationMirror): String {
+        return if (ann.annotationType.toString().startsWith("com.android.internal.util.DataClass")) {
+            ann.toString()
+        } else {
+            ann.toString().substringBefore("(")
         }
     }
 

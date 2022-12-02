@@ -42,9 +42,11 @@ interface IAccessibilityManager {
 
     long addClient(IAccessibilityManagerClient client, int userId);
 
+    boolean removeClient(IAccessibilityManagerClient client, int userId);
+
     List<AccessibilityServiceInfo> getInstalledAccessibilityServiceList(int userId);
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     List<AccessibilityServiceInfo> getEnabledAccessibilityServiceList(int feedbackType, int userId);
 
     int addAccessibilityInteractionConnection(IWindow windowToken, IBinder leashToken,
@@ -92,4 +94,18 @@ interface IAccessibilityManager {
     void associateEmbeddedHierarchy(IBinder host, IBinder embedded);
 
     void disassociateEmbeddedHierarchy(IBinder token);
+
+    int getFocusStrokeWidth();
+
+    int getFocusColor();
+
+    boolean isAudioDescriptionByDefaultEnabled();
+
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.SET_SYSTEM_AUDIO_CAPTION)")
+    void setSystemAudioCaptioningEnabled(boolean isEnabled, int userId);
+
+    boolean isSystemAudioCaptioningUiEnabled(int userId);
+
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.SET_SYSTEM_AUDIO_CAPTION)")
+    void setSystemAudioCaptioningUiEnabled(boolean isEnabled, int userId);
 }

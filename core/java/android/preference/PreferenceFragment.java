@@ -24,6 +24,7 @@ import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.TypedArray;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Message;
@@ -103,7 +104,7 @@ public abstract class PreferenceFragment extends Fragment implements
 
     private static final String PREFERENCES_TAG = "android:preferences";
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private PreferenceManager mPreferenceManager;
     private ListView mList;
     private boolean mHavePrefs;
@@ -141,7 +142,7 @@ public abstract class PreferenceFragment extends Fragment implements
      * switch to a new fragment.
      *
      * @deprecated Use {@link
-     * android.support.v7.preference.PreferenceFragmentCompat.OnPreferenceStartFragmentCallback}
+     * androidx.preference.PreferenceFragmentCompat.OnPreferenceStartFragmentCallback}
      */
     @Deprecated
     public interface OnPreferenceStartFragmentCallback {

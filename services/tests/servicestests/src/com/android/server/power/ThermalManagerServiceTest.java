@@ -17,6 +17,7 @@
 package com.android.server.power;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -284,28 +285,29 @@ public class ThermalManagerServiceTest {
     @Test
     public void testNotify() throws RemoteException {
         int status = Temperature.THROTTLING_SEVERE;
+        // Should only notify event not status
         Temperature newBattery = new Temperature(50, Temperature.TYPE_BATTERY, "batt", status);
         mFakeHal.mCallback.onValues(newBattery);
         verify(mEventListener1, timeout(CALLBACK_TIMEOUT_MILLI_SEC)
                 .times(1)).notifyThrottling(newBattery);
         verify(mStatusListener1, timeout(CALLBACK_TIMEOUT_MILLI_SEC)
-                .times(1)).onStatusChange(status);
+                .times(0)).onStatusChange(anyInt());
         verify(mEventListener2, timeout(CALLBACK_TIMEOUT_MILLI_SEC)
                 .times(0)).notifyThrottling(newBattery);
         verify(mStatusListener2, timeout(CALLBACK_TIMEOUT_MILLI_SEC)
-                .times(1)).onStatusChange(status);
+                .times(0)).onStatusChange(anyInt());
         resetListenerMock();
-        // Should only notify event not status
+        // Notify both event and status
         Temperature newSkin = new Temperature(50, Temperature.TYPE_SKIN, "skin1", status);
         mFakeHal.mCallback.onValues(newSkin);
         verify(mEventListener1, timeout(CALLBACK_TIMEOUT_MILLI_SEC)
                 .times(1)).notifyThrottling(newSkin);
         verify(mStatusListener1, timeout(CALLBACK_TIMEOUT_MILLI_SEC)
-                .times(0)).onStatusChange(anyInt());
+                .times(1)).onStatusChange(status);
         verify(mEventListener2, timeout(CALLBACK_TIMEOUT_MILLI_SEC)
                 .times(1)).notifyThrottling(newSkin);
         verify(mStatusListener2, timeout(CALLBACK_TIMEOUT_MILLI_SEC)
-                .times(0)).onStatusChange(anyInt());
+                .times(1)).onStatusChange(status);
         resetListenerMock();
         // Back to None, should only notify event not status
         status = Temperature.THROTTLING_NONE;
@@ -345,9 +347,12 @@ public class ThermalManagerServiceTest {
 
     @Test
     public void testGetCurrentStatus() throws RemoteException {
-        int status = Temperature.THROTTLING_EMERGENCY;
+        int status = Temperature.THROTTLING_SEVERE;
         Temperature newSkin = new Temperature(100, Temperature.TYPE_SKIN, "skin1", status);
         mFakeHal.mCallback.onValues(newSkin);
+        assertEquals(status, mService.mService.getCurrentThermalStatus());
+        int battStatus = Temperature.THROTTLING_EMERGENCY;
+        Temperature newBattery = new Temperature(60, Temperature.TYPE_BATTERY, "batt", battStatus);
         assertEquals(status, mService.mService.getCurrentThermalStatus());
     }
 
@@ -452,5 +457,34 @@ public class ThermalManagerServiceTest {
         // If there are no thresholds, then we shouldn't receive a headroom value
         watcher.mSevereThresholds.erase();
         assertTrue(Float.isNaN(watcher.getForecast(0)));
+    }
+
+    @Test
+    public void testTemperatureWatcherGetForecastUpdate() throws Exception {
+        ThermalManagerService.TemperatureWatcher watcher = mService.mTemperatureWatcher;
+
+        // Reduce the inactivity threshold to speed up testing
+        watcher.mInactivityThresholdMillis = 2000;
+
+        // Make sure mSamples is empty before updateTemperature
+        assertTrue(isWatcherSamplesEmpty(watcher));
+
+        // Call getForecast once to trigger updateTemperature
+        watcher.getForecast(0);
+
+        // After 1 second, the samples should be updated
+        Thread.sleep(1000);
+        assertFalse(isWatcherSamplesEmpty(watcher));
+
+        // After mInactivityThresholdMillis, the samples should be cleared
+        Thread.sleep(watcher.mInactivityThresholdMillis);
+        assertTrue(isWatcherSamplesEmpty(watcher));
+    }
+
+    // Helper function to hold mSamples lock, avoid GuardedBy lint errors
+    private boolean isWatcherSamplesEmpty(ThermalManagerService.TemperatureWatcher watcher) {
+        synchronized (watcher.mSamples) {
+            return watcher.mSamples.isEmpty();
+        }
     }
 }

@@ -24,6 +24,7 @@ import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.annotation.TestApi;
 import android.annotation.UserIdInt;
+import android.annotation.WorkerThread;
 import android.app.Notification;
 import android.app.usage.UsageStatsManager;
 import android.compat.annotation.UnsupportedAppUsage;
@@ -41,10 +42,12 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.infra.AndroidFuture;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 
 /**
  * <p><code>ShortcutManager</code> executes operations on an app's set of <i>shortcuts</i>, which
@@ -139,10 +142,11 @@ public class ShortcutManager {
      *
      * @throws IllegalStateException when the user is locked.
      */
+    @WorkerThread
     public boolean setDynamicShortcuts(@NonNull List<ShortcutInfo> shortcutInfoList) {
         try {
-            return mService.setDynamicShortcuts(mContext.getPackageName(),
-                    new ParceledListSlice(shortcutInfoList), injectMyUserId());
+            return mService.setDynamicShortcuts(mContext.getPackageName(), new ParceledListSlice(
+                    shortcutInfoList), injectMyUserId());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -157,11 +161,12 @@ public class ShortcutManager {
      *
      * @throws IllegalStateException when the user is locked.
      */
+    @WorkerThread
     @NonNull
     public List<ShortcutInfo> getDynamicShortcuts() {
         try {
-            return mService.getShortcuts(mContext.getPackageName(), FLAG_MATCH_DYNAMIC,
-                    injectMyUserId()).getList();
+            return mService.getShortcuts(mContext.getPackageName(),
+                    FLAG_MATCH_DYNAMIC, injectMyUserId()).getList();
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -176,11 +181,12 @@ public class ShortcutManager {
      *
      * @throws IllegalStateException when the user is locked.
      */
+    @WorkerThread
     @NonNull
     public List<ShortcutInfo> getManifestShortcuts() {
         try {
-            return mService.getShortcuts(mContext.getPackageName(), FLAG_MATCH_MANIFEST,
-                    injectMyUserId()).getList();
+            return mService.getShortcuts(mContext.getPackageName(),
+                    FLAG_MATCH_MANIFEST, injectMyUserId()).getList();
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -204,11 +210,12 @@ public class ShortcutManager {
      *
      * @throws IllegalStateException when the user is locked.
      */
+    @WorkerThread
     @NonNull
     public List<ShortcutInfo> getShortcuts(@ShortcutMatchFlags int matchFlags) {
         try {
-            return mService.getShortcuts(mContext.getPackageName(), matchFlags, injectMyUserId())
-                    .getList();
+            return mService.getShortcuts(mContext.getPackageName(), matchFlags,
+                    injectMyUserId()).getList();
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -227,6 +234,7 @@ public class ShortcutManager {
      *
      * @throws IllegalStateException when the user is locked.
      */
+    @WorkerThread
     public boolean addDynamicShortcuts(@NonNull List<ShortcutInfo> shortcutInfoList) {
         try {
             return mService.addDynamicShortcuts(mContext.getPackageName(),
@@ -286,6 +294,7 @@ public class ShortcutManager {
      *
      * @throws IllegalStateException when the user is locked.
      */
+    @WorkerThread
     @NonNull
     public List<ShortcutInfo> getPinnedShortcuts() {
         try {
@@ -308,6 +317,7 @@ public class ShortcutManager {
      *
      * @throws IllegalStateException when the user is locked.
      */
+    @WorkerThread
     public boolean updateShortcuts(@NonNull List<ShortcutInfo> shortcutInfoList) {
         try {
             return mService.updateShortcuts(mContext.getPackageName(),
@@ -508,8 +518,7 @@ public class ShortcutManager {
      */
     public void reportShortcutUsed(String shortcutId) {
         try {
-            mService.reportShortcutUsed(mContext.getPackageName(), shortcutId,
-                    injectMyUserId());
+            mService.reportShortcutUsed(mContext.getPackageName(), shortcutId, injectMyUserId());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -523,7 +532,7 @@ public class ShortcutManager {
      * app.
      *
      * <p><b>Note:</b> See also the support library counterpart
-     * {@link android.support.v4.content.pm.ShortcutManagerCompat#isRequestPinShortcutSupported(
+     * {@link androidx.core.content.pm.ShortcutManagerCompat#isRequestPinShortcutSupported(
      * Context)}, which supports Android versions lower than {@link VERSION_CODES#O} using the
      * legacy private intent {@code com.android.launcher.action.INSTALL_SHORTCUT}.
      *
@@ -552,7 +561,7 @@ public class ShortcutManager {
      * previous requests.
      *
      * <p><b>Note:</b> See also the support library counterpart
-     * {@link android.support.v4.content.pm.ShortcutManagerCompat#requestPinShortcut(
+     * {@link androidx.core.content.pm.ShortcutManagerCompat#requestPinShortcut(
      * Context, ShortcutInfoCompat, IntentSender)},
      * which supports Android versions lower than {@link VERSION_CODES#O} using the
      * legacy private intent {@code com.android.launcher.action.INSTALL_SHORTCUT}.
@@ -583,11 +592,14 @@ public class ShortcutManager {
      * @throws IllegalStateException The caller doesn't have a foreground activity or a foreground
      * service, or the device is locked.
      */
+    @WorkerThread
     public boolean requestPinShortcut(@NonNull ShortcutInfo shortcut,
             @Nullable IntentSender resultIntent) {
         try {
-            return mService.requestPinShortcut(mContext.getPackageName(), shortcut,
-                    resultIntent, injectMyUserId());
+            AndroidFuture<String> ret = new AndroidFuture<>();
+            mService.requestPinShortcut(mContext.getPackageName(), shortcut, resultIntent,
+                    injectMyUserId(), ret);
+            return Boolean.parseBoolean(getFutureOrThrow(ret));
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -610,10 +622,13 @@ public class ShortcutManager {
      *
      * @throws IllegalArgumentException if a shortcut with the same ID exists and is disabled.
      */
+    @WorkerThread
     public Intent createShortcutResultIntent(@NonNull ShortcutInfo shortcut) {
+        final AndroidFuture<Intent> ret = new AndroidFuture<>();
         try {
-            return mService.createShortcutResultIntent(mContext.getPackageName(), shortcut,
-                    injectMyUserId());
+            mService.createShortcutResultIntent(mContext.getPackageName(),
+                    shortcut, injectMyUserId(), ret);
+            return getFutureOrThrow(ret);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -649,13 +664,14 @@ public class ShortcutManager {
      * @return List of {@link ShareShortcutInfo}s that match the given IntentFilter.
      * @hide
      */
+    @WorkerThread
     @NonNull
     @SystemApi
     @RequiresPermission(Manifest.permission.MANAGE_APP_PREDICTIONS)
     public List<ShareShortcutInfo> getShareTargets(@NonNull IntentFilter filter) {
         try {
-            return mService.getShareTargets(mContext.getPackageName(), filter,
-                    injectMyUserId()).getList();
+            return mService.getShareTargets(
+                    mContext.getPackageName(), filter, injectMyUserId()).getList();
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -688,8 +704,8 @@ public class ShortcutManager {
         }
 
         private ShareShortcutInfo(@NonNull Parcel in) {
-            mShortcutInfo = in.readParcelable(ShortcutInfo.class.getClassLoader());
-            mTargetComponent = in.readParcelable(ComponentName.class.getClassLoader());
+            mShortcutInfo = in.readParcelable(ShortcutInfo.class.getClassLoader(), android.content.pm.ShortcutInfo.class);
+            mTargetComponent = in.readParcelable(ComponentName.class.getClassLoader(), android.content.ComponentName.class);
         }
 
         @NonNull
@@ -751,7 +767,7 @@ public class ShortcutManager {
      * order to make sure shortcuts exist and are up-to-date, without the need to explicitly handle
      * the shortcut count limit.
      * @see android.app.NotificationManager#notify(int, Notification)
-     * @see Notification.Builder#setShortcutId(String)
+     * @see android.app.Notification.Builder#setShortcutId(String)
      *
      * <p>If {@link #getMaxShortcutCountPerActivity()} is already reached, an existing shortcut with
      * the lowest rank will be removed to add space for the new shortcut.
@@ -771,4 +787,20 @@ public class ShortcutManager {
         }
     }
 
+    private static <T> T getFutureOrThrow(@NonNull AndroidFuture<T> future) {
+        try {
+            return future.get();
+        } catch (Throwable e) {
+            if (e instanceof ExecutionException) {
+                e = e.getCause();
+            }
+            if (e instanceof RuntimeException) {
+                throw (RuntimeException) e;
+            }
+            if (e instanceof Error) {
+                throw (Error) e;
+            }
+            throw new RuntimeException(e);
+        }
+    }
 }

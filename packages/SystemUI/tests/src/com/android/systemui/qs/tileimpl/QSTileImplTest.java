@@ -26,6 +26,8 @@ import static com.android.internal.logging.nano.MetricsProto.MetricsEvent.FIELD_
 import static com.android.internal.logging.nano.MetricsProto.MetricsEvent.FIELD_STATUS_BAR_STATE;
 import static com.android.internal.logging.nano.MetricsProto.MetricsEvent.TYPE_ACTION;
 
+import static com.google.common.truth.Truth.assertThat;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -35,31 +37,33 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Matchers.argThat;
-import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import static java.lang.Thread.sleep;
-
 import android.content.Intent;
 import android.metrics.LogMaker;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.Settings;
 import android.service.quicksettings.Tile;
 import android.testing.AndroidTestingRunner;
 import android.testing.TestableLooper;
 import android.testing.TestableLooper.RunWithLooper;
+import android.view.View;
 
+import androidx.annotation.Nullable;
 import androidx.test.filters.SmallTest;
 
 import com.android.internal.logging.InstanceId;
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.UiEventLogger;
 import com.android.internal.logging.testing.UiEventLoggerFake;
-import com.android.systemui.Dependency;
+import com.android.settingslib.RestrictedLockUtils.EnforcedAdmin;
 import com.android.systemui.SysuiTestCase;
+import com.android.systemui.classifier.FalsingManagerFake;
 import com.android.systemui.plugins.ActivityStarter;
+import com.android.systemui.plugins.FalsingManager;
 import com.android.systemui.plugins.qs.QSTile;
 import com.android.systemui.plugins.statusbar.StatusBarStateController;
 import com.android.systemui.qs.QSEvent;
@@ -69,7 +73,6 @@ import com.android.systemui.qs.logging.QSLogger;
 import com.android.systemui.statusbar.StatusBarState;
 
 import org.junit.Before;
-import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
@@ -79,7 +82,7 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
 @RunWith(AndroidTestingRunner.class)
-@RunWithLooper
+@RunWithLooper(setAsMainLooper = true)
 @SmallTest
 public class QSTileImplTest extends SysuiTestCase {
 
@@ -91,9 +94,16 @@ public class QSTileImplTest extends SysuiTestCase {
 
     private TestableLooper mTestableLooper;
     private TileImpl mTile;
+    @Mock
     private QSTileHost mHost;
+    @Mock
     private MetricsLogger mMetricsLogger;
+    private final FalsingManagerFake mFalsingManager = new FalsingManagerFake();
+    @Mock
     private StatusBarStateController mStatusBarStateController;
+    @Mock
+    private ActivityStarter mActivityStarter;
+
     private UiEventLoggerFake mUiEventLoggerFake;
     private InstanceId mInstanceId = InstanceId.fakeInstanceId(5);
 
@@ -104,27 +114,25 @@ public class QSTileImplTest extends SysuiTestCase {
     public void setup() throws Exception {
         MockitoAnnotations.initMocks(this);
         mTestableLooper = TestableLooper.get(this);
-        mDependency.injectTestDependency(Dependency.BG_LOOPER, mTestableLooper.getLooper());
-        mDependency.injectMockDependency(ActivityStarter.class);
-        mMetricsLogger = mDependency.injectMockDependency(MetricsLogger.class);
         mUiEventLoggerFake = new UiEventLoggerFake();
-        mStatusBarStateController =
-            mDependency.injectMockDependency(StatusBarStateController.class);
-        mHost = mock(QSTileHost.class);
         when(mHost.indexOf(SPEC)).thenReturn(POSITION);
-        when(mHost.getContext()).thenReturn(mContext.getBaseContext());
-        when(mHost.getQSLogger()).thenReturn(mQsLogger);
+        when(mHost.getContext()).thenReturn(mContext);
         when(mHost.getUiEventLogger()).thenReturn(mUiEventLoggerFake);
         when(mHost.getNewInstanceId()).thenReturn(mInstanceId);
 
-        mTile = spy(new TileImpl(mHost));
-        mTile.mHandler = mTile.new H(mTestableLooper.getLooper());
+        Handler mainHandler = new Handler(mTestableLooper.getLooper());
+
+        mTile = new TileImpl(mHost, mTestableLooper.getLooper(), mainHandler, mFalsingManager,
+                mMetricsLogger, mStatusBarStateController, mActivityStarter, mQsLogger);
+        mTile.initialize();
+        mTestableLooper.processAllMessages();
+
         mTile.setTileSpec(SPEC);
     }
 
     @Test
     public void testClick_Metrics() {
-        mTile.click();
+        mTile.click(null /* view */);
         verify(mMetricsLogger).write(argThat(new TileLogMatcher(ACTION_QS_CLICK)));
         assertEquals(1, mUiEventLoggerFake.numLogs());
         UiEventLoggerFake.FakeUiEvent event = mUiEventLoggerFake.get(0);
@@ -135,22 +143,35 @@ public class QSTileImplTest extends SysuiTestCase {
     public void testClick_log() {
         when(mStatusBarStateController.getState()).thenReturn(StatusBarState.SHADE);
 
-        mTile.click();
+        mTile.click(null /* view */);
         verify(mQsLogger).logTileClick(SPEC, StatusBarState.SHADE, Tile.STATE_ACTIVE);
     }
 
     @Test
     public void testClick_Metrics_Status_Bar_Status() {
         when(mStatusBarStateController.getState()).thenReturn(StatusBarState.SHADE);
-        mTile.click();
+        mTile.click(null /* view */);
         verify(mMetricsLogger).write(mLogCaptor.capture());
         assertEquals(StatusBarState.SHADE, mLogCaptor.getValue()
                 .getTaggedData(FIELD_STATUS_BAR_STATE));
     }
 
     @Test
+    public void testClick_falsing() {
+        mFalsingManager.setFalseTap(true);
+        mTile.click(null /* view */);
+        mTestableLooper.processAllMessages();
+        assertThat(mTile.mClicked).isFalse();
+
+        mFalsingManager.setFalseTap(false);
+        mTile.click(null /* view */);
+        mTestableLooper.processAllMessages();
+        assertThat(mTile.mClicked).isTrue();
+    }
+
+    @Test
     public void testSecondaryClick_Metrics() {
-        mTile.secondaryClick();
+        mTile.secondaryClick(null /* view */);
         verify(mMetricsLogger).write(argThat(new TileLogMatcher(ACTION_QS_SECONDARY_CLICK)));
         assertEquals(1, mUiEventLoggerFake.numLogs());
         UiEventLoggerFake.FakeUiEvent event = mUiEventLoggerFake.get(0);
@@ -161,14 +182,14 @@ public class QSTileImplTest extends SysuiTestCase {
     public void testSecondaryClick_log() {
         when(mStatusBarStateController.getState()).thenReturn(StatusBarState.SHADE);
 
-        mTile.secondaryClick();
+        mTile.secondaryClick(null /* view */);
         verify(mQsLogger).logTileSecondaryClick(SPEC, StatusBarState.SHADE, Tile.STATE_ACTIVE);
     }
 
     @Test
     public void testSecondaryClick_Metrics_Status_Bar_Status() {
         when(mStatusBarStateController.getState()).thenReturn(StatusBarState.KEYGUARD);
-        mTile.secondaryClick();
+        mTile.secondaryClick(null /* view */);
         verify(mMetricsLogger).write(mLogCaptor.capture());
         assertEquals(StatusBarState.KEYGUARD, mLogCaptor.getValue()
                 .getTaggedData(FIELD_STATUS_BAR_STATE));
@@ -176,7 +197,7 @@ public class QSTileImplTest extends SysuiTestCase {
 
     @Test
     public void testLongClick_Metrics() {
-        mTile.longClick();
+        mTile.longClick(null /* view */);
         verify(mMetricsLogger).write(argThat(new TileLogMatcher(ACTION_QS_LONG_PRESS)));
         assertEquals(1, mUiEventLoggerFake.numLogs());
         UiEventLoggerFake.FakeUiEvent event = mUiEventLoggerFake.get(0);
@@ -188,14 +209,14 @@ public class QSTileImplTest extends SysuiTestCase {
     public void testLongClick_log() {
         when(mStatusBarStateController.getState()).thenReturn(StatusBarState.SHADE);
 
-        mTile.longClick();
+        mTile.longClick(null /* view */);
         verify(mQsLogger).logTileLongClick(SPEC, StatusBarState.SHADE, Tile.STATE_ACTIVE);
     }
 
     @Test
     public void testLongClick_Metrics_Status_Bar_Status() {
         when(mStatusBarStateController.getState()).thenReturn(StatusBarState.SHADE_LOCKED);
-        mTile.click();
+        mTile.click(null /* view */);
         verify(mMetricsLogger).write(mLogCaptor.capture());
         assertEquals(StatusBarState.SHADE_LOCKED, mLogCaptor.getValue()
                 .getTaggedData(FIELD_STATUS_BAR_STATE));
@@ -223,40 +244,35 @@ public class QSTileImplTest extends SysuiTestCase {
         verify(maker).addTaggedData(eq(FIELD_QS_POSITION), eq(POSITION));
     }
 
-    @Test
-    @Ignore("flaky")
-    public void testStaleTimeout() throws InterruptedException {
-        when(mTile.getStaleTimeout()).thenReturn(5l);
-        clearInvocations(mTile);
-
-        mTile.handleRefreshState(null);
-        mTestableLooper.processAllMessages();
-        verify(mTile, never()).handleStale();
-
-        sleep(10);
-        mTestableLooper.processAllMessages();
-        verify(mTile).handleStale();
-    }
+    //TODO(b/161799397) Bring back testStaleTimeout when we can use FakeExecutor
 
     @Test
     public void testStaleListening() {
         mTile.handleStale();
         mTestableLooper.processAllMessages();
-        verify(mTile).handleSetListening(eq(true));
+        verify(mQsLogger).logTileChangeListening(SPEC, true);
 
         mTile.handleRefreshState(null);
         mTestableLooper.processAllMessages();
-        verify(mTile).handleSetListening(eq(false));
+        verify(mQsLogger).logTileChangeListening(SPEC, false);
     }
 
     @Test
     public void testHandleDestroyClearsHandlerQueue() {
-        when(mTile.getStaleTimeout()).thenReturn(0L);
         mTile.handleRefreshState(null); // this will add a delayed H.STALE message
         mTile.handleDestroy();
 
+        assertFalse(mTile.mHandler.hasMessages(QSTileImpl.H.STALE));
+    }
+
+    @Test
+    public void testHandleDestroyLifecycle() {
+        assertNotEquals(DESTROYED, mTile.getLifecycle().getCurrentState());
+        mTile.handleDestroy();
+
         mTestableLooper.processAllMessages();
-        verify(mTile, never()).handleStale();
+
+        assertEquals(DESTROYED, mTile.getLifecycle().getCurrentState());
     }
 
     @Test
@@ -310,6 +326,87 @@ public class QSTileImplTest extends SysuiTestCase {
         assertNotEquals(DESTROYED, mTile.getLifecycle().getCurrentState());
     }
 
+    @Test
+    public void testRefreshStateAfterDestroyedDoesNotCrash() {
+        mTile.destroy();
+        mTile.refreshState();
+
+        mTestableLooper.processAllMessages();
+    }
+
+    @Test
+    public void testSetListeningAfterDestroyedDoesNotCrash() {
+        Object o = new Object();
+        mTile.destroy();
+
+        mTile.setListening(o, true);
+        mTile.setListening(o, false);
+
+        mTestableLooper.processAllMessages();
+    }
+
+    @Test
+    public void testClickOnDisabledByPolicyDoesntClickLaunchesIntent() {
+        String restriction = "RESTRICTION";
+        mTile.getState().disabledByPolicy = true;
+        EnforcedAdmin admin = EnforcedAdmin.createDefaultEnforcedAdminWithRestriction(restriction);
+        mTile.setEnforcedAdmin(admin);
+
+        mTile.click(null);
+        mTestableLooper.processAllMessages();
+        assertFalse(mTile.mClicked);
+
+        ArgumentCaptor<Intent> captor = ArgumentCaptor.forClass(Intent.class);
+        verify(mActivityStarter).postStartActivityDismissingKeyguard(captor.capture(), anyInt());
+        assertEquals(Settings.ACTION_SHOW_ADMIN_SUPPORT_DETAILS, captor.getValue().getAction());
+    }
+
+    @Test
+    public void testIsListening() {
+        Object o = new Object();
+
+        mTile.setListening(o, true);
+        mTestableLooper.processAllMessages();
+        assertTrue(mTile.isListening());
+
+        mTile.setListening(o, false);
+        mTestableLooper.processAllMessages();
+        assertFalse(mTile.isListening());
+
+        mTile.setListening(o, true);
+        mTile.destroy();
+        mTestableLooper.processAllMessages();
+        assertFalse(mTile.isListening());
+    }
+
+    @Test
+    public void testStaleTriggeredWhileListening() throws Exception {
+        Object o = new Object();
+        mTile.clearRefreshes();
+
+        mTile.setListening(o, true); // +1 refresh
+        mTestableLooper.processAllMessages();
+
+        mTestableLooper.runWithLooper(() -> mTile.handleStale()); // +1 refresh
+        mTestableLooper.processAllMessages();
+
+        mTile.setListening(o, false);
+        mTestableLooper.processAllMessages();
+        assertFalse(mTile.isListening());
+        assertThat(mTile.mRefreshes).isEqualTo(2);
+    }
+
+    @Test
+    public void testStaleTriggeredWhileNotListening() throws Exception {
+        mTile.clearRefreshes();
+
+        mTestableLooper.runWithLooper(() -> mTile.handleStale()); // +1 refresh
+        mTestableLooper.processAllMessages();
+
+        assertFalse(mTile.isListening());
+        assertThat(mTile.mRefreshes).isEqualTo(1);
+    }
+
     private void assertEvent(UiEventLogger.UiEventEnum eventType,
             UiEventLoggerFake.FakeUiEvent fakeEvent) {
         assertEquals(eventType.getId(), fakeEvent.eventId);
@@ -349,11 +446,27 @@ public class QSTileImplTest extends SysuiTestCase {
             return mInvalid;
         }
     }
-
     private static class TileImpl extends QSTileImpl<QSTile.BooleanState> {
-        protected TileImpl(QSHost host) {
-            super(host);
+        boolean mClicked;
+        int mRefreshes = 0;
+
+        protected TileImpl(
+                QSHost host,
+                Looper backgroundLooper,
+                Handler mainHandler,
+                FalsingManager falsingManager,
+                MetricsLogger metricsLogger,
+                StatusBarStateController statusBarStateController,
+                ActivityStarter activityStarter,
+                QSLogger qsLogger
+        ) {
+            super(host, backgroundLooper, mainHandler, falsingManager, metricsLogger,
+                    statusBarStateController, activityStarter, qsLogger);
             getState().state = Tile.STATE_ACTIVE;
+        }
+
+        public void setEnforcedAdmin(EnforcedAdmin admin) {
+            mEnforcedAdmin = admin;
         }
 
         @Override
@@ -362,13 +475,17 @@ public class QSTileImplTest extends SysuiTestCase {
         }
 
         @Override
-        protected void handleClick() {
-
+        protected void handleClick(@Nullable View view) {
+            mClicked = true;
         }
 
         @Override
         protected void handleUpdateState(BooleanState state, Object arg) {
+            mRefreshes++;
+        }
 
+        void clearRefreshes() {
+            mRefreshes = 0;
         }
 
         @Override

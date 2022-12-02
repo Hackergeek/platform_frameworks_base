@@ -25,6 +25,7 @@ import static com.android.server.job.JobSchedulerService.NEVER_INDEX;
 import static com.android.server.job.JobSchedulerService.RARE_INDEX;
 import static com.android.server.job.JobSchedulerService.RESTRICTED_INDEX;
 import static com.android.server.job.JobSchedulerService.WORKING_INDEX;
+import static com.android.server.job.JobSchedulerService.sElapsedRealtimeClock;
 import static com.android.server.job.controllers.JobStatus.CONSTRAINT_BACKGROUND_NOT_RESTRICTED;
 import static com.android.server.job.controllers.JobStatus.CONSTRAINT_BATTERY_NOT_LOW;
 import static com.android.server.job.controllers.JobStatus.CONSTRAINT_CHARGING;
@@ -36,16 +37,20 @@ import static com.android.server.job.controllers.JobStatus.CONSTRAINT_IDLE;
 import static com.android.server.job.controllers.JobStatus.CONSTRAINT_STORAGE_NOT_LOW;
 import static com.android.server.job.controllers.JobStatus.CONSTRAINT_TIMING_DELAY;
 import static com.android.server.job.controllers.JobStatus.CONSTRAINT_WITHIN_QUOTA;
+import static com.android.server.job.controllers.JobStatus.NO_EARLIEST_RUNTIME;
+import static com.android.server.job.controllers.JobStatus.NO_LATEST_RUNTIME;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.when;
 
 import android.app.job.JobInfo;
 import android.app.usage.UsageStatsManagerInternal;
 import android.content.ComponentName;
 import android.content.pm.PackageManagerInternal;
+import android.content.pm.ServiceInfo;
 import android.net.Uri;
 import android.os.SystemClock;
 import android.provider.MediaStore;
@@ -100,7 +105,7 @@ public class JobStatusTest {
                 Clock.fixed(Clock.systemUTC().instant(), ZoneOffset.UTC);
         JobSchedulerService.sUptimeMillisClock =
                 Clock.fixed(SystemClock.uptimeClock().instant(), ZoneOffset.UTC);
-        JobSchedulerService.sElapsedRealtimeClock =
+        sElapsedRealtimeClock =
                 Clock.fixed(SystemClock.elapsedRealtimeClock().instant(), ZoneOffset.UTC);
     }
 
@@ -133,7 +138,7 @@ public class JobStatusTest {
                 .setOverrideDeadline(12)
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .build();
-        when(mJobSchedulerInternal.getMediaBackupPackage()).thenReturn(TEST_PACKAGE);
+        when(mJobSchedulerInternal.getCloudMediaProviderPackage(eq(0))).thenReturn(TEST_PACKAGE);
         assertEffectiveBucketForMediaExemption(createJobStatus(triggerContentJob), false);
     }
 
@@ -142,7 +147,7 @@ public class JobStatusTest {
         final JobInfo triggerContentJob = new JobInfo.Builder(42, TEST_JOB_COMPONENT)
                 .addTriggerContentUri(new JobInfo.TriggerContentUri(IMAGES_MEDIA_URI, 0))
                 .build();
-        when(mJobSchedulerInternal.getMediaBackupPackage()).thenReturn(TEST_PACKAGE);
+        when(mJobSchedulerInternal.getCloudMediaProviderPackage(eq(0))).thenReturn(TEST_PACKAGE);
         assertEffectiveBucketForMediaExemption(createJobStatus(triggerContentJob), false);
     }
 
@@ -151,7 +156,7 @@ public class JobStatusTest {
         final JobInfo networkJob = new JobInfo.Builder(42, TEST_JOB_COMPONENT)
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .build();
-        when(mJobSchedulerInternal.getMediaBackupPackage()).thenReturn(TEST_PACKAGE);
+        when(mJobSchedulerInternal.getCloudMediaProviderPackage(eq(0))).thenReturn(TEST_PACKAGE);
         assertEffectiveBucketForMediaExemption(createJobStatus(networkJob), false);
     }
 
@@ -161,7 +166,8 @@ public class JobStatusTest {
                 .addTriggerContentUri(new JobInfo.TriggerContentUri(IMAGES_MEDIA_URI, 0))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .build();
-        when(mJobSchedulerInternal.getMediaBackupPackage()).thenReturn("not.test.package");
+        when(mJobSchedulerInternal.getCloudMediaProviderPackage(eq(0)))
+                .thenReturn("not.test.package");
         assertEffectiveBucketForMediaExemption(createJobStatus(networkContentJob), false);
     }
 
@@ -174,13 +180,25 @@ public class JobStatusTest {
                 .addTriggerContentUri(new JobInfo.TriggerContentUri(nonEligibleUri, 0))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .build();
-        when(mJobSchedulerInternal.getMediaBackupPackage()).thenReturn(TEST_PACKAGE);
+        when(mJobSchedulerInternal.getCloudMediaProviderPackage(eq(0))).thenReturn(TEST_PACKAGE);
         assertEffectiveBucketForMediaExemption(createJobStatus(networkContentJob), false);
     }
 
     @Test
+    public void testMediaBackupExemption_lowPriorityJobs() {
+        when(mJobSchedulerInternal.getCloudMediaProviderPackage(eq(0))).thenReturn(TEST_PACKAGE);
+        final JobInfo.Builder jobBuilder = new JobInfo.Builder(42, TEST_JOB_COMPONENT)
+                .addTriggerContentUri(new JobInfo.TriggerContentUri(IMAGES_MEDIA_URI, 0))
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY);
+        assertEffectiveBucketForMediaExemption(
+                createJobStatus(jobBuilder.setPriority(JobInfo.PRIORITY_LOW).build()), false);
+        assertEffectiveBucketForMediaExemption(
+                createJobStatus(jobBuilder.setPriority(JobInfo.PRIORITY_MIN).build()), false);
+    }
+
+    @Test
     public void testMediaBackupExemptionGranted() {
-        when(mJobSchedulerInternal.getMediaBackupPackage()).thenReturn(TEST_PACKAGE);
+        when(mJobSchedulerInternal.getCloudMediaProviderPackage(eq(0))).thenReturn(TEST_PACKAGE);
         final JobInfo imageUriJob = new JobInfo.Builder(42, TEST_JOB_COMPONENT)
                 .addTriggerContentUri(new JobInfo.TriggerContentUri(IMAGES_MEDIA_URI, 0))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
@@ -203,7 +221,7 @@ public class JobStatusTest {
 
     @Test
     public void testFraction() throws Exception {
-        final long now = JobSchedulerService.sElapsedRealtimeClock.millis();
+        final long now = sElapsedRealtimeClock.millis();
 
         assertEquals(1, createJobStatus(0, Long.MAX_VALUE).getFractionRunTime(), DELTA);
 
@@ -218,6 +236,104 @@ public class JobStatusTest {
         assertEquals(0.5, createJobStatus(now - 1000, now + 1000).getFractionRunTime(), DELTA);
         assertEquals(0.75, createJobStatus(now - 1500, now + 500).getFractionRunTime(), DELTA);
         assertEquals(1, createJobStatus(now - 2000, now).getFractionRunTime(), DELTA);
+    }
+
+    @Test
+    public void testGetEffectivePriority_Expedited() {
+        final JobInfo jobInfo =
+                new JobInfo.Builder(101, new ComponentName("foo", "bar"))
+                        .setExpedited(true)
+                        .build();
+        JobStatus job = createJobStatus(jobInfo);
+
+        // Less than 2 failures, priority shouldn't be affected.
+        assertEquals(JobInfo.PRIORITY_MAX, job.getEffectivePriority());
+        int backoffAttempt = 1;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_MAX, job.getEffectivePriority());
+
+        // 2+ failures, priority should be lowered as much as possible.
+        backoffAttempt = 2;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_HIGH, job.getEffectivePriority());
+        backoffAttempt = 5;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_HIGH, job.getEffectivePriority());
+        backoffAttempt = 8;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_HIGH, job.getEffectivePriority());
+    }
+
+    @Test
+    public void testGetEffectivePriority_Regular_High() {
+        final JobInfo jobInfo =
+                new JobInfo.Builder(101, new ComponentName("foo", "bar"))
+                        .setPriority(JobInfo.PRIORITY_HIGH)
+                        .build();
+        JobStatus job = createJobStatus(jobInfo);
+
+        // Less than 2 failures, priority shouldn't be affected.
+        assertEquals(JobInfo.PRIORITY_HIGH, job.getEffectivePriority());
+        int backoffAttempt = 1;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_HIGH, job.getEffectivePriority());
+
+        // Failures in [2,4), priority should be lowered slightly.
+        backoffAttempt = 2;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_DEFAULT, job.getEffectivePriority());
+        backoffAttempt = 3;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_DEFAULT, job.getEffectivePriority());
+
+        // Failures in [4,6), priority should be lowered more.
+        backoffAttempt = 4;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_LOW, job.getEffectivePriority());
+        backoffAttempt = 5;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_LOW, job.getEffectivePriority());
+
+        // 6+ failures, priority should be lowered as much as possible.
+        backoffAttempt = 6;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_MIN, job.getEffectivePriority());
+        backoffAttempt = 12;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_MIN, job.getEffectivePriority());
+    }
+
+    /**
+     * Test that LOW priority jobs don't have their priority lowered as quickly as higher priority
+     * jobs.
+     */
+    @Test
+    public void testGetEffectivePriority_Regular_Low() {
+        final JobInfo jobInfo =
+                new JobInfo.Builder(101, new ComponentName("foo", "bar"))
+                        .setPriority(JobInfo.PRIORITY_LOW)
+                        .build();
+        JobStatus job = createJobStatus(jobInfo);
+
+        // Less than 6 failures, priority shouldn't be affected.
+        assertEquals(JobInfo.PRIORITY_LOW, job.getEffectivePriority());
+        int backoffAttempt = 1;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_LOW, job.getEffectivePriority());
+        backoffAttempt = 4;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_LOW, job.getEffectivePriority());
+        backoffAttempt = 5;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_LOW, job.getEffectivePriority());
+
+        // 6+ failures, priority should be lowered as much as possible.
+        backoffAttempt = 6;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_MIN, job.getEffectivePriority());
+        backoffAttempt = 12;
+        job = new JobStatus(job, NO_EARLIEST_RUNTIME, NO_LATEST_RUNTIME, backoffAttempt, 0, 0);
+        assertEquals(JobInfo.PRIORITY_MIN, job.getEffectivePriority());
     }
 
     /**
@@ -260,15 +376,15 @@ public class JobStatusTest {
         final JobStatus job = createJobStatus(jobInfo);
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setChargingConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
-        job.setChargingConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setChargingConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
-        job.setChargingConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
     }
 
@@ -281,15 +397,15 @@ public class JobStatusTest {
         final JobStatus job = createJobStatus(jobInfo);
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setIdleConstraintSatisfied(false);
+        job.setIdleConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_IDLE));
-        job.setIdleConstraintSatisfied(true);
+        job.setIdleConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_IDLE));
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setIdleConstraintSatisfied(false);
+        job.setIdleConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_IDLE));
-        job.setIdleConstraintSatisfied(true);
+        job.setIdleConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_IDLE));
     }
 
@@ -302,15 +418,15 @@ public class JobStatusTest {
         final JobStatus job = createJobStatus(jobInfo);
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setBatteryNotLowConstraintSatisfied(false);
+        job.setBatteryNotLowConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_BATTERY_NOT_LOW));
-        job.setBatteryNotLowConstraintSatisfied(true);
+        job.setBatteryNotLowConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_BATTERY_NOT_LOW));
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setBatteryNotLowConstraintSatisfied(false);
+        job.setBatteryNotLowConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_BATTERY_NOT_LOW));
-        job.setBatteryNotLowConstraintSatisfied(true);
+        job.setBatteryNotLowConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_BATTERY_NOT_LOW));
     }
 
@@ -323,15 +439,15 @@ public class JobStatusTest {
         final JobStatus job = createJobStatus(jobInfo);
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setStorageNotLowConstraintSatisfied(false);
+        job.setStorageNotLowConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_STORAGE_NOT_LOW));
-        job.setStorageNotLowConstraintSatisfied(true);
+        job.setStorageNotLowConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_STORAGE_NOT_LOW));
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setStorageNotLowConstraintSatisfied(false);
+        job.setStorageNotLowConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_STORAGE_NOT_LOW));
-        job.setStorageNotLowConstraintSatisfied(true);
+        job.setStorageNotLowConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_STORAGE_NOT_LOW));
     }
 
@@ -344,15 +460,15 @@ public class JobStatusTest {
         final JobStatus job = createJobStatus(jobInfo);
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setTimingDelayConstraintSatisfied(false);
+        job.setTimingDelayConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_TIMING_DELAY));
-        job.setTimingDelayConstraintSatisfied(true);
+        job.setTimingDelayConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_TIMING_DELAY));
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setTimingDelayConstraintSatisfied(false);
+        job.setTimingDelayConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_TIMING_DELAY));
-        job.setTimingDelayConstraintSatisfied(true);
+        job.setTimingDelayConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_TIMING_DELAY));
     }
 
@@ -365,15 +481,15 @@ public class JobStatusTest {
         final JobStatus job = createJobStatus(jobInfo);
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setDeadlineConstraintSatisfied(false);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
-        job.setDeadlineConstraintSatisfied(true);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setDeadlineConstraintSatisfied(false);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
-        job.setDeadlineConstraintSatisfied(true);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
     }
 
@@ -386,15 +502,15 @@ public class JobStatusTest {
         final JobStatus job = createJobStatus(jobInfo);
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setConnectivityConstraintSatisfied(false);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
-        job.setConnectivityConstraintSatisfied(true);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setConnectivityConstraintSatisfied(false);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
-        job.setConnectivityConstraintSatisfied(true);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
     }
 
@@ -409,15 +525,15 @@ public class JobStatusTest {
         final JobStatus job = createJobStatus(jobInfo);
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setContentTriggerConstraintSatisfied(false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
-        job.setContentTriggerConstraintSatisfied(true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setContentTriggerConstraintSatisfied(false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
-        job.setContentTriggerConstraintSatisfied(true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
     }
 
@@ -435,15 +551,15 @@ public class JobStatusTest {
 
         markImplicitConstraintsSatisfied(job, false);
 
-        job.setChargingConstraintSatisfied(false);
-        job.setConnectivityConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
-        job.setChargingConstraintSatisfied(true);
-        job.setConnectivityConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         // Still false because implicit constraints aren't satisfied.
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
@@ -451,61 +567,61 @@ public class JobStatusTest {
 
         markImplicitConstraintsSatisfied(job, true);
 
-        job.setChargingConstraintSatisfied(false);
-        job.setConnectivityConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
 
         // Turn on constraints one at a time.
-        job.setChargingConstraintSatisfied(true);
-        job.setConnectivityConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
 
-        job.setChargingConstraintSatisfied(false);
-        job.setConnectivityConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
 
-        job.setChargingConstraintSatisfied(false);
-        job.setConnectivityConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
 
         // With two of the 3 constraints satisfied (and implicit constraints also satisfied), only
         // the unsatisfied constraint should return true.
-        job.setChargingConstraintSatisfied(true);
-        job.setConnectivityConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
 
-        job.setChargingConstraintSatisfied(true);
-        job.setConnectivityConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
 
-        job.setChargingConstraintSatisfied(false);
-        job.setConnectivityConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
 
-        job.setChargingConstraintSatisfied(true);
-        job.setConnectivityConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setConnectivityConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONNECTIVITY));
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
@@ -525,15 +641,15 @@ public class JobStatusTest {
 
         markImplicitConstraintsSatisfied(job, false);
 
-        job.setChargingConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(false);
-        job.setDeadlineConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
-        job.setChargingConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(true);
-        job.setDeadlineConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         // Still false because implicit constraints aren't satisfied.
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
@@ -541,18 +657,18 @@ public class JobStatusTest {
 
         markImplicitConstraintsSatisfied(job, true);
 
-        job.setChargingConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(false);
-        job.setDeadlineConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
         // Once implicit constraint are satisfied, deadline constraint should always return true.
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
 
         // Turn on constraints one at a time.
-        job.setChargingConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(false);
-        job.setDeadlineConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         // Deadline should force isReady to be true, but isn't needed for the job to be
         // considered ready.
@@ -560,17 +676,17 @@ public class JobStatusTest {
         // Once implicit constraint are satisfied, deadline constraint should always return true.
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
 
-        job.setChargingConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(true);
-        job.setDeadlineConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
         // Once implicit constraint are satisfied, deadline constraint should always return true.
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
 
-        job.setChargingConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(false);
-        job.setDeadlineConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         // Since the deadline constraint is satisfied, none of the other explicit constraints are
         // needed.
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
@@ -580,33 +696,33 @@ public class JobStatusTest {
 
         // With two of the 3 constraints satisfied (and implicit constraints also satisfied), only
         // the unsatisfied constraint should return true.
-        job.setChargingConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(true);
-        job.setDeadlineConstraintSatisfied(false);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
         // Once implicit constraint are satisfied, deadline constraint should always return true.
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
 
-        job.setChargingConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(false);
-        job.setDeadlineConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
         // Once implicit constraint are satisfied, deadline constraint should always return true.
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
 
-        job.setChargingConstraintSatisfied(false);
-        job.setContentTriggerConstraintSatisfied(true);
-        job.setDeadlineConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
         // Once implicit constraint are satisfied, deadline constraint should always return true.
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEADLINE));
 
-        job.setChargingConstraintSatisfied(true);
-        job.setContentTriggerConstraintSatisfied(true);
-        job.setDeadlineConstraintSatisfied(true);
+        job.setChargingConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setContentTriggerConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
+        job.setDeadlineConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CHARGING));
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_CONTENT_TRIGGER));
         // Once implicit constraint are satisfied, deadline constraint should always return true.
@@ -620,15 +736,15 @@ public class JobStatusTest {
                 new JobInfo.Builder(101, new ComponentName("foo", "bar")).build());
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setDeviceNotDozingConstraintSatisfied(false, false);
+        job.setDeviceNotDozingConstraintSatisfied(sElapsedRealtimeClock.millis(), false, false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_DEVICE_NOT_DOZING));
-        job.setDeviceNotDozingConstraintSatisfied(true, false);
+        job.setDeviceNotDozingConstraintSatisfied(sElapsedRealtimeClock.millis(), true, false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_DEVICE_NOT_DOZING));
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setDeviceNotDozingConstraintSatisfied(false, false);
+        job.setDeviceNotDozingConstraintSatisfied(sElapsedRealtimeClock.millis(), false, false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEVICE_NOT_DOZING));
-        job.setDeviceNotDozingConstraintSatisfied(true, false);
+        job.setDeviceNotDozingConstraintSatisfied(sElapsedRealtimeClock.millis(), true, false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_DEVICE_NOT_DOZING));
     }
 
@@ -639,15 +755,15 @@ public class JobStatusTest {
                 new JobInfo.Builder(101, new ComponentName("foo", "bar")).build());
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setQuotaConstraintSatisfied(false);
+        job.setQuotaConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_WITHIN_QUOTA));
-        job.setQuotaConstraintSatisfied(true);
+        job.setQuotaConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_WITHIN_QUOTA));
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setQuotaConstraintSatisfied(false);
+        job.setQuotaConstraintSatisfied(sElapsedRealtimeClock.millis(), false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_WITHIN_QUOTA));
-        job.setQuotaConstraintSatisfied(true);
+        job.setQuotaConstraintSatisfied(sElapsedRealtimeClock.millis(), true);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_WITHIN_QUOTA));
     }
 
@@ -658,22 +774,29 @@ public class JobStatusTest {
                 new JobInfo.Builder(101, new ComponentName("foo", "bar")).build());
 
         markImplicitConstraintsSatisfied(job, false);
-        job.setBackgroundNotRestrictedConstraintSatisfied(false);
+        job.setBackgroundNotRestrictedConstraintSatisfied(
+                sElapsedRealtimeClock.millis(), false, false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_BACKGROUND_NOT_RESTRICTED));
-        job.setBackgroundNotRestrictedConstraintSatisfied(true);
+        job.setBackgroundNotRestrictedConstraintSatisfied(
+                sElapsedRealtimeClock.millis(), true, false);
         assertFalse(job.wouldBeReadyWithConstraint(CONSTRAINT_BACKGROUND_NOT_RESTRICTED));
 
         markImplicitConstraintsSatisfied(job, true);
-        job.setBackgroundNotRestrictedConstraintSatisfied(false);
+        job.setBackgroundNotRestrictedConstraintSatisfied(
+                sElapsedRealtimeClock.millis(), false, false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_BACKGROUND_NOT_RESTRICTED));
-        job.setBackgroundNotRestrictedConstraintSatisfied(true);
+        job.setBackgroundNotRestrictedConstraintSatisfied(
+                sElapsedRealtimeClock.millis(), true, false);
         assertTrue(job.wouldBeReadyWithConstraint(CONSTRAINT_BACKGROUND_NOT_RESTRICTED));
     }
 
     private void markImplicitConstraintsSatisfied(JobStatus job, boolean isSatisfied) {
-        job.setQuotaConstraintSatisfied(isSatisfied);
-        job.setDeviceNotDozingConstraintSatisfied(isSatisfied, false);
-        job.setBackgroundNotRestrictedConstraintSatisfied(isSatisfied);
+        job.setQuotaConstraintSatisfied(sElapsedRealtimeClock.millis(), isSatisfied);
+        job.setTareWealthConstraintSatisfied(sElapsedRealtimeClock.millis(), isSatisfied);
+        job.setDeviceNotDozingConstraintSatisfied(
+                sElapsedRealtimeClock.millis(), isSatisfied, false);
+        job.setBackgroundNotRestrictedConstraintSatisfied(
+                sElapsedRealtimeClock.millis(), isSatisfied, false);
     }
 
     private static JobStatus createJobStatus(long earliestRunTimeElapsedMillis,
@@ -681,10 +804,12 @@ public class JobStatusTest {
         final JobInfo job = new JobInfo.Builder(101, new ComponentName("foo", "bar"))
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY).build();
         return new JobStatus(job, 0, null, -1, 0, null, earliestRunTimeElapsedMillis,
-                latestRunTimeElapsedMillis, 0, 0, null, 0);
+                latestRunTimeElapsedMillis, 0, 0, null, 0, 0);
     }
 
     private static JobStatus createJobStatus(JobInfo job) {
-        return JobStatus.createFromJobInfo(job, 0, null, -1, "JobStatusTest");
+        JobStatus jobStatus = JobStatus.createFromJobInfo(job, 0, null, -1, "JobStatusTest");
+        jobStatus.serviceInfo = mock(ServiceInfo.class);
+        return jobStatus;
     }
 }

@@ -16,9 +16,12 @@
 
 package android.telephony;
 
+import static android.text.TextUtils.formatSimple;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
 import android.os.Parcel;
 import android.telephony.gsm.GsmCellLocation;
 import android.text.TextUtils;
@@ -56,7 +59,7 @@ public final class CellIdentityGsm extends CellIdentity {
     /**
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public CellIdentityGsm() {
         super(TAG, CellInfo.TYPE_GSM, null, null, null, null);
         mLac = CellInfo.UNAVAILABLE;
@@ -98,30 +101,6 @@ public final class CellIdentityGsm extends CellIdentity {
         updateGlobalCellId();
     }
 
-    /** @hide */
-    public CellIdentityGsm(@NonNull android.hardware.radio.V1_0.CellIdentityGsm cid) {
-        this(cid.lac, cid.cid, cid.arfcn,
-                cid.bsic == (byte) 0xFF ? CellInfo.UNAVAILABLE : cid.bsic,
-                cid.mcc, cid.mnc, "", "", new ArraySet<>());
-    }
-
-    /** @hide */
-    public CellIdentityGsm(@NonNull android.hardware.radio.V1_2.CellIdentityGsm cid) {
-        this(cid.base.lac, cid.base.cid, cid.base.arfcn,
-                cid.base.bsic == (byte) 0xFF ? CellInfo.UNAVAILABLE : cid.base.bsic, cid.base.mcc,
-                cid.base.mnc, cid.operatorNames.alphaLong, cid.operatorNames.alphaShort,
-                new ArraySet<>());
-    }
-
-    /** @hide */
-    public CellIdentityGsm(@NonNull android.hardware.radio.V1_5.CellIdentityGsm cid) {
-        this(cid.base.base.lac, cid.base.base.cid, cid.base.base.arfcn,
-                cid.base.base.bsic == (byte) 0xFF ? CellInfo.UNAVAILABLE
-                        : cid.base.base.bsic, cid.base.base.mcc,
-                cid.base.base.mnc, cid.base.operatorNames.alphaLong,
-                cid.base.operatorNames.alphaShort, cid.additionalPlmns);
-    }
-
     private CellIdentityGsm(@NonNull CellIdentityGsm cid) {
         this(cid.mLac, cid.mCid, cid.mArfcn, cid.mBsic, cid.mMccStr,
                 cid.mMncStr, cid.mAlphaLong, cid.mAlphaShort, cid.mAdditionalPlmns);
@@ -147,7 +126,7 @@ public final class CellIdentityGsm extends CellIdentity {
 
         if (mLac == CellInfo.UNAVAILABLE || mCid == CellInfo.UNAVAILABLE) return;
 
-        mGlobalCellId = plmn + String.format("%04x%04x", mLac, mCid);
+        mGlobalCellId = plmn + formatSimple("%04x%04x", mLac, mCid);
     }
 
     /**

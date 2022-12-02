@@ -77,7 +77,7 @@ class UsbSerialReader extends IUsbSerialReader.Stub {
 
             UserHandle user = Binder.getCallingUserHandle();
             int packageTargetSdkVersion;
-            long token = Binder.clearCallingIdentity();
+            final long token = Binder.clearCallingIdentity();
             try {
                 PackageInfo pkg;
                 try {
@@ -98,7 +98,7 @@ class UsbSerialReader extends IUsbSerialReader.Stub {
                                     .checkPermission((UsbDevice) mDevice, packageName, pid, uid);
                         } else {
                             mPermissionManager.getPermissionsForUser(userId)
-                                    .checkPermission((UsbAccessory) mDevice, uid);
+                                    .checkPermission((UsbAccessory) mDevice, pid, uid);
                         }
                     }
                 }

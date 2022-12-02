@@ -27,8 +27,9 @@ import android.os.Looper;
 import android.os.Message;
 
 /**
- * IntentService is a base class for {@link Service}s that handle asynchronous
- * requests (expressed as {@link Intent}s) on demand.  Clients send requests
+ * IntentService is an extension of the {@link Service} component class that
+ * handles asynchronous requests (expressed as {@link Intent}s) on demand.
+ * Clients send requests
  * through {@link android.content.Context#startService(Intent)} calls; the
  * service is started as needed, handles each Intent in turn using a worker
  * thread, and stops itself when it runs out of work.
@@ -51,10 +52,10 @@ import android.os.Message;
  * guide.</p>
  * </div>
  *
- * @see android.support.v4.app.JobIntentService
+ * @see androidx.core.app.JobIntentService
  *
  * @deprecated IntentService is subject to all the
- *   <a href="/preview/features/background.html">background execution limits</a>
+ *   <a href="{@docRoot}about/versions/oreo/background.html">background execution limits</a>
  *   imposed with Android 8.0 (API level 26). Consider using {@link androidx.work.WorkManager}
  *   or {@link androidx.core.app.JobIntentService}, which uses jobs
  *   instead of services when running on Android 8.0 or higher.

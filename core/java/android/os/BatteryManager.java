@@ -20,7 +20,6 @@ import android.Manifest.permission;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.annotation.SystemService;
-import android.annotation.TestApi;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.content.Intent;
@@ -121,7 +120,7 @@ public class BatteryManager {
      * Int value set to the maximum charging current supported by the charger in micro amperes.
      * {@hide}
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static final String EXTRA_MAX_CHARGING_CURRENT = "max_charging_current";
 
     /**
@@ -129,7 +128,7 @@ public class BatteryManager {
      * Int value set to the maximum charging voltage supported by the charger in micro volts.
      * {@hide}
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static final String EXTRA_MAX_CHARGING_VOLTAGE = "max_charging_voltage";
 
     /**
@@ -137,7 +136,7 @@ public class BatteryManager {
      * integer containing the charge counter present in the battery.
      * {@hide}
      */
-     @UnsupportedAppUsage
+     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
      public static final String EXTRA_CHARGE_COUNTER = "charge_counter";
 
     /**
@@ -188,10 +187,13 @@ public class BatteryManager {
     public static final int BATTERY_PLUGGED_USB = OsProtoEnums.BATTERY_PLUGGED_USB; // = 2
     /** Power source is wireless. */
     public static final int BATTERY_PLUGGED_WIRELESS = OsProtoEnums.BATTERY_PLUGGED_WIRELESS; // = 4
+    /** Power source is dock. */
+    public static final int BATTERY_PLUGGED_DOCK = OsProtoEnums.BATTERY_PLUGGED_DOCK; // = 8
 
     /** @hide */
     public static final int BATTERY_PLUGGED_ANY =
-            BATTERY_PLUGGED_AC | BATTERY_PLUGGED_USB | BATTERY_PLUGGED_WIRELESS;
+            BATTERY_PLUGGED_AC | BATTERY_PLUGGED_USB | BATTERY_PLUGGED_WIRELESS
+                    | BATTERY_PLUGGED_DOCK;
 
     /**
      * Sent when the device's battery has started charging (or has reached full charge
@@ -392,7 +394,6 @@ public class BatteryManager {
      */
     @RequiresPermission(permission.POWER_SAVER)
     @SystemApi
-    @TestApi
     public boolean setChargingStateUpdateDelayMillis(int delayMillis) {
         try {
             return mBatteryStats.setChargingStateUpdateDelayMillis(delayMillis);

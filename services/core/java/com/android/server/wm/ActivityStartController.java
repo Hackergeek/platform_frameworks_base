@@ -16,16 +16,18 @@
 
 package com.android.server.wm;
 
+import static android.app.ActivityManager.START_CANCELED;
 import static android.app.ActivityManager.START_SUCCESS;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
 import static android.os.FactoryTest.FACTORY_TEST_LOW_LEVEL;
 
-import static com.android.server.wm.ActivityStackSupervisor.ON_TOP;
 import static com.android.server.wm.ActivityTaskManagerDebugConfig.TAG_ATM;
 import static com.android.server.wm.ActivityTaskManagerDebugConfig.TAG_WITH_CLASS_NAME;
+import static com.android.server.wm.ActivityTaskSupervisor.ON_TOP;
 
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.ActivityOptions;
 import android.app.IApplicationThread;
@@ -37,15 +39,12 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.os.Binder;
-import android.os.Handler;
+import android.os.Bundle;
 import android.os.IBinder;
-import android.os.Looper;
-import android.os.Message;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.util.Slog;
 import android.util.SparseArray;
-import android.util.proto.ProtoOutputStream;
 import android.view.RemoteAnimationAdapter;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -53,12 +52,10 @@ import com.android.internal.util.ArrayUtils;
 import com.android.server.am.ActivityManagerService;
 import com.android.server.am.PendingIntentRecord;
 import com.android.server.uri.NeededUriGrants;
-import com.android.server.wm.ActivityStackSupervisor.PendingActivityLaunch;
 import com.android.server.wm.ActivityStarter.DefaultFactory;
 import com.android.server.wm.ActivityStarter.Factory;
 
 import java.io.PrintWriter;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -76,7 +73,7 @@ public class ActivityStartController {
     private static final int DO_PENDING_ACTIVITY_LAUNCHES_MSG = 1;
 
     private final ActivityTaskManagerService mService;
-    private final ActivityStackSupervisor mSupervisor;
+    private final ActivityTaskSupervisor mSupervisor;
 
     /** Last home activity record we attempted to start. */
     private ActivityRecord mLastHomeActivityStartRecord;
@@ -87,34 +84,13 @@ public class ActivityStartController {
     /** The result of the last home activity we attempted to start. */
     private int mLastHomeActivityStartResult;
 
-    /** A list of activities that are waiting to launch. */
-    private final ArrayList<ActivityStackSupervisor.PendingActivityLaunch>
-            mPendingActivityLaunches = new ArrayList<>();
-
     private final Factory mFactory;
-
-    private final Handler mHandler;
 
     private final PendingRemoteAnimationRegistry mPendingRemoteAnimationRegistry;
 
     boolean mCheckedForSetup = false;
 
-    private final class StartHandler extends Handler {
-        public StartHandler(Looper looper) {
-            super(looper, null, true);
-        }
-
-        @Override
-        public void handleMessage(Message msg) {
-            switch(msg.what) {
-                case DO_PENDING_ACTIVITY_LAUNCHES_MSG:
-                    synchronized (mService.mGlobalLock) {
-                        doPendingActivityLaunches(true);
-                    }
-                    break;
-            }
-        }
-    }
+    private final BackgroundActivityStartController mBalController;
 
     /**
      * TODO(b/64750076): Capture information necessary for dump and
@@ -124,21 +100,21 @@ public class ActivityStartController {
     private ActivityStarter mLastStarter;
 
     ActivityStartController(ActivityTaskManagerService service) {
-        this(service, service.mStackSupervisor,
-                new DefaultFactory(service, service.mStackSupervisor,
-                    new ActivityStartInterceptor(service, service.mStackSupervisor)));
+        this(service, service.mTaskSupervisor,
+                new DefaultFactory(service, service.mTaskSupervisor,
+                    new ActivityStartInterceptor(service, service.mTaskSupervisor)));
     }
 
     @VisibleForTesting
-    ActivityStartController(ActivityTaskManagerService service, ActivityStackSupervisor supervisor,
+    ActivityStartController(ActivityTaskManagerService service, ActivityTaskSupervisor supervisor,
             Factory factory) {
         mService = service;
         mSupervisor = supervisor;
-        mHandler = new StartHandler(mService.mH.getLooper());
         mFactory = factory;
         mFactory.setController(this);
         mPendingRemoteAnimationRegistry = new PendingRemoteAnimationRegistry(service.mGlobalLock,
                 service.mH);
+        mBalController = new BackgroundActivityStartController(mService, mSupervisor);
     }
 
     /**
@@ -164,12 +140,12 @@ public class ActivityStartController {
      * last starter for an arbitrary task record. Re-evaluate whether we can remove.
      */
     void postStartActivityProcessingForLastStarter(ActivityRecord r, int result,
-            ActivityStack targetStack) {
+            Task targetRootTask) {
         if (mLastStarter == null) {
             return;
         }
 
-        mLastStarter.postStartActivityProcessing(r, result, targetStack);
+        mLastStarter.postStartActivityProcessing(r, result, targetRootTask);
     }
 
     void startHomeActivity(Intent intent, ActivityInfo aInfo, String reason,
@@ -177,9 +153,9 @@ public class ActivityStartController {
         final ActivityOptions options = ActivityOptions.makeBasic();
         options.setLaunchWindowingMode(WINDOWING_MODE_FULLSCREEN);
         if (!ActivityRecord.isResolverActivity(aInfo.name)) {
-            // The resolver activity shouldn't be put in home stack because when the foreground is
-            // standard type activity, the resolver activity should be put on the top of current
-            // foreground instead of bring home stack to front.
+            // The resolver activity shouldn't be put in root home task because when the
+            // foreground is standard type activity, the resolver activity should be put on the
+            // top of current foreground instead of bring root home task to front.
             options.setLaunchActivityType(ACTIVITY_TYPE_HOME);
         }
         final int displayId = taskDisplayArea.getDisplayId();
@@ -187,13 +163,13 @@ public class ActivityStartController {
         options.setLaunchTaskDisplayArea(taskDisplayArea.mRemoteToken
                 .toWindowContainerToken());
 
-        // The home activity will be started later, defer resuming to avoid unneccerary operations
-        // (e.g. start home recursively) when creating home stack.
+        // The home activity will be started later, defer resuming to avoid unnecessary operations
+        // (e.g. start home recursively) when creating root home task.
         mSupervisor.beginDeferResume();
-        final ActivityStack homeStack;
+        final Task rootHomeTask;
         try {
-            // Make sure home stack exists on display area.
-            homeStack = taskDisplayArea.getOrCreateRootHomeTask(ON_TOP);
+            // Make sure root home task exists on display area.
+            rootHomeTask = taskDisplayArea.getOrCreateRootHomeTask(ON_TOP);
         } finally {
             mSupervisor.endDeferResume();
         }
@@ -205,7 +181,7 @@ public class ActivityStartController {
                 .setActivityOptions(options.toBundle())
                 .execute();
         mLastHomeActivityStartRecord = tmpOutRecord[0];
-        if (homeStack.mInResumeTopActivity) {
+        if (rootHomeTask.mInResumeTopActivity) {
             // If we are in resume section already, home activity will be initialized, but not
             // resumed (to avoid recursive resume) and will stay that way until something pokes it
             // again. We need to schedule another resume.
@@ -245,8 +221,8 @@ public class ActivityStartController {
                     vers = ri.activityInfo.applicationInfo.metaData.getString(
                             Intent.METADATA_SETUP_VERSION);
                 }
-                String lastVers = Settings.Secure.getString(
-                        resolver, Settings.Secure.LAST_SETUP_SHOWN);
+                String lastVers = Settings.Secure.getStringForUser(
+                        resolver, Settings.Secure.LAST_SETUP_SHOWN, resolver.getUserId());
                 if (vers != null && !vers.equals(lastVers)) {
                     intent.setFlags(FLAG_ACTIVITY_NEW_TASK);
                     intent.setComponent(new ComponentName(
@@ -420,15 +396,18 @@ public class ActivityStartController {
                         0 /* startFlags */, null /* profilerInfo */, userId, filterCallingUid);
                 aInfo = mService.mAmInternal.getActivityInfoForUser(aInfo, userId);
 
-                // Carefully collect grants without holding lock
                 if (aInfo != null) {
-                    intentGrants = mSupervisor.mService.mUgmInternal
-                            .checkGrantUriPermissionFromIntent(intent, filterCallingUid,
-                                    aInfo.applicationInfo.packageName,
-                                    UserHandle.getUserId(aInfo.applicationInfo.uid));
-                }
+                    try {
+                        // Carefully collect grants without holding lock
+                        intentGrants = mSupervisor.mService.mUgmInternal
+                                .checkGrantUriPermissionFromIntent(intent, filterCallingUid,
+                                        aInfo.applicationInfo.packageName,
+                                        UserHandle.getUserId(aInfo.applicationInfo.uid));
+                    } catch (SecurityException e) {
+                        Slog.d(TAG, "Not allowed to start activity since no uri permission.");
+                        return START_CANCELED;
+                    }
 
-                if (aInfo != null) {
                     if ((aInfo.applicationInfo.privateFlags
                             & ApplicationInfo.PRIVATE_FLAG_CANT_SAVE_STATE) != 0) {
                         throw new IllegalArgumentException(
@@ -479,6 +458,10 @@ public class ActivityStartController {
             // Lock the loop to ensure the activities launched in a sequence.
             synchronized (mService.mGlobalLock) {
                 mService.deferWindowLayout();
+                // To avoid creating multiple starting window when creating starting multiples
+                // activities, we defer the creation of the starting window once all start request
+                // are processed
+                mService.mWindowManager.mStartingSurfaceController.beginDeferAddStartingWindow();
                 try {
                     for (int i = 0; i < starters.length; i++) {
                         final int startResult = starters[i].setResultTo(resultTo)
@@ -494,7 +477,7 @@ public class ActivityStartController {
                         if (started != null && started.getUid() == filterCallingUid) {
                             // Only the started activity which has the same uid as the source caller
                             // can be the caller of next activity.
-                            resultTo = started.appToken;
+                            resultTo = started.token;
                         } else {
                             resultTo = sourceResultTo;
                             // Different apps not adjacent to the caller are forced to be new task.
@@ -504,6 +487,8 @@ public class ActivityStartController {
                         }
                     }
                 } finally {
+                    mService.mWindowManager.mStartingSurfaceController.endDeferAddStartingWindow(
+                            options != null ? options.getOriginalOptions() : null);
                     mService.continueWindowLayout();
                 }
             }
@@ -514,48 +499,39 @@ public class ActivityStartController {
         return START_SUCCESS;
     }
 
-    void schedulePendingActivityLaunches(long delayMs) {
-        mHandler.removeMessages(DO_PENDING_ACTIVITY_LAUNCHES_MSG);
-        Message msg = mHandler.obtainMessage(DO_PENDING_ACTIVITY_LAUNCHES_MSG);
-        mHandler.sendMessageDelayed(msg, delayMs);
-    }
-
-    void doPendingActivityLaunches(boolean doResume) {
-        while (!mPendingActivityLaunches.isEmpty()) {
-            final PendingActivityLaunch pal = mPendingActivityLaunches.remove(0);
-            final boolean resume = doResume && mPendingActivityLaunches.isEmpty();
-            final ActivityStarter starter = obtainStarter(null /* intent */,
-                    "pendingActivityLaunch");
-            try {
-                starter.startResolvedActivity(pal.r, pal.sourceRecord, null, null, pal.startFlags,
-                        resume, pal.r.pendingOptions, null, pal.intentGrants);
-            } catch (Exception e) {
-                Slog.e(TAG, "Exception during pending activity launch pal=" + pal, e);
-                pal.sendErrorResult(e.getMessage());
-            }
-        }
-    }
-
-    void addPendingActivityLaunch(PendingActivityLaunch launch) {
-        mPendingActivityLaunches.add(launch);
-    }
-
-    boolean clearPendingActivityLaunches(String packageName) {
-        final int pendingLaunches = mPendingActivityLaunches.size();
-
-        for (int palNdx = pendingLaunches - 1; palNdx >= 0; --palNdx) {
-            final PendingActivityLaunch pal = mPendingActivityLaunches.get(palNdx);
-            final ActivityRecord r = pal.r;
-            if (r != null && r.packageName.equals(packageName)) {
-                mPendingActivityLaunches.remove(palNdx);
-            }
-        }
-        return mPendingActivityLaunches.size() < pendingLaunches;
+    /**
+     * Starts an activity in the TaskFragment.
+     * @param taskFragment TaskFragment {@link TaskFragment} to start the activity in.
+     * @param activityIntent intent to start the activity.
+     * @param activityOptions ActivityOptions to start the activity with.
+     * @param resultTo the caller activity
+     * @param callingUid the caller uid
+     * @param callingPid the caller pid
+     * @return the start result.
+     */
+    int startActivityInTaskFragment(@NonNull TaskFragment taskFragment,
+            @NonNull Intent activityIntent, @Nullable Bundle activityOptions,
+            @Nullable IBinder resultTo, int callingUid, int callingPid,
+            @Nullable IBinder errorCallbackToken) {
+        final ActivityRecord caller =
+                resultTo != null ? ActivityRecord.forTokenLocked(resultTo) : null;
+        return obtainStarter(activityIntent, "startActivityInTaskFragment")
+                .setActivityOptions(activityOptions)
+                .setInTaskFragment(taskFragment)
+                .setResultTo(resultTo)
+                .setRequestCode(-1)
+                .setCallingUid(callingUid)
+                .setCallingPid(callingPid)
+                .setRealCallingUid(callingUid)
+                .setRealCallingPid(callingPid)
+                .setUserId(caller != null ? caller.mUserId : mService.getCurrentUserId())
+                .setErrorCallbackToken(errorCallbackToken)
+                .execute();
     }
 
     void registerRemoteAnimationForNextActivityStart(String packageName,
-            RemoteAnimationAdapter adapter) {
-        mPendingRemoteAnimationRegistry.addPendingAnimation(packageName, adapter);
+            RemoteAnimationAdapter adapter, @Nullable IBinder launchCookie) {
+        mPendingRemoteAnimationRegistry.addPendingAnimation(packageName, adapter, launchCookie);
     }
 
     PendingRemoteAnimationRegistry getPendingRemoteAnimationRegistry() {
@@ -575,10 +551,8 @@ public class ActivityStartController {
 
         if (mLastHomeActivityStartRecord != null && (!dumpPackagePresent
                 || dumpPackage.equals(mLastHomeActivityStartRecord.packageName))) {
-            if (!dumped) {
-                dumped = true;
-                dumpLastHomeActivityStartResult(pw, prefix);
-            }
+            dumped = true;
+            dumpLastHomeActivityStartResult(pw, prefix);
             pw.print(prefix);
             pw.println("mLastHomeActivityStartRecord:");
             mLastHomeActivityStartRecord.dump(pw, prefix + "  ", true /* dumpAll */);
@@ -596,6 +570,7 @@ public class ActivityStartController {
                     dumpLastHomeActivityStartResult(pw, prefix);
                 }
                 pw.print(prefix);
+                pw.println("mLastStarter:");
                 mLastStarter.dump(pw, prefix + "  ");
 
                 if (dumpPackagePresent) {
@@ -610,9 +585,7 @@ public class ActivityStartController {
         }
     }
 
-    public void dumpDebug(ProtoOutputStream proto, long fieldId) {
-        for (PendingActivityLaunch activity: mPendingActivityLaunches) {
-            activity.r.writeIdentifierToProto(proto, fieldId);
-        }
+    BackgroundActivityStartController getBackgroundActivityLaunchController() {
+        return mBalController;
     }
 }

@@ -16,6 +16,8 @@
 
 package android.app.admin;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.annotation.UserIdInt;
 import android.content.ComponentName;
 import android.content.Intent;
@@ -76,16 +78,31 @@ public abstract class DevicePolicyManagerInternal {
             OnCrossProfileWidgetProvidersChangeListener listener);
 
     /**
-     * Checks if an app with given uid is an active device admin of its user and has the policy
-     * specified.
+     * @param userHandle the handle of the user whose profile owner is being fetched.
+     * @return the configured supervision app if it exists and is the device owner or policy owner.
+     */
+    public abstract @Nullable ComponentName getProfileOwnerOrDeviceOwnerSupervisionComponent(
+            @NonNull UserHandle userHandle);
+
+    /**
+     * Checks if an app with given uid is an active device owner of its user.
      *
      * <p>This takes the DPMS lock.  DO NOT call from PM/UM/AM with their lock held.
      *
      * @param uid App uid.
-     * @param reqPolicy Required policy, for policies see {@link DevicePolicyManager}.
-     * @return true if the uid is an active admin with the given policy.
+     * @return true if the uid is an active device owner.
      */
-    public abstract boolean isActiveAdminWithPolicy(int uid, int reqPolicy);
+    public abstract boolean isActiveDeviceOwner(int uid);
+
+    /**
+     * Checks if an app with given uid is an active profile owner of its user.
+     *
+     * <p>This takes the DPMS lock.  DO NOT call from PM/UM/AM with their lock held.
+     *
+     * @param uid App uid.
+     * @return true if the uid is an active profile owner.
+     */
+    public abstract boolean isActiveProfileOwner(int uid);
 
     /**
      * Checks if an app with given uid is the active supervision admin.
@@ -191,35 +208,65 @@ public abstract class DevicePolicyManagerInternal {
     public abstract List<String> getAllCrossProfilePackages();
 
     /**
-     * Returns the default package names set by the OEM that are allowed to request user consent for
-     * cross-profile communication without being explicitly enabled by the admin, via
-     * {@link com.android.internal.R.array#cross_profile_apps} and
-     * {@link com.android.internal.R.array#vendor_cross_profile_apps}.
+     * Returns the default package names set by the OEM that are allowed to communicate
+     * cross-profile without being explicitly enabled by the admin, via {@link
+     * com.android.internal.R.array#cross_profile_apps} and {@link
+     * com.android.internal.R.array#vendor_cross_profile_apps}.
      *
      * @hide
      */
     public abstract List<String> getDefaultCrossProfilePackages();
 
     /**
-     * Sends the {@code intent} to the packages with cross profile capabilities.
+     * Sends the {@code intent} to the package holding the
+     * {@link android.app.role.RoleManager#ROLE_DEVICE_MANAGER} role and packages with cross
+     * profile capabilities, meaning the application must have the {@code crossProfile}
+     * property and at least one of the following permissions:
      *
-     * <p>This means the application must have the {@code crossProfile} property and the
-     * corresponding permissions, defined by
-     * {@link
-     * android.content.pm.CrossProfileAppsInternal#verifyPackageHasInteractAcrossProfilePermission}.
+     * <ul>
+     *     <li>{@link android.Manifest.permission.INTERACT_ACROSS_PROFILES}
+     *     <li>{@link android.Manifest.permission.INTERACT_ACROSS_USERS}
+     *     <li>{@link android.Manifest.permission.INTERACT_ACROSS_USERS_FULL}
+     *     <li>{@link AppOpsManager.OP_INTERACT_ACROSS_PROFILES} appop
+     * </ul>
      *
-     * <p>Note: This method doesn't modify {@code intent} but copies it before use.
-     *
-     * @param intent Template for the intent sent to the package.
+     * <p>Note: The intent itself is not modified but copied before use.
+     *`
+     * @param intent Template for the intent sent to the packages.
      * @param parentHandle Handle of the user that will receive the intents.
      * @param requiresPermission If false, all packages with the {@code crossProfile} property
-     *                           will receive the intent.
+     *                           will receive the intent without requiring the additional
+     *                           permissions.
      */
-    public abstract void broadcastIntentToCrossProfileManifestReceiversAsUser(Intent intent,
+    public abstract void broadcastIntentToManifestReceivers(Intent intent,
             UserHandle parentHandle, boolean requiresPermission);
 
     /**
      * Returns the profile owner component for the given user, or {@code null} if there is not one.
      */
-    public abstract ComponentName getProfileOwnerAsUser(int userHandle);
+    @Nullable
+    public abstract ComponentName getProfileOwnerAsUser(@UserIdInt int userId);
+
+    /**
+     * Returns the user id of the device owner, or {@link UserHandle#USER_NULL} if there is not one.
+     */
+    @UserIdInt
+    public abstract int getDeviceOwnerUserId();
+
+    /**
+     * Returns whether the given package is a device owner or a profile owner in the calling user.
+     */
+    public abstract boolean isDeviceOrProfileOwnerInCallingUser(String packageName);
+
+    /**
+     * Returns whether this class supports being deferred the responsibility for resetting the given
+     * op.
+     */
+    public abstract boolean supportsResetOp(int op);
+
+    /**
+     * Resets the given op across the profile group of the given user for the given package. Assumes
+     * {@link #supportsResetOp(int)} is true.
+     */
+    public abstract void resetOp(int op, String packageName, @UserIdInt int userId);
 }

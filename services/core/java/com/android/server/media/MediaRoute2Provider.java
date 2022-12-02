@@ -47,7 +47,7 @@ abstract class MediaRoute2Provider {
         mUniqueId = componentName.flattenToShortString();
     }
 
-    public void setCallback(MediaRoute2ProviderServiceProxy.Callback callback) {
+    public void setCallback(Callback callback) {
         mCallback = callback;
     }
 
@@ -77,7 +77,7 @@ abstract class MediaRoute2Provider {
     @NonNull
     public List<RoutingSessionInfo> getSessionInfos() {
         synchronized (mLock) {
-            return mSessionInfos;
+            return new ArrayList<>(mSessionInfos);
         }
     }
 
@@ -86,7 +86,7 @@ abstract class MediaRoute2Provider {
             mProviderInfo = null;
         } else {
             mProviderInfo = new MediaRoute2ProviderInfo.Builder(providerInfo)
-                    .setUniqueId(mUniqueId)
+                    .setUniqueId(mComponentName.getPackageName(), mUniqueId)
                     .setSystemRouteProvider(mIsSystemRouteProvider)
                     .build();
         }

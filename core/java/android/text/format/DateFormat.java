@@ -19,7 +19,7 @@ package android.text.format;
 import android.annotation.NonNull;
 import android.app.compat.CompatChanges;
 import android.compat.annotation.ChangeId;
-import android.compat.annotation.EnabledAfter;
+import android.compat.annotation.EnabledSince;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
 import android.icu.text.DateFormatSymbols;
@@ -29,6 +29,7 @@ import android.provider.Settings;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.SpannedString;
+import android.text.TextUtils;
 
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
@@ -169,7 +170,7 @@ public class DateFormat {
      * mean using 12-hour in some locales and, in this case, is duplicated as the 'a' field.
      */
     @ChangeId
-    @EnabledAfter(targetSdkVersion = Build.VERSION_CODES.R)
+    @EnabledSince(targetSdkVersion = Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     static final long DISALLOW_DUPLICATE_FIELD_IN_SKELETON = 170233598L;
 
     /**
@@ -267,7 +268,8 @@ public class DateFormat {
         DateTimePatternGenerator dtpg = DateTimePatternGenerator.getInstance(locale);
         boolean allowDuplicateFields = !CompatChanges.isChangeEnabled(
                 DISALLOW_DUPLICATE_FIELD_IN_SKELETON);
-        return dtpg.getBestPattern(skeleton, allowDuplicateFields);
+        return dtpg.getBestPattern(skeleton, DateTimePatternGenerator.MATCH_NO_OPTIONS,
+                allowDuplicateFields);
     }
 
     /**
@@ -459,7 +461,7 @@ public class DateFormat {
      *
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static boolean hasDesignator(CharSequence inFormat, char designator) {
         if (inFormat == null) return false;
 

@@ -98,7 +98,6 @@ public class WorkSource implements Parcelable {
      * @param uid the uid performing the work
      * @hide
      */
-    @TestApi
     @SystemApi
     public WorkSource(int uid) {
         mNum = 1;
@@ -131,7 +130,7 @@ public class WorkSource implements Parcelable {
         int numChains = in.readInt();
         if (numChains > 0) {
             mChains = new ArrayList<>(numChains);
-            in.readParcelableList(mChains, WorkChain.class.getClassLoader());
+            in.readParcelableList(mChains, WorkChain.class.getClassLoader(), android.os.WorkSource.WorkChain.class);
         } else {
             mChains = null;
         }
@@ -152,7 +151,6 @@ public class WorkSource implements Parcelable {
      * Returns the number of uids in this work source.
      * @hide
      */
-    @TestApi
     @SystemApi
     public int size() {
         return mNum;
@@ -173,7 +171,6 @@ public class WorkSource implements Parcelable {
      * If {@code index} < 0 or {@code index} >= {@link #size() N}, then the behavior is undefined.
      * @hide
      */
-    @TestApi
     @SystemApi
     public int getUid(int index) {
         return mUids[index];
@@ -209,7 +206,6 @@ public class WorkSource implements Parcelable {
      * If {@code index} < 0 or {@code index} >= {@link #size() N}, then the behavior is undefined.
      * @hide
      */
-    @TestApi
     @SystemApi
     @Nullable
     public String getPackageName(int index) {
@@ -439,6 +435,7 @@ public class WorkSource implements Parcelable {
                 for (WorkChain wc : other.mChains) {
                     if (!mChains.contains(wc)) {
                         mChains.add(new WorkChain(wc));
+                        chainAdded = true;
                     }
                 }
             }
@@ -455,7 +452,6 @@ public class WorkSource implements Parcelable {
      * @hide
      */
     @SystemApi
-    @TestApi
     @NonNull
     public WorkSource withoutNames() {
         final WorkSource copy = new WorkSource(this);
@@ -582,7 +578,6 @@ public class WorkSource implements Parcelable {
      * @hide for internal use only.
      */
     @SystemApi
-    @TestApi
     public boolean isEmpty() {
         return mNum == 0 && (mChains == null || mChains.isEmpty());
     }

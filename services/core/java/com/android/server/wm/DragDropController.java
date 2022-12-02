@@ -22,6 +22,7 @@ import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
 
 import android.annotation.NonNull;
 import android.content.ClipData;
+import android.content.Context;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
@@ -31,10 +32,9 @@ import android.util.Slog;
 import android.view.Display;
 import android.view.IWindow;
 import android.view.SurfaceControl;
-import android.view.SurfaceSession;
 import android.view.View;
+import android.view.accessibility.AccessibilityManager;
 
-import com.android.internal.util.Preconditions;
 import com.android.server.wm.WindowManagerInternal.IDragDropCallback;
 
 import java.util.Objects;
@@ -45,12 +45,14 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 class DragDropController {
     private static final float DRAG_SHADOW_ALPHA_TRANSPARENT = .7071f;
-    private static final long DRAG_TIMEOUT_MS = 5000;
+    static final long DRAG_TIMEOUT_MS = 5000;
+    private static final int A11Y_DRAG_TIMEOUT_DEFAULT_MS = 60000;
 
     // Messages for Handler.
     static final int MSG_DRAG_END_TIMEOUT = 0;
     static final int MSG_TEAR_DOWN_DRAG_AND_DROP_INPUT = 1;
     static final int MSG_ANIMATION_END = 2;
+    static final int MSG_REMOVE_DRAG_SURFACE_TIMEOUT = 3;
 
     /**
      * Drag state per operation.
@@ -70,8 +72,17 @@ class DragDropController {
     @NonNull private AtomicReference<IDragDropCallback> mCallback = new AtomicReference<>(
             new IDragDropCallback() {});
 
+    DragDropController(WindowManagerService service, Looper looper) {
+        mService = service;
+        mHandler = new DragHandler(service, looper);
+    }
+
     boolean dragDropActiveLocked() {
         return mDragState != null && !mDragState.isClosing();
+    }
+
+    boolean dragSurfaceRelinquishedToDropTarget() {
+        return mDragState != null && mDragState.mRelinquishDragSurfaceToDropTarget;
     }
 
     void registerCallback(IDragDropCallback callback) {
@@ -79,17 +90,12 @@ class DragDropController {
         mCallback.set(callback);
     }
 
-    DragDropController(WindowManagerService service, Looper looper) {
-        mService = service;
-        mHandler = new DragHandler(service, looper);
-    }
-
     void sendDragStartedIfNeededLocked(WindowState window) {
         mDragState.sendDragStartedIfNeededLocked(window);
     }
 
-    IBinder performDrag(SurfaceSession session, int callerPid, int callerUid, IWindow window,
-            int flags, SurfaceControl surface, int touchSource, float touchX, float touchY,
+    IBinder performDrag(int callerPid, int callerUid, IWindow window, int flags,
+            SurfaceControl surface, int touchSource, float touchX, float touchY,
             float thumbCenterX, float thumbCenterY, ClipData data) {
         if (DEBUG_DRAG) {
             Slog.d(TAG_WM, "perform drag: win=" + window + " surface=" + surface + " flags=" +
@@ -114,7 +120,7 @@ class DragDropController {
 
                     final WindowState callingWin = mService.windowForClientLocked(
                             null, window, false);
-                    if (callingWin == null || callingWin.cantReceiveTouchInput()) {
+                    if (callingWin == null || !callingWin.canReceiveTouchInput()) {
                         Slog.w(TAG_WM, "Bad requesting window " + window);
                         return null;  // !!! TODO: throw here?
                     }
@@ -148,39 +154,47 @@ class DragDropController {
                     mDragState.mOriginalAlpha = alpha;
                     mDragState.mToken = dragToken;
                     mDragState.mDisplayContent = displayContent;
-
-                    final Display display = displayContent.getDisplay();
-                    if (!mCallback.get().registerInputChannel(
-                            mDragState, display, mService.mInputManager,
-                            callingWin.mInputChannel)) {
-                        Slog.e(TAG_WM, "Unable to transfer touch focus");
-                        return null;
-                    }
-
                     mDragState.mData = data;
-                    mDragState.broadcastDragStartedLocked(touchX, touchY);
-                    mDragState.overridePointerIconLocked(touchSource);
-                    // remember the thumb offsets for later
-                    mDragState.mThumbOffsetX = thumbCenterX;
-                    mDragState.mThumbOffsetY = thumbCenterY;
 
-                    // Make the surface visible at the proper location
-                    final SurfaceControl surfaceControl = mDragState.mSurfaceControl;
-                    if (SHOW_LIGHT_TRANSACTIONS) Slog.i(TAG_WM, ">>> OPEN TRANSACTION performDrag");
+                    if ((flags & View.DRAG_FLAG_ACCESSIBILITY_ACTION) == 0) {
+                        final Display display = displayContent.getDisplay();
+                        if (!mCallback.get().registerInputChannel(
+                                mDragState, display, mService.mInputManager,
+                                callingWin.mInputChannel)) {
+                            Slog.e(TAG_WM, "Unable to transfer touch focus");
+                            return null;
+                        }
 
-                    final SurfaceControl.Transaction transaction = mDragState.mTransaction;
-                    transaction.setAlpha(surfaceControl, mDragState.mOriginalAlpha);
-                    transaction.setPosition(
-                            surfaceControl, touchX - thumbCenterX, touchY - thumbCenterY);
-                    transaction.show(surfaceControl);
-                    displayContent.reparentToOverlay(transaction, surfaceControl);
-                    callingWin.scheduleAnimation();
+                        final SurfaceControl surfaceControl = mDragState.mSurfaceControl;
+                        mDragState.broadcastDragStartedLocked(touchX, touchY);
+                        mDragState.overridePointerIconLocked(touchSource);
+                        // remember the thumb offsets for later
+                        mDragState.mThumbOffsetX = thumbCenterX;
+                        mDragState.mThumbOffsetY = thumbCenterY;
 
-                    if (SHOW_LIGHT_TRANSACTIONS) {
-                        Slog.i(TAG_WM, "<<< CLOSE TRANSACTION performDrag");
+                        // Make the surface visible at the proper location
+                        if (SHOW_LIGHT_TRANSACTIONS) {
+                            Slog.i(TAG_WM, ">>> OPEN TRANSACTION performDrag");
+                        }
+
+                        final SurfaceControl.Transaction transaction = mDragState.mTransaction;
+                        transaction.setAlpha(surfaceControl, mDragState.mOriginalAlpha);
+                        transaction.show(surfaceControl);
+                        displayContent.reparentToOverlay(transaction, surfaceControl);
+                        mDragState.updateDragSurfaceLocked(true, touchX, touchY);
+                        if (SHOW_LIGHT_TRANSACTIONS) {
+                            Slog.i(TAG_WM, "<<< CLOSE TRANSACTION performDrag");
+                        }
+                    } else {
+                        // Skip surface logic for a drag triggered by an AccessibilityAction
+                        mDragState.broadcastDragStartedLocked(touchX, touchY);
+
+                        // Timeout for the user to drop the content
+                        sendTimeoutMessage(MSG_DRAG_END_TIMEOUT, callingWin.mClient.asBinder(),
+                                getAccessibilityManager().getRecommendedTimeoutMillis(
+                                        A11Y_DRAG_TIMEOUT_DEFAULT_MS,
+                                        AccessibilityManager.FLAG_CONTENT_CONTROLS));
                     }
-
-                    mDragState.notifyLocationLocked(touchX, touchY);
                 } finally {
                     if (surface != null) {
                         surface.release();
@@ -229,6 +243,8 @@ class DragDropController {
                 }
 
                 mDragState.mDragResult = consumed;
+                mDragState.mRelinquishDragSurfaceToDropTarget = consumed
+                        && mDragState.targetInterceptsGlobalDrag(callingWin);
                 mDragState.endDragLocked();
             }
         } finally {
@@ -280,11 +296,7 @@ class DragDropController {
                 return;
             }
 
-            if (keepHandling) {
-                mDragState.notifyMoveLocked(newX, newY);
-            } else {
-                mDragState.notifyDropLocked(newX, newY);
-            }
+            mDragState.updateDragSurfaceLocked(keepHandling, newX, newY);
         }
     }
 
@@ -292,12 +304,14 @@ class DragDropController {
         if (DEBUG_DRAG) {
             Slog.d(TAG_WM, "Drag into new candidate view @ " + window.asBinder());
         }
+        mCallback.get().dragRecipientEntered(window);
     }
 
     void dragRecipientExited(IWindow window) {
         if (DEBUG_DRAG) {
             Slog.d(TAG_WM, "Drag from old candidate view @ " + window.asBinder());
         }
+        mCallback.get().dragRecipientExited(window);
     }
 
     /**
@@ -310,10 +324,10 @@ class DragDropController {
     /**
      * Sends a timeout message to the Handler managed by DragDropController.
      */
-    void sendTimeoutMessage(int what, Object arg) {
+    void sendTimeoutMessage(int what, Object arg, long timeoutMs) {
         mHandler.removeMessages(what, arg);
         final Message msg = mHandler.obtainMessage(what, arg);
-        mHandler.sendMessageDelayed(msg, DRAG_TIMEOUT_MS);
+        mHandler.sendMessageDelayed(msg, timeoutMs);
     }
 
     /**
@@ -325,6 +339,41 @@ class DragDropController {
             return;
         }
         mDragState = null;
+    }
+
+    void reportDropWindow(IBinder token, float x, float y) {
+        if (mDragState == null) {
+            Slog.w(TAG_WM, "Drag state is closed.");
+            return;
+        }
+
+        synchronized (mService.mGlobalLock) {
+            mDragState.reportDropWindowLock(token, x, y);
+        }
+    }
+
+    boolean dropForAccessibility(IWindow window, float x, float y) {
+        synchronized (mService.mGlobalLock) {
+            final boolean isA11yEnabled = getAccessibilityManager().isEnabled();
+            if (!dragDropActiveLocked()) {
+                return false;
+            }
+            if (mDragState.isAccessibilityDragDrop() && isA11yEnabled) {
+                final WindowState winState = mService.windowForClientLocked(
+                        null, window, false);
+                if (!mDragState.isWindowNotified(winState)) {
+                    return false;
+                }
+                IBinder token = winState.mInputChannelToken;
+                return mDragState.reportDropWindowLock(token, x, y);
+            }
+            return false;
+        }
+    }
+
+    AccessibilityManager getAccessibilityManager() {
+        return (AccessibilityManager) mService.mContext.getSystemService(
+                Context.ACCESSIBILITY_SERVICE);
     }
 
     private class DragHandler extends Handler {
@@ -373,10 +422,18 @@ class DragDropController {
                     synchronized (mService.mGlobalLock) {
                         if (mDragState == null) {
                             Slog.wtf(TAG_WM, "mDragState unexpectedly became null while " +
-                                    "plyaing animation");
+                                    "playing animation");
                             return;
                         }
                         mDragState.closeLocked();
+                    }
+                    break;
+                }
+
+                case MSG_REMOVE_DRAG_SURFACE_TIMEOUT: {
+                    synchronized (mService.mGlobalLock) {
+                        mService.mTransactionFactory.get()
+                                .reparent((SurfaceControl) msg.obj, null).apply();
                     }
                     break;
                 }

@@ -61,7 +61,7 @@ interface IContentService {
      */
     void sync(in SyncRequest request, String callingPackage);
     void syncAsUser(in SyncRequest request, int userId, String callingPackage);
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     void cancelSync(in Account account, String authority, in ComponentName cname);
     void cancelSyncAsUser(in Account account, String authority, in ComponentName cname, int userId);
 
@@ -150,6 +150,7 @@ interface IContentService {
     SyncAdapterType[] getSyncAdapterTypesAsUser(int userId);
 
     String[] getSyncAdapterPackagesForAuthorityAsUser(String authority, int userId);
+    String getSyncAdapterPackageAsUser(String accountType, String authority, int userId);
 
     /**
      * Returns true if there is currently a operation for the given account/authority or service
@@ -159,7 +160,7 @@ interface IContentService {
      * @param cname component to identify sync service, must be null if account/providerName are
      * non-null.
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     boolean isSyncActive(in Account account, String authority, in ComponentName cname);
 
     /**

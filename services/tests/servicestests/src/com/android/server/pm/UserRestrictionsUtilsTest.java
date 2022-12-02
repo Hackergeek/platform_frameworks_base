@@ -22,9 +22,11 @@ import static com.android.server.devicepolicy.DpmTestUtils.newRestrictions;
 import android.os.Bundle;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.platform.test.annotations.Presubmit;
 import android.test.AndroidTestCase;
-import android.test.suitebuilder.annotation.SmallTest;
 import android.util.SparseArray;
+
+import androidx.test.filters.SmallTest;
 
 /**
  * Tests for {@link com.android.server.pm.UserRestrictionsUtils}.
@@ -37,6 +39,7 @@ import android.util.SparseArray;
      -w com.android.frameworks.servicestests/androidx.test.runner.AndroidJUnitRunner
  * </pre>
  */
+@Presubmit
 @SmallTest
 public class UserRestrictionsUtilsTest extends AndroidTestCase {
     public void testNonNull() {
@@ -46,23 +49,6 @@ public class UserRestrictionsUtilsTest extends AndroidTestCase {
 
         Bundle in = new Bundle();
         assertSame(in, UserRestrictionsUtils.nonNull(in));
-    }
-
-    public void testIsEmpty() {
-        assertTrue(UserRestrictionsUtils.isEmpty(null));
-        assertTrue(UserRestrictionsUtils.isEmpty(new Bundle()));
-        assertFalse(UserRestrictionsUtils.isEmpty(newRestrictions("a")));
-    }
-
-    public void testClone() {
-        Bundle in = new Bundle();
-        Bundle out = UserRestrictionsUtils.clone(in);
-        assertNotSame(in, out);
-        assertRestrictions(out, new Bundle());
-
-        out = UserRestrictionsUtils.clone(null);
-        assertNotNull(out);
-        out.putBoolean("a", true); // Should not be Bundle.EMPTY.
     }
 
     public void testMerge() {

@@ -336,6 +336,90 @@ TEST_F(ResourceParserTest, ParseAttr) {
   EXPECT_THAT(attr->type_mask, Eq(ResTable_map::TYPE_ANY));
 }
 
+TEST_F(ResourceParserTest, ParseMacro) {
+  std::string input = R"(<macro name="foo">12345</macro>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Macro* macro = test::GetValue<Macro>(&table_, "macro/foo");
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->raw_value, Eq("12345"));
+  EXPECT_THAT(macro->style_string.str, Eq("12345"));
+  EXPECT_THAT(macro->style_string.spans, IsEmpty());
+  EXPECT_THAT(macro->untranslatable_sections, IsEmpty());
+  EXPECT_THAT(macro->alias_namespaces, IsEmpty());
+}
+
+TEST_F(ResourceParserTest, ParseMacroUntranslatableSection) {
+  std::string input = R"(<macro name="foo" xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+This being <b><xliff:g>human</xliff:g></b> is a guest house.</macro>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Macro* macro = test::GetValue<Macro>(&table_, "macro/foo");
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->raw_value, Eq("\nThis being human is a guest house."));
+  EXPECT_THAT(macro->style_string.str, Eq(" This being human is a guest house."));
+  EXPECT_THAT(macro->style_string.spans.size(), Eq(1));
+  EXPECT_THAT(macro->style_string.spans[0].name, Eq("b"));
+  EXPECT_THAT(macro->style_string.spans[0].first_char, Eq(12));
+  EXPECT_THAT(macro->style_string.spans[0].last_char, Eq(16));
+  ASSERT_THAT(macro->untranslatable_sections.size(), Eq(1));
+  EXPECT_THAT(macro->untranslatable_sections[0].start, Eq(12));
+  EXPECT_THAT(macro->untranslatable_sections[0].end, Eq(17));
+  EXPECT_THAT(macro->alias_namespaces, IsEmpty());
+}
+
+TEST_F(ResourceParserTest, ParseMacroNamespaces) {
+  std::string input = R"(<macro name="foo" xmlns:app="http://schemas.android.com/apk/res/android">
+@app:string/foo</macro>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Macro* macro = test::GetValue<Macro>(&table_, "macro/foo");
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->raw_value, Eq("\n@app:string/foo"));
+  EXPECT_THAT(macro->style_string.str, Eq("@app:string/foo"));
+  EXPECT_THAT(macro->style_string.spans, IsEmpty());
+  EXPECT_THAT(macro->untranslatable_sections, IsEmpty());
+  EXPECT_THAT(macro->alias_namespaces.size(), Eq(1));
+  EXPECT_THAT(macro->alias_namespaces[0].alias, Eq("app"));
+  EXPECT_THAT(macro->alias_namespaces[0].package_name, Eq("android"));
+  EXPECT_THAT(macro->alias_namespaces[0].is_private, Eq(false));
+}
+
+TEST_F(ResourceParserTest, ParseMacroReference) {
+  std::string input = R"(<string name="res_string">@macro/foo</string>)";
+  ASSERT_TRUE(TestParse(input));
+
+  Reference* macro = test::GetValue<Reference>(&table_, "string/res_string");
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->type_flags, Eq(ResTable_map::TYPE_STRING));
+  EXPECT_THAT(macro->allow_raw, Eq(false));
+
+  input = R"(<style name="foo">
+               <item name="bar">@macro/foo</item>
+             </style>)";
+
+  ASSERT_TRUE(TestParse(input));
+  Style* style = test::GetValue<Style>(&table_, "style/foo");
+  ASSERT_THAT(style, NotNull());
+  EXPECT_THAT(style->entries.size(), Eq(1));
+
+  macro = ValueCast<Reference>(style->entries[0].value.get());
+  ASSERT_THAT(macro, NotNull());
+  EXPECT_THAT(macro->type_flags, Eq(0U));
+  EXPECT_THAT(macro->allow_raw, Eq(true));
+}
+
+TEST_F(ResourceParserTest, ParseMacroNoNameFail) {
+  std::string input = R"(<macro>12345</macro>)";
+  ASSERT_FALSE(TestParse(input));
+}
+
+TEST_F(ResourceParserTest, ParseMacroNonDefaultConfigurationFail) {
+  const ConfigDescription watch_config = test::ParseConfigOrDie("watch");
+  std::string input = R"(<macro name="foo">12345</macro>)";
+  ASSERT_FALSE(TestParse(input, watch_config));
+}
+
 // Old AAPT allowed attributes to be defined under different configurations, but ultimately
 // stored them with the default configuration. Check that we have the same behavior.
 TEST_F(ResourceParserTest, ParseAttrAndDeclareStyleableUnderConfigButRecordAsNoConfig) {
@@ -483,12 +567,12 @@ TEST_F(ResourceParserTest, ParseStyle) {
   Style* style = test::GetValue<Style>(&table_, "style/foo");
   ASSERT_THAT(style, NotNull());
   ASSERT_TRUE(style->parent);
-  EXPECT_THAT(style->parent.value().name, Eq(make_value(test::ParseNameOrDie("style/fu"))));
+  EXPECT_THAT(style->parent.value().name, Eq(test::ParseNameOrDie("style/fu")));
   ASSERT_THAT(style->entries, SizeIs(3));
 
-  EXPECT_THAT(style->entries[0].key.name, Eq(make_value(test::ParseNameOrDie("attr/bar"))));
-  EXPECT_THAT(style->entries[1].key.name, Eq(make_value(test::ParseNameOrDie("attr/bat"))));
-  EXPECT_THAT(style->entries[2].key.name, Eq(make_value(test::ParseNameOrDie("attr/baz"))));
+  EXPECT_THAT(style->entries[0].key.name, Eq(test::ParseNameOrDie("attr/bar")));
+  EXPECT_THAT(style->entries[1].key.name, Eq(test::ParseNameOrDie("attr/bat")));
+  EXPECT_THAT(style->entries[2].key.name, Eq(test::ParseNameOrDie("attr/baz")));
 }
 
 TEST_F(ResourceParserTest, ParseStyleWithShorthandParent) {
@@ -497,7 +581,7 @@ TEST_F(ResourceParserTest, ParseStyleWithShorthandParent) {
   Style* style = test::GetValue<Style>(&table_, "style/foo");
   ASSERT_THAT(style, NotNull());
   ASSERT_TRUE(style->parent);
-  EXPECT_THAT(style->parent.value().name, Eq(make_value(test::ParseNameOrDie("com.app:style/Theme"))));
+  EXPECT_THAT(style->parent.value().name, Eq(test::ParseNameOrDie("com.app:style/Theme")));
 }
 
 TEST_F(ResourceParserTest, ParseStyleWithPackageAliasedParent) {
@@ -510,7 +594,7 @@ TEST_F(ResourceParserTest, ParseStyleWithPackageAliasedParent) {
   ASSERT_THAT(style, NotNull());
   ASSERT_TRUE(style->parent);
   ASSERT_TRUE(style->parent.value().name);
-  EXPECT_THAT(style->parent.value().name, Eq(make_value(test::ParseNameOrDie("android:style/Theme"))));
+  EXPECT_THAT(style->parent.value().name, Eq(test::ParseNameOrDie("android:style/Theme")));
 }
 
 TEST_F(ResourceParserTest, ParseStyleWithPackageAliasedItems) {
@@ -523,7 +607,7 @@ TEST_F(ResourceParserTest, ParseStyleWithPackageAliasedItems) {
   Style* style = test::GetValue<Style>(&table_, "style/foo");
   ASSERT_THAT(style, NotNull());
   ASSERT_THAT(style->entries, SizeIs(1));
-  EXPECT_THAT(style->entries[0].key.name, Eq(make_value(test::ParseNameOrDie("android:attr/bar"))));
+  EXPECT_THAT(style->entries[0].key.name, Eq(test::ParseNameOrDie("android:attr/bar")));
 }
 
 TEST_F(ResourceParserTest, ParseStyleWithRawStringItem) {
@@ -550,7 +634,7 @@ TEST_F(ResourceParserTest, ParseStyleWithInferredParent) {
   Style* style = test::GetValue<Style>(&table_, "style/foo.bar");
   ASSERT_THAT(style, NotNull());
   ASSERT_TRUE(style->parent);
-  EXPECT_THAT(style->parent.value().name, Eq(make_value(test::ParseNameOrDie("style/foo"))));
+  EXPECT_THAT(style->parent.value().name, Eq(test::ParseNameOrDie("style/foo")));
   EXPECT_TRUE(style->parent_inferred);
 }
 
@@ -588,7 +672,7 @@ TEST_F(ResourceParserTest, ParseAttributesDeclareStyleable) {
       </declare-styleable>)";
   ASSERT_TRUE(TestParse(input));
 
-  Maybe<ResourceTable::SearchResult> result =
+  std::optional<ResourceTable::SearchResult> result =
       table_.FindResource(test::ParseNameOrDie("styleable/foo"));
   ASSERT_TRUE(result);
   EXPECT_THAT(result.value().entry->visibility.level, Eq(Visibility::Level::kPublic));
@@ -611,9 +695,9 @@ TEST_F(ResourceParserTest, ParseAttributesDeclareStyleable) {
   ASSERT_THAT(styleable, NotNull());
   ASSERT_THAT(styleable->entries, SizeIs(3));
 
-  EXPECT_THAT(styleable->entries[0].name, Eq(make_value(test::ParseNameOrDie("attr/bar"))));
-  EXPECT_THAT(styleable->entries[1].name, Eq(make_value(test::ParseNameOrDie("attr/bat"))));
-  EXPECT_THAT(styleable->entries[2].name, Eq(make_value(test::ParseNameOrDie("attr/baz"))));
+  EXPECT_THAT(styleable->entries[0].name, Eq(test::ParseNameOrDie("attr/bar")));
+  EXPECT_THAT(styleable->entries[1].name, Eq(test::ParseNameOrDie("attr/bat")));
+  EXPECT_THAT(styleable->entries[2].name, Eq(test::ParseNameOrDie("attr/baz")));
 }
 
 TEST_F(ResourceParserTest, ParseDeclareStyleablePreservingVisibility) {
@@ -829,27 +913,42 @@ TEST_F(ResourceParserTest, AutoIncrementIdsInPublicGroup) {
       </public-group>)";
   ASSERT_TRUE(TestParse(input));
 
-  Maybe<ResourceTable::SearchResult> result = table_.FindResource(test::ParseNameOrDie("attr/foo"));
+  std::optional<ResourceTable::SearchResult> result =
+      table_.FindResource(test::ParseNameOrDie("attr/foo"));
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().entry->id);
+  EXPECT_THAT(result.value().entry->id.value(), Eq(ResourceId(0x01010040)));
+
+  result = table_.FindResource(test::ParseNameOrDie("attr/bar"));
+  ASSERT_TRUE(result);
+  ASSERT_TRUE(result.value().entry->id);
+  EXPECT_THAT(result.value().entry->id.value(), Eq(ResourceId(0x01010041)));
+}
+
+TEST_F(ResourceParserTest, StagingPublicGroup) {
+  std::string input = R"(
+      <staging-public-group type="attr" first-id="0x01ff0049">
+        <public name="foo" />
+        <public name="bar" />
+      </staging-public-group>)";
+  ASSERT_TRUE(TestParse(input));
+
+  std::optional<ResourceTable::SearchResult> result =
+      table_.FindResource(test::ParseNameOrDie("attr/foo"));
   ASSERT_TRUE(result);
 
-  ASSERT_TRUE(result.value().package->id);
-  ASSERT_TRUE(result.value().type->id);
   ASSERT_TRUE(result.value().entry->id);
-  ResourceId actual_id(result.value().package->id.value(),
-                       result.value().type->id.value(),
-                       result.value().entry->id.value());
-  EXPECT_THAT(actual_id, Eq(ResourceId(0x01010040)));
+  EXPECT_THAT(result.value().entry->id.value(), Eq(ResourceId(0x01ff0049)));
+  EXPECT_THAT(result.value().entry->visibility.level, Eq(Visibility::Level::kPublic));
+  EXPECT_TRUE(result.value().entry->visibility.staged_api);
 
   result = table_.FindResource(test::ParseNameOrDie("attr/bar"));
   ASSERT_TRUE(result);
 
-  ASSERT_TRUE(result.value().package->id);
-  ASSERT_TRUE(result.value().type->id);
   ASSERT_TRUE(result.value().entry->id);
-  actual_id = ResourceId(result.value().package->id.value(),
-                         result.value().type->id.value(),
-                         result.value().entry->id.value());
-  EXPECT_THAT(actual_id, Eq(ResourceId(0x01010041)));
+  EXPECT_THAT(result.value().entry->id.value(), Eq(ResourceId(0x01ff004a)));
+  EXPECT_THAT(result.value().entry->visibility.level, Eq(Visibility::Level::kPublic));
+  EXPECT_TRUE(result.value().entry->visibility.staged_api);
 }
 
 TEST_F(ResourceParserTest, StrongestSymbolVisibilityWins) {
@@ -862,7 +961,7 @@ TEST_F(ResourceParserTest, StrongestSymbolVisibilityWins) {
       <java-symbol type="string" name="foo" />)";
   ASSERT_TRUE(TestParse(input));
 
-  Maybe<ResourceTable::SearchResult> result =
+  std::optional<ResourceTable::SearchResult> result =
       table_.FindResource(test::ParseNameOrDie("string/foo"));
   ASSERT_TRUE(result);
 
@@ -880,7 +979,7 @@ TEST_F(ResourceParserTest, ExternalTypesShouldOnlyBeReferences) {
 TEST_F(ResourceParserTest, AddResourcesElementShouldAddEntryWithUndefinedSymbol) {
   ASSERT_TRUE(TestParse(R"(<add-resource name="bar" type="string" />)"));
 
-  Maybe<ResourceTable::SearchResult> result =
+  std::optional<ResourceTable::SearchResult> result =
       table_.FindResource(test::ParseNameOrDie("string/bar"));
   ASSERT_TRUE(result);
   const ResourceEntry* entry = result.value().entry;

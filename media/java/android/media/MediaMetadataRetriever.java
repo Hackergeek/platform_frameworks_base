@@ -16,10 +16,13 @@
 
 package android.media;
 
+import static android.annotation.SystemApi.Client.MODULE_LIBRARIES;
+
 import android.annotation.IntDef;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.SystemApi;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -27,8 +30,13 @@ import android.content.res.AssetFileDescriptor;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
+import android.os.FileUtils;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
+import android.os.SystemProperties;
 import android.text.TextUtils;
+import android.util.Log;
 
 import java.io.FileDescriptor;
 import java.io.FileInputStream;
@@ -45,6 +53,7 @@ import java.util.Map;
  * frame and meta data from an input media file.
  */
 public class MediaMetadataRetriever implements AutoCloseable {
+    private static final String TAG = "MediaMetadataRetriever";
 
     // borrowed from ExoPlayer
     private static final String[] STANDARD_GENRES = new String[] {
@@ -293,7 +302,21 @@ public class MediaMetadataRetriever implements AutoCloseable {
      * non-negative.
      * @throws IllegalArgumentException if the arguments are invalid
      */
-    public native void setDataSource(FileDescriptor fd, long offset, long length)
+    public void setDataSource(FileDescriptor fd, long offset, long length)
+            throws IllegalArgumentException  {
+
+        try (ParcelFileDescriptor modernFd = FileUtils.convertToModernFd(fd)) {
+            if (modernFd == null) {
+                _setDataSource(fd, offset, length);
+            } else {
+                _setDataSource(modernFd.getFileDescriptor(), offset, length);
+            }
+        } catch (IOException e) {
+            Log.w(TAG, "Ignoring IO error while setting data source", e);
+        }
+    }
+
+    private native void _setDataSource(FileDescriptor fd, long offset, long length)
             throws IllegalArgumentException;
 
     /**
@@ -337,7 +360,12 @@ public class MediaMetadataRetriever implements AutoCloseable {
         try {
             ContentResolver resolver = context.getContentResolver();
             try {
-                fd = resolver.openAssetFileDescriptor(uri, "r");
+                boolean optimize =
+                        SystemProperties.getBoolean("fuse.sys.transcode_retriever_optimize", false);
+                Bundle opts = new Bundle();
+                opts.putBoolean("android.provider.extra.ACCEPT_ORIGINAL_MEDIA_FORMAT", true);
+                fd = optimize ? resolver.openTypedAssetFileDescriptor(uri, "*/*", opts)
+                        : resolver.openAssetFileDescriptor(uri, "r");
             } catch(FileNotFoundException e) {
                 throw new IllegalArgumentException("could not access " + uri);
             }
@@ -900,7 +928,7 @@ public class MediaMetadataRetriever implements AutoCloseable {
     private @NonNull List<Bitmap> getFramesAtIndexInternal(
             int frameIndex, int numFrames, @Nullable BitmapParams params) {
         if (!"yes".equals(extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO))) {
-            throw new IllegalStateException("Does not contail video or image sequences");
+            throw new IllegalStateException("Does not contain video or image sequences");
         }
         int frameCount = Integer.parseInt(
                 extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT));
@@ -1018,7 +1046,7 @@ public class MediaMetadataRetriever implements AutoCloseable {
 
     private Bitmap getImageAtIndexInternal(int imageIndex, @Nullable BitmapParams params) {
         if (!"yes".equals(extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_IMAGE))) {
-            throw new IllegalStateException("Does not contail still images");
+            throw new IllegalStateException("Does not contain still images");
         }
 
         String imageCount = extractMetadata(MediaMetadataRetriever.METADATA_KEY_IMAGE_COUNT);
@@ -1045,16 +1073,28 @@ public class MediaMetadataRetriever implements AutoCloseable {
     @UnsupportedAppUsage
     private native byte[] getEmbeddedPicture(int pictureType);
 
+    /**
+     * Releases any acquired resources. Call it when done with the object.
+     *
+     * @throws IOException When an {@link IOException} is thrown while closing a {@link
+     * MediaDataSource} passed to {@link #setDataSource(MediaDataSource)}. This throws clause exists
+     * since API {@link android.os.Build.VERSION_CODES#TIRAMISU}, but this method can throw in
+     * earlier API versions where the exception is not declared.
+     */
     @Override
-    public void close() {
+    public void close() throws IOException {
         release();
     }
 
     /**
-     * Call it when one is done with the object. This method releases the memory
-     * allocated internally.
+     * Releases any acquired resources. Call it when done with the object.
+     *
+     * @throws IOException When an {@link IOException} is thrown while closing a {@link
+     * MediaDataSource} passed to {@link #setDataSource(MediaDataSource)}. This throws clause exists
+     * since API {@link android.os.Build.VERSION_CODES#TIRAMISU}, but this method can throw in
+     * earlier API versions where the exception is not declared.
      */
-    public native void release();
+    public native void release() throws IOException;
     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private native void native_setup();
     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
@@ -1293,14 +1333,14 @@ public class MediaMetadataRetriever implements AutoCloseable {
     public static final int METADATA_KEY_VIDEO_FRAME_COUNT = 32;
 
     /**
-     * If the media contains EXIF data, this key retrieves the offset value
+     * If the media contains EXIF data, this key retrieves the offset (in bytes)
      * of the data.
      */
     public static final int METADATA_KEY_EXIF_OFFSET = 33;
 
     /**
-     * If the media contains EXIF data, this key retrieves the length of the
-     * data.
+     * If the media contains EXIF data, this key retrieves the length (in bytes)
+     * of the data.
      */
     public static final int METADATA_KEY_EXIF_LENGTH = 34;
 
@@ -1331,17 +1371,37 @@ public class MediaMetadataRetriever implements AutoCloseable {
      * @see MediaFormat#COLOR_RANGE_FULL
      */
     public static final int METADATA_KEY_COLOR_RANGE    = 37;
-    // Add more here...
 
     /**
-     * This key retrieves the sample rate, if available.
-     * @hide
+     * This key retrieves the sample rate in Hz, if available.
+     * This is a signed 32-bit integer formatted as a string in base 10.
      */
     public static final int METADATA_KEY_SAMPLERATE      = 38;
 
     /**
-     * This key retrieves the bits per sample, if available.
-     * @hide
+     * This key retrieves the bits per sample in numbers of bits, if available.
+     * This is a signed 32-bit integer formatted as a string in base 10.
      */
     public static final int METADATA_KEY_BITS_PER_SAMPLE = 39;
+
+    /**
+     * This key retrieves the video codec mimetype if available.
+     * @hide
+     */
+    @SystemApi(client = MODULE_LIBRARIES)
+    public static final int METADATA_KEY_VIDEO_CODEC_MIME_TYPE = 40;
+
+    /**
+     * If the media contains XMP data, this key retrieves the offset (in bytes)
+     * of the data.
+     */
+    public static final int METADATA_KEY_XMP_OFFSET = 41;
+
+    /**
+     * If the media contains XMP data, this key retrieves the length (in bytes)
+     * of the data.
+     */
+    public static final int METADATA_KEY_XMP_LENGTH = 42;
+
+    // Add more here...
 }

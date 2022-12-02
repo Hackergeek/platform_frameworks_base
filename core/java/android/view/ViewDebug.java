@@ -29,11 +29,11 @@ import android.graphics.Picture;
 import android.graphics.RecordingCanvas;
 import android.graphics.Rect;
 import android.graphics.RenderNode;
+import android.os.Build;
 import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
-import android.os.RemoteException;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
@@ -477,7 +477,7 @@ public class ViewDebug {
      *
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static long getViewRootImplCount() {
         return Debug.countInstancesOfClass(ViewRootImpl.class);
     }
@@ -755,11 +755,7 @@ public class ViewDebug {
 
         try {
             Rect outRect = new Rect();
-            try {
-                root.mAttachInfo.mSession.getDisplayFrame(root.mAttachInfo.mWindow, outRect);
-            } catch (RemoteException e) {
-                // Ignore
-            }
+            root.mAttachInfo.mViewRootImpl.getDisplayFrame(outRect);
 
             clientStream.writeInt(outRect.width());
             clientStream.writeInt(outRect.height());
@@ -957,8 +953,7 @@ public class ViewDebug {
         private final Callable<OutputStream> mCallback;
         private final Executor mExecutor;
         private final ReentrantLock mLock = new ReentrantLock(false);
-        private final ArrayDeque<byte[]> mQueue = new ArrayDeque<>(3);
-        private final ByteArrayOutputStream mByteStream = new ByteArrayOutputStream();
+        private final ArrayDeque<Picture> mQueue = new ArrayDeque<>(3);
         private boolean mStopListening;
         private Thread mRenderThread;
 
@@ -994,9 +989,7 @@ public class ViewDebug {
                 mQueue.removeLast();
                 needsInvoke = false;
             }
-            picture.writeToStream(mByteStream);
-            mQueue.add(mByteStream.toByteArray());
-            mByteStream.reset();
+            mQueue.add(picture);
             mLock.unlock();
 
             if (needsInvoke) {
@@ -1007,7 +1000,7 @@ public class ViewDebug {
         @Override
         public void run() {
             mLock.lock();
-            final byte[] picture = mQueue.poll();
+            final Picture picture = mQueue.poll();
             final boolean isStopped = mStopListening;
             mLock.unlock();
             if (Thread.currentThread() == mRenderThread) {
@@ -1028,7 +1021,8 @@ public class ViewDebug {
             }
             if (stream != null) {
                 try {
-                    stream.write(picture);
+                    picture.writeToStream(stream);
+                    stream.flush();
                 } catch (IOException ex) {
                     Log.w("ViewDebug", "Aborting rendering commands capture "
                             + "due to IOException writing to output stream", ex);
@@ -1072,6 +1066,7 @@ public class ViewDebug {
      */
     @TestApi
     @Nullable
+    @UnsupportedAppUsage // Visible for Studio; least-worst option available
     public static AutoCloseable startRenderingCommandsCapture(View tree, Executor executor,
             Callable<OutputStream> callback) {
         final View.AttachInfo attachInfo = tree.mAttachInfo;
@@ -1157,7 +1152,7 @@ public class ViewDebug {
      * @hide
      */
     @Deprecated
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static void dump(View root, boolean skipChildren, boolean includeProperties,
             OutputStream clientStream) throws IOException {
         BufferedWriter out = null;
@@ -1463,8 +1458,8 @@ public class ViewDebug {
         PropertyInfo<ExportedProperty, ?>[] properties = sExportProperties.get(klass);
 
         if (properties == null) {
-            properties = convertToPropertyInfos(klass.getDeclaredMethodsUnchecked(false),
-                    klass.getDeclaredFieldsUnchecked(false), ExportedProperty.class);
+            properties = convertToPropertyInfos(klass.getDeclaredMethods(),
+                    klass.getDeclaredFields(), ExportedProperty.class);
             map.put(klass, properties);
         }
         return properties;
@@ -1901,7 +1896,7 @@ public class ViewDebug {
 
         private Canvas mCanvas;
         private Bitmap mBitmap;
-        private boolean mEnabledHwBitmapsInSwMode;
+        private boolean mEnabledHwFeaturesInSwMode;
 
         @Override
         public Canvas getCanvas(View view, int width, int height) {
@@ -1918,7 +1913,7 @@ public class ViewDebug {
             if (mCanvas == null) {
                 mCanvas = new Canvas();
             }
-            mEnabledHwBitmapsInSwMode = mCanvas.isHwBitmapsInSwModeEnabled();
+            mEnabledHwFeaturesInSwMode = mCanvas.isHwFeaturesInSwModeEnabled();
             mCanvas.setBitmap(mBitmap);
             return mCanvas;
         }
@@ -1926,7 +1921,7 @@ public class ViewDebug {
         @Override
         public Bitmap createBitmap() {
             mCanvas.setBitmap(null);
-            mCanvas.setHwBitmapsInSwModeEnabled(mEnabledHwBitmapsInSwMode);
+            mCanvas.setHwFeaturesInSwModeEnabled(mEnabledHwFeaturesInSwMode);
             return mBitmap;
         }
     }

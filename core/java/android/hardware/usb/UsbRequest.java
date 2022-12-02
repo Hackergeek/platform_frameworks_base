@@ -49,7 +49,7 @@ public class UsbRequest {
     static final int MAX_USBFS_BUFFER_SIZE = 16384;
 
     // used by the JNI code
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private long mNativeContext;
 
     private UsbEndpoint mEndpoint;
@@ -103,7 +103,7 @@ public class UsbRequest {
                 endpoint.getAttributes(), endpoint.getMaxPacketSize(), endpoint.getInterval());
 
         if (wasInitialized) {
-            mCloseGuard.open("close");
+            mCloseGuard.open("UsbRequest.close");
         }
 
         return wasInitialized;

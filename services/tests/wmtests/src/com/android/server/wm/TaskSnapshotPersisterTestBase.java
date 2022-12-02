@@ -28,7 +28,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
-import android.app.ActivityManager.TaskSnapshot;
 import android.content.ComponentName;
 import android.content.ContextWrapper;
 import android.content.res.Resources;
@@ -39,11 +38,13 @@ import android.graphics.GraphicBuffer;
 import android.graphics.PixelFormat;
 import android.graphics.Point;
 import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
 import android.os.UserManager;
-import android.os.UserManagerInternal;
 import android.view.Surface;
+import android.window.TaskSnapshot;
 
 import com.android.server.LocalServices;
+import com.android.server.pm.UserManagerInternal;
 
 import org.junit.After;
 import org.junit.AfterClass;
@@ -58,7 +59,8 @@ import java.util.function.Predicate;
  */
 class TaskSnapshotPersisterTestBase extends WindowTestsBase {
 
-    private static final Rect TEST_INSETS = new Rect(10, 20, 30, 40);
+    private static final Rect TEST_CONTENT_INSETS = new Rect(10, 20, 30, 40);
+    private static final Rect TEST_LETTERBOX_INSETS = new Rect();
     static final File FILES_DIR = getInstrumentation().getTargetContext().getFilesDir();
     static final long MOCK_SNAPSHOT_ID = 12345678;
 
@@ -90,7 +92,7 @@ class TaskSnapshotPersisterTestBase extends WindowTestsBase {
     @Before
     public void setUp() {
         final UserManager um = UserManager.get(getInstrumentation().getTargetContext());
-        mTestUserId = um.getUserHandle();
+        mTestUserId = um.getProcessUserId();
 
         final UserManagerInternal userManagerInternal =
                 LocalServices.getService(UserManagerInternal.class);
@@ -129,8 +131,7 @@ class TaskSnapshotPersisterTestBase extends WindowTestsBase {
     }
 
     TaskSnapshot createSnapshot() {
-        return new TaskSnapshotBuilder()
-                .build();
+        return new TaskSnapshotBuilder().setTopActivityComponent(getUniqueComponentName()).build();
     }
 
     protected static void assertTrueForFiles(File[] files, Predicate<File> predicate,
@@ -153,8 +154,16 @@ class TaskSnapshotPersisterTestBase extends WindowTestsBase {
         private int mWindowingMode = WINDOWING_MODE_FULLSCREEN;
         private int mSystemUiVisibility = 0;
         private int mRotation = Surface.ROTATION_0;
+        private int mWidth = SNAPSHOT_WIDTH;
+        private int mHeight = SNAPSHOT_HEIGHT;
+        private ComponentName mTopActivityComponent = new ComponentName("", "");
 
         TaskSnapshotBuilder() {
+        }
+
+        TaskSnapshotBuilder setTopActivityComponent(ComponentName topActivityComponent) {
+            mTopActivityComponent = topActivityComponent;
+            return this;
         }
 
         TaskSnapshotBuilder setScaleFraction(float scale) {
@@ -187,25 +196,33 @@ class TaskSnapshotPersisterTestBase extends WindowTestsBase {
             return this;
         }
 
+        TaskSnapshotBuilder setTaskSize(int width, int height) {
+            mWidth = width;
+            mHeight = height;
+            return this;
+        }
+
         TaskSnapshot build() {
             // To satisfy existing tests, ensure the graphics buffer is always 100x100, and
             // compute the ize of the task according to mScaleFraction.
-            Point taskSize = new Point((int) (SNAPSHOT_WIDTH / mScaleFraction),
-                    (int) (SNAPSHOT_HEIGHT / mScaleFraction));
-            final GraphicBuffer buffer = GraphicBuffer.create(SNAPSHOT_WIDTH, SNAPSHOT_HEIGHT,
+            Point taskSize = new Point((int) (mWidth / mScaleFraction),
+                    (int) (mHeight / mScaleFraction));
+            final GraphicBuffer buffer = GraphicBuffer.create(mWidth, mHeight,
                     PixelFormat.RGBA_8888,
                     USAGE_HW_TEXTURE | USAGE_SW_READ_RARELY | USAGE_SW_READ_RARELY);
             Canvas c = buffer.lockCanvas();
             c.drawColor(Color.RED);
             buffer.unlockCanvasAndPost(c);
-            return new TaskSnapshot(MOCK_SNAPSHOT_ID, new ComponentName("", ""), buffer,
+            return new TaskSnapshot(MOCK_SNAPSHOT_ID, mTopActivityComponent,
+                    HardwareBuffer.createFromGraphicBuffer(buffer),
                     ColorSpace.get(ColorSpace.Named.SRGB), ORIENTATION_PORTRAIT,
-                    mRotation, taskSize, TEST_INSETS,
+                    mRotation, taskSize, TEST_CONTENT_INSETS, TEST_LETTERBOX_INSETS,
                     // When building a TaskSnapshot with the Builder class, isLowResolution
                     // is always false. Low-res snapshots are only created when loading from
                     // disk.
                     false /* isLowResolution */,
-                    mIsRealSnapshot, mWindowingMode, mSystemUiVisibility, mIsTranslucent);
+                    mIsRealSnapshot, mWindowingMode, mSystemUiVisibility, mIsTranslucent,
+                    false /* hasImeSurface */);
         }
     }
 }

@@ -20,7 +20,7 @@ import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
+import android.os.Build;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.telephony.AccessNetworkConstants.TransportType;
@@ -71,37 +71,37 @@ public final class NetworkRegistrationInfo implements Parcelable {
      * Not registered. The device is not currently searching a new operator to register.
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public static final int REGISTRATION_STATE_NOT_REGISTERED_OR_SEARCHING = 0;
     /**
      * Registered on home network.
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public static final int REGISTRATION_STATE_HOME = 1;
     /**
      * Not registered. The device is currently searching a new operator to register.
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public static final int REGISTRATION_STATE_NOT_REGISTERED_SEARCHING = 2;
     /**
      * Registration denied.
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public static final int REGISTRATION_STATE_DENIED = 3;
     /**
      * Registration state is unknown.
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public static final int REGISTRATION_STATE_UNKNOWN = 4;
     /**
      * Registered on roaming network.
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public static final int REGISTRATION_STATE_ROAMING = 5;
 
     /** @hide */
@@ -183,8 +183,17 @@ public final class NetworkRegistrationInfo implements Parcelable {
     @TransportType
     private final int mTransportType;
 
+    /**
+     * The initial registration state
+     */
     @RegistrationState
-    private final int mRegistrationState;
+    private final int mInitialRegistrationState;
+
+    /**
+     * The registration state that might have been overridden by config
+     */
+    @RegistrationState
+    private int mRegistrationState;
 
     /**
      * Save the {@link ServiceState.RoamingType roaming type}. it can be overridden roaming type
@@ -242,16 +251,20 @@ public final class NetworkRegistrationInfo implements Parcelable {
      * @param cellIdentity The identity representing a unique cell or wifi AP. Set to null if the
      * information is not available.
      * @param rplmn the registered plmn or the last plmn for attempted registration if reg failed.
+     * @param voiceSpecificInfo Voice specific registration information.
+     * @param dataSpecificInfo Data specific registration information.
      */
     private NetworkRegistrationInfo(@Domain int domain, @TransportType int transportType,
-                                   @RegistrationState int registrationState,
-                                   @NetworkType int accessNetworkTechnology, int rejectCause,
-                                   boolean emergencyOnly,
-                                   @Nullable @ServiceType List<Integer> availableServices,
-                                   @Nullable CellIdentity cellIdentity, @Nullable String rplmn) {
+            @RegistrationState int registrationState,
+            @NetworkType int accessNetworkTechnology, int rejectCause,
+            boolean emergencyOnly, @Nullable @ServiceType List<Integer> availableServices,
+            @Nullable CellIdentity cellIdentity, @Nullable String rplmn,
+            @Nullable VoiceSpecificRegistrationInfo voiceSpecificInfo,
+            @Nullable DataSpecificRegistrationInfo dataSpecificInfo) {
         mDomain = domain;
         mTransportType = transportType;
         mRegistrationState = registrationState;
+        mInitialRegistrationState = registrationState;
         mRoamingType = (registrationState == REGISTRATION_STATE_ROAMING)
                 ? ServiceState.ROAMING_TYPE_UNKNOWN : ServiceState.ROAMING_TYPE_NOT_ROAMING;
         setAccessNetworkTechnology(accessNetworkTechnology);
@@ -262,6 +275,10 @@ public final class NetworkRegistrationInfo implements Parcelable {
         mEmergencyOnly = emergencyOnly;
         mNrState = NR_STATE_NONE;
         mRplmn = rplmn;
+        mVoiceSpecificInfo = voiceSpecificInfo;
+        mDataSpecificInfo = dataSpecificInfo;
+
+        updateNrState();
     }
 
     /**
@@ -276,10 +293,9 @@ public final class NetworkRegistrationInfo implements Parcelable {
                                    boolean cssSupported, int roamingIndicator, int systemIsInPrl,
                                    int defaultRoamingIndicator) {
         this(domain, transportType, registrationState, accessNetworkTechnology, rejectCause,
-                emergencyOnly, availableServices, cellIdentity, rplmn);
-
-        mVoiceSpecificInfo = new VoiceSpecificRegistrationInfo(cssSupported, roamingIndicator,
-                systemIsInPrl, defaultRoamingIndicator);
+                emergencyOnly, availableServices, cellIdentity, rplmn,
+                new VoiceSpecificRegistrationInfo(cssSupported, roamingIndicator,
+                        systemIsInPrl, defaultRoamingIndicator), null);
     }
 
     /**
@@ -293,29 +309,29 @@ public final class NetworkRegistrationInfo implements Parcelable {
                                    @Nullable CellIdentity cellIdentity, @Nullable String rplmn,
                                    int maxDataCalls, boolean isDcNrRestricted,
                                    boolean isNrAvailable, boolean isEndcAvailable,
-                                   LteVopsSupportInfo lteVopsSupportInfo) {
+                                   @Nullable VopsSupportInfo vopsSupportInfo) {
         this(domain, transportType, registrationState, accessNetworkTechnology, rejectCause,
-                emergencyOnly, availableServices, cellIdentity, rplmn);
-        mDataSpecificInfo = new DataSpecificRegistrationInfo(
-                maxDataCalls, isDcNrRestricted, isNrAvailable, isEndcAvailable, lteVopsSupportInfo);
-        updateNrState();
+                emergencyOnly, availableServices, cellIdentity, rplmn, null,
+                new DataSpecificRegistrationInfo(maxDataCalls, isDcNrRestricted, isNrAvailable,
+                        isEndcAvailable, vopsSupportInfo));
     }
 
     private NetworkRegistrationInfo(Parcel source) {
         mDomain = source.readInt();
         mTransportType = source.readInt();
         mRegistrationState = source.readInt();
+        mInitialRegistrationState = source.readInt();
         mRoamingType = source.readInt();
         mAccessNetworkTechnology = source.readInt();
         mRejectCause = source.readInt();
         mEmergencyOnly = source.readBoolean();
         mAvailableServices = new ArrayList<>();
-        source.readList(mAvailableServices, Integer.class.getClassLoader());
-        mCellIdentity = source.readParcelable(CellIdentity.class.getClassLoader());
+        source.readList(mAvailableServices, Integer.class.getClassLoader(), java.lang.Integer.class);
+        mCellIdentity = source.readParcelable(CellIdentity.class.getClassLoader(), android.telephony.CellIdentity.class);
         mVoiceSpecificInfo = source.readParcelable(
-                VoiceSpecificRegistrationInfo.class.getClassLoader());
+                VoiceSpecificRegistrationInfo.class.getClassLoader(), android.telephony.VoiceSpecificRegistrationInfo.class);
         mDataSpecificInfo = source.readParcelable(
-                DataSpecificRegistrationInfo.class.getClassLoader());
+                DataSpecificRegistrationInfo.class.getClassLoader(), android.telephony.DataSpecificRegistrationInfo.class);
         mNrState = source.readInt();
         mRplmn = source.readString();
         mIsUsingCarrierAggregation = source.readBoolean();
@@ -331,6 +347,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
         mDomain = nri.mDomain;
         mTransportType = nri.mTransportType;
         mRegistrationState = nri.mRegistrationState;
+        mInitialRegistrationState = nri.mInitialRegistrationState;
         mRoamingType = nri.mRoamingType;
         mAccessNetworkTechnology = nri.mAccessNetworkTechnology;
         mIsUsingCarrierAggregation = nri.mIsUsingCarrierAggregation;
@@ -344,6 +361,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
             // TODO: Instead of doing this, we should create a formal way for cloning cell identity.
             // Cell identity is not an immutable object so we have to deep copy it.
             mCellIdentity = CellIdentity.CREATOR.createFromParcel(p);
+            p.recycle();
         }
 
         if (nri.mVoiceSpecificInfo != null) {
@@ -386,9 +404,18 @@ public final class NetworkRegistrationInfo implements Parcelable {
      *
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public @RegistrationState int getRegistrationState() {
         return mRegistrationState;
+    }
+
+    /**
+     * @return The initial registration state.
+     *
+     * @hide
+     */
+    public @RegistrationState int getInitialRegistrationState() {
+        return mInitialRegistrationState;
     }
 
     /**
@@ -445,13 +472,24 @@ public final class NetworkRegistrationInfo implements Parcelable {
      */
     public void setRoamingType(@ServiceState.RoamingType int roamingType) {
         mRoamingType = roamingType;
+
+        // make sure mRegistrationState to be consistent in case of any roaming type override
+        if (isRoaming()) {
+            if (mRegistrationState == REGISTRATION_STATE_HOME) {
+                mRegistrationState = REGISTRATION_STATE_ROAMING;
+            }
+        } else {
+            if (mRegistrationState == REGISTRATION_STATE_ROAMING) {
+                mRegistrationState = REGISTRATION_STATE_HOME;
+            }
+        }
     }
 
     /**
      * @return the current network roaming type.
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public @ServiceState.RoamingType int getRoamingType() {
         return mRoamingType;
     }
@@ -460,7 +498,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
      * @return Whether emergency is enabled.
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public boolean isEmergencyEnabled() { return mEmergencyOnly; }
 
     /**
@@ -498,12 +536,14 @@ public final class NetworkRegistrationInfo implements Parcelable {
      * 10.5.3.6 for UMTS, 3GPP TS 24.301 9.9.3.9 for LTE, and 3GPP2 A.S0001 6.2.2.44 for CDMA
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public int getRejectCause() {
         return mRejectCause;
     }
 
     /**
+     * Require {@link android.Manifest.permission#ACCESS_FINE_LOCATION}, otherwise return null.
+     *
      * @return The cell information.
      */
     @Nullable
@@ -545,7 +585,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
      * @hide
      */
     @Nullable
-    @SystemApi @TestApi
+    @SystemApi
     public DataSpecificRegistrationInfo getDataSpecificInfo() {
         return mDataSpecificInfo;
     }
@@ -626,6 +666,8 @@ public final class NetworkRegistrationInfo implements Parcelable {
                 .append(" transportType=").append(
                         AccessNetworkConstants.transportTypeToString(mTransportType))
                 .append(" registrationState=").append(registrationStateToString(mRegistrationState))
+                .append(" mInitialRegistrationState=")
+                .append(registrationStateToString(mInitialRegistrationState))
                 .append(" roamingType=").append(ServiceState.roamingTypeToString(mRoamingType))
                 .append(" accessNetworkTechnology=")
                 .append(TelephonyManager.getNetworkTypeName(mAccessNetworkTechnology))
@@ -637,7 +679,8 @@ public final class NetworkRegistrationInfo implements Parcelable {
                 .append(" cellIdentity=").append(mCellIdentity)
                 .append(" voiceSpecificInfo=").append(mVoiceSpecificInfo)
                 .append(" dataSpecificInfo=").append(mDataSpecificInfo)
-                .append(" nrState=").append(nrStateToString(mNrState))
+                .append(" nrState=").append(Build.IS_DEBUGGABLE
+                        ? nrStateToString(mNrState) : "****")
                 .append(" rRplmn=").append(mRplmn)
                 .append(" isUsingCarrierAggregation=").append(mIsUsingCarrierAggregation)
                 .append("}").toString();
@@ -645,10 +688,10 @@ public final class NetworkRegistrationInfo implements Parcelable {
 
     @Override
     public int hashCode() {
-        return Objects.hash(mDomain, mTransportType, mRegistrationState, mRoamingType,
-                mAccessNetworkTechnology, mRejectCause, mEmergencyOnly, mAvailableServices,
-                mCellIdentity, mVoiceSpecificInfo, mDataSpecificInfo, mNrState, mRplmn,
-                mIsUsingCarrierAggregation);
+        return Objects.hash(mDomain, mTransportType, mRegistrationState, mInitialRegistrationState,
+                mRoamingType, mAccessNetworkTechnology, mRejectCause, mEmergencyOnly,
+                mAvailableServices, mCellIdentity, mVoiceSpecificInfo, mDataSpecificInfo, mNrState,
+                mRplmn, mIsUsingCarrierAggregation);
     }
 
     @Override
@@ -663,6 +706,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
         return mDomain == other.mDomain
                 && mTransportType == other.mTransportType
                 && mRegistrationState == other.mRegistrationState
+                && mInitialRegistrationState == other.mInitialRegistrationState
                 && mRoamingType == other.mRoamingType
                 && mAccessNetworkTechnology == other.mAccessNetworkTechnology
                 && mRejectCause == other.mRejectCause
@@ -680,11 +724,12 @@ public final class NetworkRegistrationInfo implements Parcelable {
      * @hide
      */
     @Override
-    @SystemApi @TestApi
+    @SystemApi
     public void writeToParcel(Parcel dest, int flags) {
         dest.writeInt(mDomain);
         dest.writeInt(mTransportType);
         dest.writeInt(mRegistrationState);
+        dest.writeInt(mInitialRegistrationState);
         dest.writeInt(mRoamingType);
         dest.writeInt(mAccessNetworkTechnology);
         dest.writeInt(mRejectCause);
@@ -772,7 +817,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
      * </code></pre>
      * @hide
      */
-    @SystemApi @TestApi
+    @SystemApi
     public static final class Builder {
         @Domain
         private int mDomain;
@@ -781,7 +826,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
         private int mTransportType;
 
         @RegistrationState
-        private int mRegistrationState;
+        private int mInitialRegistrationState;
 
         @NetworkType
         private int mAccessNetworkTechnology;
@@ -798,6 +843,12 @@ public final class NetworkRegistrationInfo implements Parcelable {
 
         @NonNull
         private String mRplmn = "";
+
+        @Nullable
+        private DataSpecificRegistrationInfo mDataSpecificRegistrationInfo;
+
+        @Nullable
+        private VoiceSpecificRegistrationInfo mVoiceSpecificRegistrationInfo;
 
         /**
          * Default constructor for Builder.
@@ -836,7 +887,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
          * @return The same instance of the builder.
          */
         public @NonNull Builder setRegistrationState(@RegistrationState int registrationState) {
-            mRegistrationState = registrationState;
+            mInitialRegistrationState = registrationState;
             return this;
         }
 
@@ -877,7 +928,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
          * @return The same instance of the builder.
          * @hide
          */
-        @SystemApi @TestApi
+        @SystemApi
         public @NonNull Builder setEmergencyOnly(boolean emergencyOnly) {
             mEmergencyOnly = emergencyOnly;
             return this;
@@ -891,7 +942,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
          * @return The same instance of the builder.
          * @hide
          */
-        @SystemApi @TestApi
+        @SystemApi
         public @NonNull Builder setAvailableServices(
                 @NonNull @ServiceType List<Integer> availableServices) {
             mAvailableServices = availableServices;
@@ -906,7 +957,7 @@ public final class NetworkRegistrationInfo implements Parcelable {
          * @return The same instance of the builder.
          * @hide
          */
-        @SystemApi @TestApi
+        @SystemApi
         public @NonNull Builder setCellIdentity(@Nullable CellIdentity cellIdentity) {
             mCellIdentity = cellIdentity;
             return this;
@@ -925,15 +976,40 @@ public final class NetworkRegistrationInfo implements Parcelable {
         }
 
         /**
+         * Set voice specific registration information.
+         *
+         * @param info The voice specific registration information.
+         * @return The builder.
+         * @hide
+         */
+        public @NonNull Builder setVoiceSpecificInfo(@NonNull VoiceSpecificRegistrationInfo info) {
+            mVoiceSpecificRegistrationInfo = info;
+            return this;
+        }
+
+        /**
+         * Set data specific registration information.
+         *
+         * @param info The data specific registration information.
+         * @return The builder.
+         * @hide
+         */
+        public @NonNull Builder setDataSpecificInfo(@NonNull DataSpecificRegistrationInfo info) {
+            mDataSpecificRegistrationInfo = info;
+            return this;
+        }
+
+        /**
          * Build the NetworkRegistrationInfo.
          * @return the NetworkRegistrationInfo object.
          * @hide
          */
-        @SystemApi @TestApi
+        @SystemApi
         public @NonNull NetworkRegistrationInfo build() {
-            return new NetworkRegistrationInfo(mDomain, mTransportType, mRegistrationState,
+            return new NetworkRegistrationInfo(mDomain, mTransportType, mInitialRegistrationState,
                     mAccessNetworkTechnology, mRejectCause, mEmergencyOnly, mAvailableServices,
-                    mCellIdentity, mRplmn);
+                    mCellIdentity, mRplmn, mVoiceSpecificRegistrationInfo,
+                    mDataSpecificRegistrationInfo);
         }
     }
 }

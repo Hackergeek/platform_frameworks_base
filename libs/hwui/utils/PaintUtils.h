@@ -20,7 +20,6 @@
 #include <utils/Blur.h>
 
 #include <SkColorFilter.h>
-#include <SkDrawLooper.h>
 #include <SkPaint.h>
 #include <SkShader.h>
 
@@ -33,13 +32,6 @@ namespace uirenderer {
  */
 class PaintUtils {
 public:
-    static inline GLenum getFilter(const SkPaint* paint) {
-        if (!paint || paint->getFilterQuality() != kNone_SkFilterQuality) {
-            return GL_LINEAR;
-        }
-        return GL_NEAREST;
-    }
-
     static bool isOpaquePaint(const SkPaint* paint) {
         if (!paint) return true;  // default (paintless) behavior is SrcOver, black
 
@@ -49,26 +41,18 @@ public:
         }
 
         // Only let simple srcOver / src blending modes declare opaque, since behavior is clear.
-        SkBlendMode mode = paint->getBlendMode();
+        const auto mode = paint->asBlendMode();
         return mode == SkBlendMode::kSrcOver || mode == SkBlendMode::kSrc;
     }
 
-    static bool isBlendedShader(const SkShader* shader) {
-        if (shader == nullptr) {
-            return false;
-        }
-        return !shader->isOpaque();
-    }
+    static bool isBlendedShader(const SkShader* shader) { return shader && !shader->isOpaque(); }
 
     static bool isBlendedColorFilter(const SkColorFilter* filter) {
-        if (filter == nullptr) {
-            return false;
-        }
-        return (filter->getFlags() & SkColorFilter::kAlphaUnchanged_Flag) == 0;
+        return filter && !filter->isAlphaUnchanged();
     }
 
     static inline SkBlendMode getBlendModeDirect(const SkPaint* paint) {
-        return paint ? paint->getBlendMode() : SkBlendMode::kSrcOver;
+        return paint ? paint->getBlendMode_or(SkBlendMode::kSrcOver) : SkBlendMode::kSrcOver;
     }
 
     static inline int getAlphaDirect(const SkPaint* paint) {

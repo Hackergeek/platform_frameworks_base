@@ -17,6 +17,7 @@
 package com.android.server.locksettings;
 
 import static android.content.Context.USER_SERVICE;
+import static android.text.TextUtils.formatSimple;
 
 import static com.android.internal.annotations.VisibleForTesting.Visibility.PACKAGE;
 import static com.android.internal.widget.LockPatternUtils.USER_FRP;
@@ -46,6 +47,7 @@ import com.android.internal.widget.LockPatternUtils;
 import com.android.internal.widget.LockPatternUtils.CredentialType;
 import com.android.server.LocalServices;
 import com.android.server.PersistentDataBlockManagerInternal;
+import com.android.server.utils.WatchableImpl;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -65,7 +67,7 @@ import java.util.Map;
 /**
  * Storage for the lock settings service.
  */
-class LockSettingsStorage {
+class LockSettingsStorage extends WatchableImpl {
 
     private static final String TAG = "LockSettingsStorage";
     private static final String TABLE = "locksettings";
@@ -88,6 +90,7 @@ class LockSettingsStorage {
     private static final String CHILD_PROFILE_LOCK_FILE = "gatekeeper.profile.key";
 
     private static final String REBOOT_ESCROW_FILE = "reboot.escrow.key";
+    private static final String REBOOT_ESCROW_SERVER_BLOB = "reboot.escrow.server.blob.key";
 
     private static final String SYNTHETIC_PASSWORD_DIRECTORY = "spblob/";
 
@@ -171,7 +174,7 @@ class LockSettingsStorage {
         } finally {
             db.endTransaction();
         }
-
+        dispatchChange(this);
     }
 
     @VisibleForTesting
@@ -219,7 +222,7 @@ class LockSettingsStorage {
         } finally {
             db.endTransaction();
         }
-
+        dispatchChange(this);
     }
 
     public void prefetchUser(int userId) {
@@ -317,6 +320,22 @@ class LockSettingsStorage {
         deleteFile(getRebootEscrowFile(userId));
     }
 
+    public void writeRebootEscrowServerBlob(byte[] serverBlob) {
+        writeFile(getRebootEscrowServerBlob(), serverBlob);
+    }
+
+    public byte[] readRebootEscrowServerBlob() {
+        return readFile(getRebootEscrowServerBlob());
+    }
+
+    public boolean hasRebootEscrowServerBlob() {
+        return hasFile(getRebootEscrowServerBlob());
+    }
+
+    public void removeRebootEscrowServerBlob() {
+        deleteFile(getRebootEscrowServerBlob());
+    }
+
     public boolean hasPassword(int userId) {
         return hasFile(getLockPasswordFilename(userId));
     }
@@ -394,6 +413,7 @@ class LockSettingsStorage {
                 }
             }
             mCache.putFile(name, hash);
+            dispatchChange(this);
         }
     }
 
@@ -405,6 +425,7 @@ class LockSettingsStorage {
                 file.delete();
                 mCache.putFile(name, null);
             }
+            dispatchChange(this);
         }
     }
 
@@ -445,6 +466,12 @@ class LockSettingsStorage {
         return getLockCredentialFilePathForUser(userId, REBOOT_ESCROW_FILE);
     }
 
+    @VisibleForTesting
+    String getRebootEscrowServerBlob() {
+        // There is a single copy of server blob for all users.
+        return getLockCredentialFilePathForUser(UserHandle.USER_SYSTEM, REBOOT_ESCROW_SERVER_BLOB);
+    }
+
     private String getLockCredentialFilePathForUser(int userId, String basename) {
         String dataSystemDirectory = Environment.getDataDirectory().getAbsolutePath() +
                         SYSTEM_DIRECTORY;
@@ -476,6 +503,7 @@ class LockSettingsStorage {
                 Slog.w(TAG, "Failed to zeroize " + path, e);
             } finally {
                 file.delete();
+                dispatchChange(this);
             }
             mCache.putFile(path, null);
         }
@@ -484,7 +512,7 @@ class LockSettingsStorage {
     public Map<Integer, List<Long>> listSyntheticPasswordHandlesForAllUsers(String stateName) {
         Map<Integer, List<Long>> result = new ArrayMap<>();
         final UserManager um = UserManager.get(mContext);
-        for (UserInfo user : um.getUsers(false)) {
+        for (UserInfo user : um.getUsers()) {
             result.put(user.id, listSyntheticPasswordHandlesForUser(stateName, user.id));
         }
         return result;
@@ -527,7 +555,7 @@ class LockSettingsStorage {
     protected String getSynthenticPasswordStateFilePathForUser(int userId, long handle,
             String name) {
         final File baseDir = getSyntheticPasswordDirectoryForUser(userId);
-        final String baseName = String.format("%016x.%s", handle, name);
+        final String baseName = formatSimple("%016x.%s", handle, name);
         return new File(baseDir, baseName).getAbsolutePath();
     }
 
@@ -563,6 +591,7 @@ class LockSettingsStorage {
         } finally {
             db.endTransaction();
         }
+        dispatchChange(this);
     }
 
     private void deleteFilesAndRemoveCache(String... names) {
@@ -571,6 +600,7 @@ class LockSettingsStorage {
             if (file.exists()) {
                 file.delete();
                 mCache.putFile(name, null);
+                dispatchChange(this);
             }
         }
     }
@@ -651,6 +681,7 @@ class LockSettingsStorage {
         }
         persistentDataBlock.setFrpCredentialHandle(PersistentData.toBytes(
                 persistentType, userId, qualityForUi, payload));
+        dispatchChange(this);
     }
 
     public PersistentData readPersistentDataBlock() {
@@ -746,14 +777,15 @@ class LockSettingsStorage {
 
     public void dump(IndentingPrintWriter pw) {
         final UserManager um = UserManager.get(mContext);
-        for (UserInfo user : um.getUsers(false)) {
+        for (UserInfo user : um.getUsers()) {
             File userPath = getSyntheticPasswordDirectoryForUser(user.id);
             pw.println(String.format("User %d [%s]:", user.id, userPath.getAbsolutePath()));
             pw.increaseIndent();
             File[] files = userPath.listFiles();
             if (files != null) {
+                Arrays.sort(files);
                 for (File file : files) {
-                    pw.println(String.format("%4d %s %s", file.length(),
+                    pw.println(String.format("%6d %s %s", file.length(),
                             LockSettingsService.timestampToString(file.lastModified()),
                             file.getName()));
                 }
@@ -775,7 +807,7 @@ class LockSettingsStorage {
 
         public DatabaseHelper(Context context) {
             super(context, DATABASE_NAME, null, DATABASE_VERSION);
-            setWriteAheadLoggingEnabled(true);
+            setWriteAheadLoggingEnabled(false);
             // Memory optimization - close idle connections after 30s of inactivity
             setIdleConnectionTimeout(IDLE_CONNECTION_TIMEOUT_MS);
         }

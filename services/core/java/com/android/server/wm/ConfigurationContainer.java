@@ -24,20 +24,22 @@ import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
 import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
-import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
-import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
 import static android.app.WindowConfiguration.activityTypeToString;
 import static android.app.WindowConfiguration.windowingModeToString;
+import static android.app.WindowConfigurationProto.WINDOWING_MODE;
+import static android.content.ConfigurationProto.WINDOW_CONFIGURATION;
 
 import static com.android.server.wm.ConfigurationContainerProto.FULL_CONFIGURATION;
 import static com.android.server.wm.ConfigurationContainerProto.MERGED_OVERRIDE_CONFIGURATION;
 import static com.android.server.wm.ConfigurationContainerProto.OVERRIDE_CONFIGURATION;
 
 import android.annotation.CallSuper;
+import android.annotation.NonNull;
 import android.app.WindowConfiguration;
 import android.content.res.Configuration;
 import android.graphics.Point;
 import android.graphics.Rect;
+import android.os.LocaleList;
 import android.util.proto.ProtoOutputStream;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -93,9 +95,17 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
     private final Rect mTmpRect = new Rect();
 
     static final int BOUNDS_CHANGE_NONE = 0;
-    // Return value from {@link setBounds} indicating the position of the override bounds changed.
+
+    /**
+     * Return value from {@link #setBounds(Rect)} indicating the position of the override bounds
+     * changed.
+     */
     static final int BOUNDS_CHANGE_POSITION = 1;
-    // Return value from {@link setBounds} indicating the size of the override bounds changed.
+
+    /**
+     * Return value from {@link #setBounds(Rect)} indicating the size of the override bounds
+     * changed.
+     */
     static final int BOUNDS_CHANGE_SIZE = 1 << 1;
 
     /**
@@ -103,6 +113,7 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
      * This method should be used for getting settings applied in each particular level of the
      * hierarchy.
      */
+    @NonNull
     public Configuration getConfiguration() {
         return mFullConfiguration;
     }
@@ -115,6 +126,10 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         mResolvedTmpConfig.setTo(mResolvedOverrideConfiguration);
         resolveOverrideConfiguration(newParentConfig);
         mFullConfiguration.setTo(newParentConfig);
+        // Do not inherit always-on-top property from parent, otherwise the always-on-top
+        // property is propagated to all children. In that case, newly added child is
+        // always being positioned at bottom (behind the always-on-top siblings).
+        mFullConfiguration.windowConfiguration.unsetAlwaysOnTop();
         mFullConfiguration.updateFrom(mResolvedOverrideConfiguration);
         onMergedOverrideConfigurationChanged();
         if (!mResolvedTmpConfig.equals(mResolvedOverrideConfiguration)) {
@@ -134,9 +149,16 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
                     mMergedOverrideConfiguration);
         }
         for (int i = getChildCount() - 1; i >= 0; --i) {
-            final ConfigurationContainer child = getChildAt(i);
-            child.onConfigurationChanged(mFullConfiguration);
+            dispatchConfigurationToChild(getChildAt(i), mFullConfiguration);
         }
+    }
+
+    /**
+     * Dispatches the configuration to child when {@link #onConfigurationChanged(Configuration)} is
+     * called. This allows the derived classes to override how to dispatch the configuration.
+     */
+    void dispatchConfigurationToChild(E child, Configuration config) {
+        child.onConfigurationChanged(config);
     }
 
     /**
@@ -149,12 +171,19 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         mResolvedOverrideConfiguration.setTo(mRequestedOverrideConfiguration);
     }
 
+    /** Returns {@code true} if requested override override configuration is not empty. */
+    boolean hasRequestedOverrideConfiguration() {
+        return mHasOverrideConfiguration;
+    }
+
     /** Returns requested override configuration applied to this configuration container. */
+    @NonNull
     public Configuration getRequestedOverrideConfiguration() {
         return mRequestedOverrideConfiguration;
     }
 
     /** Returns the resolved override configuration. */
+    @NonNull
     Configuration getResolvedOverrideConfiguration() {
         return mResolvedOverrideConfiguration;
     }
@@ -165,19 +194,30 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
      * @see #mFullConfiguration
      */
     public void onRequestedOverrideConfigurationChanged(Configuration overrideConfiguration) {
+        updateRequestedOverrideConfiguration(overrideConfiguration);
+        // Update full configuration of this container and all its children.
+        final ConfigurationContainer parent = getParent();
+        onConfigurationChanged(parent != null ? parent.getConfiguration() : Configuration.EMPTY);
+    }
+
+    /** Updates override configuration without recalculate full config. */
+    void updateRequestedOverrideConfiguration(Configuration overrideConfiguration) {
         // Pre-compute this here, so we don't need to go through the entire Configuration when
         // writing to proto (which has significant cost if we write a lot of empty configurations).
         mHasOverrideConfiguration = !Configuration.EMPTY.equals(overrideConfiguration);
         mRequestedOverrideConfiguration.setTo(overrideConfiguration);
-        // Update full configuration of this container and all its children.
-        final ConfigurationContainer parent = getParent();
-        onConfigurationChanged(parent != null ? parent.getConfiguration() : Configuration.EMPTY);
+        final Rect newBounds = mRequestedOverrideConfiguration.windowConfiguration.getBounds();
+        if (mHasOverrideConfiguration && providesMaxBounds()
+                && diffRequestedOverrideMaxBounds(newBounds) != BOUNDS_CHANGE_NONE) {
+            mRequestedOverrideConfiguration.windowConfiguration.setMaxBounds(newBounds);
+        }
     }
 
     /**
      * Get merged override configuration from the top of the hierarchy down to this particular
      * instance. This should be reported to client as override config.
      */
+    @NonNull
     public Configuration getMergedOverrideConfiguration() {
         return mMergedOverrideConfiguration;
     }
@@ -192,6 +232,10 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         final ConfigurationContainer parent = getParent();
         if (parent != null) {
             mMergedOverrideConfiguration.setTo(parent.getMergedOverrideConfiguration());
+            // Do not inherit always-on-top property from parent, otherwise the always-on-top
+            // property is propagated to all children. In that case, newly added child is
+            // always being positioned at bottom (behind the always-on-top siblings).
+            mMergedOverrideConfiguration.windowConfiguration.unsetAlwaysOnTop();
             mMergedOverrideConfiguration.updateFrom(mResolvedOverrideConfiguration);
         } else {
             mMergedOverrideConfiguration.setTo(mResolvedOverrideConfiguration);
@@ -203,15 +247,16 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
     }
 
     /**
-     * Indicates whether this container has not requested any bounds different from its parent. In
-     * this case, it will inherit the bounds of the first ancestor which specifies a bounds subject
-     * to policy constraints.
+     * Indicates whether this container chooses not to override any bounds from its parent, either
+     * because it doesn't request to override them or the request is dropped during configuration
+     * resolution. In this case, it will inherit the bounds of the first ancestor which specifies a
+     * bounds subject to policy constraints.
      *
-     * @return {@code true} if no explicit bounds have been requested at this container level.
-     *         {@code false} otherwise.
+     * @return {@code true} if this container level uses bounds from parent level. {@code false}
+     *         otherwise.
      */
     public boolean matchParentBounds() {
-        return getRequestedOverrideBounds().isEmpty();
+        return getResolvedOverrideBounds().isEmpty();
     }
 
     /**
@@ -223,6 +268,11 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
      */
     public boolean equivalentRequestedOverrideBounds(Rect bounds) {
         return equivalentBounds(getRequestedOverrideBounds(),  bounds);
+    }
+
+    /** Similar to {@link #equivalentRequestedOverrideBounds(Rect)}, but compares max bounds. */
+    public boolean equivalentRequestedOverrideMaxBounds(Rect bounds) {
+        return equivalentBounds(getRequestedOverrideMaxBounds(),  bounds);
     }
 
     /**
@@ -237,7 +287,6 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
     /**
      * Returns the effective bounds of this container, inheriting the first non-empty bounds set in
      * its ancestral hierarchy, including itself.
-     * @return
      */
     public Rect getBounds() {
         mReturnBounds.set(getConfiguration().windowConfiguration.getBounds());
@@ -246,6 +295,12 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
 
     public void getBounds(Rect outBounds) {
         outBounds.set(getBounds());
+    }
+
+    /** Similar to {@link #getBounds()}, but reports the max bounds. */
+    public Rect getMaxBounds() {
+        mReturnBounds.set(getConfiguration().windowConfiguration.getMaxBounds());
+        return mReturnBounds;
     }
 
     /**
@@ -272,6 +327,13 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         return mReturnBounds;
     }
 
+    /** Similar to {@link #getRequestedOverrideBounds()}, but returns the max bounds. */
+    public Rect getRequestedOverrideMaxBounds() {
+        mReturnBounds.set(getRequestedOverrideConfiguration().windowConfiguration.getMaxBounds());
+
+        return mReturnBounds;
+    }
+
     /**
      * Returns {@code true} if the {@link WindowConfiguration} in the requested override
      * {@link Configuration} specifies bounds.
@@ -282,7 +344,7 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
 
     /**
      * Sets the passed in {@link Rect} to the current bounds.
-     * @see {@link #getRequestedOverrideBounds()}.
+     * @see #getRequestedOverrideBounds()
      */
     public void getRequestedOverrideBounds(Rect outBounds) {
         outBounds.set(getRequestedOverrideBounds());
@@ -294,16 +356,19 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
      * {@link #getRequestedOverrideBounds()}. If
      * an empty {@link Rect} or null is specified, this container will be considered to match its
      * parent bounds {@see #matchParentBounds} and will inherit bounds from its parent.
+     *
      * @param bounds The bounds defining the container size.
+     *
      * @return a bitmask representing the types of changes made to the bounds.
      */
     public int setBounds(Rect bounds) {
         int boundsChange = diffRequestedOverrideBounds(bounds);
+        final boolean overrideMaxBounds = providesMaxBounds()
+                && diffRequestedOverrideMaxBounds(bounds) != BOUNDS_CHANGE_NONE;
 
-        if (boundsChange == BOUNDS_CHANGE_NONE) {
+        if (boundsChange == BOUNDS_CHANGE_NONE && !overrideMaxBounds) {
             return boundsChange;
         }
-
 
         mRequestsTmpConfig.setTo(getRequestedOverrideConfiguration());
         mRequestsTmpConfig.windowConfiguration.setBounds(bounds);
@@ -315,6 +380,39 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
     public int setBounds(int left, int top, int right, int bottom) {
         mTmpRect.set(left, top, right, bottom);
         return setBounds(mTmpRect);
+    }
+
+    /**
+     * Returns {@code true} if this {@link ConfigurationContainer} provides the maximum bounds to
+     * its child {@link ConfigurationContainer}s. Returns {@code false}, otherwise.
+     * <p>
+     * The maximum bounds is how large a window can be expanded.
+     * </p>
+     */
+    protected boolean providesMaxBounds() {
+        return false;
+    }
+
+    int diffRequestedOverrideMaxBounds(Rect bounds) {
+        if (equivalentRequestedOverrideMaxBounds(bounds)) {
+            return BOUNDS_CHANGE_NONE;
+        }
+
+        int boundsChange = BOUNDS_CHANGE_NONE;
+
+        final Rect existingBounds = getRequestedOverrideMaxBounds();
+
+        if (bounds == null || existingBounds.left != bounds.left
+                || existingBounds.top != bounds.top) {
+            boundsChange |= BOUNDS_CHANGE_POSITION;
+        }
+
+        if (bounds == null || existingBounds.width() != bounds.width()
+                || existingBounds.height() != bounds.height()) {
+            boundsChange |= BOUNDS_CHANGE_SIZE;
+        }
+
+        return boundsChange;
     }
 
     int diffRequestedOverrideBounds(Rect bounds) {
@@ -337,10 +435,6 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         }
 
         return boundsChange;
-    }
-
-    boolean hasOverrideConfiguration() {
-        return mHasOverrideConfiguration;
     }
 
     public WindowConfiguration getWindowConfiguration() {
@@ -367,7 +461,7 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
     /** Sets the always on top flag for this configuration container.
      *  When you call this function, make sure that the following functions are called as well to
      *  keep proper z-order.
-     *  - {@Link DisplayContent#positionStackAt(POSITION_TOP, TaskStack)};
+     *  - {@link TaskDisplayArea#positionChildAt(int POSITION_TOP, Task, boolean)};
      * */
     public void setAlwaysOnTop(boolean alwaysOnTop) {
         mRequestsTmpConfig.setTo(getRequestedOverrideConfiguration());
@@ -392,33 +486,9 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         return WindowConfiguration.inMultiWindowMode(windowingMode);
     }
 
-    /** Returns true if this container is currently in split-screen windowing mode. */
-    public boolean inSplitScreenWindowingMode() {
-        /*@WindowConfiguration.WindowingMode*/ int windowingMode =
-                mFullConfiguration.windowConfiguration.getWindowingMode();
-
-        return windowingMode == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY
-                || windowingMode == WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
-    }
-
-    /** Returns true if this container is currently in split-screen secondary windowing mode. */
-    public boolean inSplitScreenSecondaryWindowingMode() {
-        /*@WindowConfiguration.WindowingMode*/ int windowingMode =
-                mFullConfiguration.windowConfiguration.getWindowingMode();
-
-        return windowingMode == WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
-    }
-
-    public boolean inSplitScreenPrimaryWindowingMode() {
-        return mFullConfiguration.windowConfiguration.getWindowingMode()
-                == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
-    }
-
     /**
-     * Returns true if this container can be put in either
-     * {@link WindowConfiguration#WINDOWING_MODE_SPLIT_SCREEN_PRIMARY} or
-     * {@link WindowConfiguration##WINDOWING_MODE_SPLIT_SCREEN_SECONDARY} windowing modes based on
-     * its current state.
+     * Returns true if this container supports split-screen multi-window and can be put in
+     * split-screen based on its current state.
      */
     public boolean supportsSplitScreenWindowingMode() {
         return mFullConfiguration.windowConfiguration.supportSplitScreenWindowingMode();
@@ -432,7 +502,7 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         return mFullConfiguration.windowConfiguration.getWindowingMode() == WINDOWING_MODE_FREEFORM;
     }
 
-    /** Returns the activity type associated with the the configuration container. */
+    /** Returns the activity type associated with the configuration container. */
     /*@WindowConfiguration.ActivityType*/
     public int getActivityType() {
         return mFullConfiguration.windowConfiguration.getActivityType();
@@ -461,8 +531,59 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         return getActivityType() == ACTIVITY_TYPE_RECENTS;
     }
 
+    final boolean isActivityTypeHomeOrRecents() {
+        final int activityType = getActivityType();
+        return activityType == ACTIVITY_TYPE_HOME || activityType == ACTIVITY_TYPE_RECENTS;
+    }
+
     public boolean isActivityTypeAssistant() {
         return getActivityType() == ACTIVITY_TYPE_ASSISTANT;
+    }
+
+    /**
+     * Applies app-specific nightMode and {@link LocaleList} on requested configuration.
+     * @return true if any of the requested configuration has been updated.
+     */
+    public boolean applyAppSpecificConfig(Integer nightMode, LocaleList locales) {
+        mRequestsTmpConfig.setTo(getRequestedOverrideConfiguration());
+        boolean newNightModeSet = (nightMode != null) && setOverrideNightMode(mRequestsTmpConfig,
+                nightMode);
+        boolean newLocalesSet = (locales != null) && setOverrideLocales(mRequestsTmpConfig,
+                locales);
+        if (newNightModeSet || newLocalesSet) {
+            onRequestedOverrideConfigurationChanged(mRequestsTmpConfig);
+        }
+        return newNightModeSet || newLocalesSet;
+    }
+
+    /**
+     * Overrides the night mode applied to this ConfigurationContainer.
+     * @return true if the nightMode has been changed.
+     */
+    private boolean setOverrideNightMode(Configuration requestsTmpConfig, int nightMode) {
+        final int currentUiMode = mRequestedOverrideConfiguration.uiMode;
+        final int currentNightMode = currentUiMode & Configuration.UI_MODE_NIGHT_MASK;
+        final int validNightMode = nightMode & Configuration.UI_MODE_NIGHT_MASK;
+        if (currentNightMode == validNightMode) {
+            return false;
+        }
+        requestsTmpConfig.uiMode = validNightMode
+                | (currentUiMode & ~Configuration.UI_MODE_NIGHT_MASK);
+        return true;
+    }
+
+    /**
+     * Overrides the locales applied to this ConfigurationContainer.
+     * @return true if the LocaleList has been changed.
+     */
+    private boolean setOverrideLocales(Configuration requestsTmpConfig,
+            @NonNull LocaleList overrideLocales) {
+        if (mRequestedOverrideConfiguration.getLocales().equals(overrideLocales)) {
+            return false;
+        }
+        requestsTmpConfig.setLocales(overrideLocales);
+        requestsTmpConfig.userSetLocale = true;
+        return true;
     }
 
     public boolean isActivityTypeDream() {
@@ -478,19 +599,16 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         return activityType == ACTIVITY_TYPE_STANDARD || activityType == ACTIVITY_TYPE_UNDEFINED;
     }
 
-    public boolean hasCompatibleActivityType(ConfigurationContainer other) {
-        /*@WindowConfiguration.ActivityType*/ int thisType = getActivityType();
-        /*@WindowConfiguration.ActivityType*/ int otherType = other.getActivityType();
-
-        if (thisType == otherType) {
+    public static boolean isCompatibleActivityType(int currentType, int otherType) {
+        if (currentType == otherType) {
             return true;
         }
-        if (thisType == ACTIVITY_TYPE_ASSISTANT) {
+        if (currentType == ACTIVITY_TYPE_ASSISTANT) {
             // Assistant activities are only compatible with themselves...
             return false;
         }
         // Otherwise we are compatible if us or other is not currently defined.
-        return thisType == ACTIVITY_TYPE_UNDEFINED || otherType == ACTIVITY_TYPE_UNDEFINED;
+        return currentType == ACTIVITY_TYPE_UNDEFINED || otherType == ACTIVITY_TYPE_UNDEFINED;
     }
 
     /**
@@ -527,12 +645,19 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
     }
 
     void registerConfigurationChangeListener(ConfigurationContainerListener listener) {
+        registerConfigurationChangeListener(listener, true /* shouldDispatchConfig */);
+    }
+
+    void registerConfigurationChangeListener(ConfigurationContainerListener listener,
+            boolean shouldDispatchConfig) {
         if (mChangeListeners.contains(listener)) {
             return;
         }
         mChangeListeners.add(listener);
-        listener.onRequestedOverrideConfigurationChanged(mResolvedOverrideConfiguration);
-        listener.onMergedOverrideConfigurationChanged(mMergedOverrideConfiguration);
+        if (shouldDispatchConfig) {
+            listener.onRequestedOverrideConfigurationChanged(mResolvedOverrideConfiguration);
+            listener.onMergedOverrideConfigurationChanged(mMergedOverrideConfiguration);
+        }
     }
 
     void unregisterConfigurationChangeListener(ConfigurationContainerListener listener) {
@@ -571,20 +696,38 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
     @CallSuper
     protected void dumpDebug(ProtoOutputStream proto, long fieldId,
             @WindowTraceLogLevel int logLevel) {
-        // Critical log level logs only visible elements to mitigate performance overheard
-        if (logLevel != WindowTraceLogLevel.ALL && !mHasOverrideConfiguration) {
-            return;
+        final long token = proto.start(fieldId);
+
+        if (logLevel == WindowTraceLogLevel.ALL || mHasOverrideConfiguration) {
+            mRequestedOverrideConfiguration.dumpDebug(proto, OVERRIDE_CONFIGURATION,
+                    logLevel == WindowTraceLogLevel.CRITICAL);
         }
 
-        final long token = proto.start(fieldId);
-        mRequestedOverrideConfiguration.dumpDebug(proto, OVERRIDE_CONFIGURATION,
-                logLevel == WindowTraceLogLevel.CRITICAL);
+        // Unless trace level is set to `WindowTraceLogLevel.ALL` don't dump anything that isn't
+        // required to mitigate performance overhead
         if (logLevel == WindowTraceLogLevel.ALL) {
             mFullConfiguration.dumpDebug(proto, FULL_CONFIGURATION, false /* critical */);
             mMergedOverrideConfiguration.dumpDebug(proto, MERGED_OVERRIDE_CONFIGURATION,
                     false /* critical */);
         }
+
+        if (logLevel == WindowTraceLogLevel.TRIM) {
+            // Required for Fass to automatically detect pip transitions in Winscope traces
+            dumpDebugWindowingMode(proto);
+        }
+
         proto.end(token);
+    }
+
+    private void dumpDebugWindowingMode(ProtoOutputStream proto) {
+        final long fullConfigToken = proto.start(FULL_CONFIGURATION);
+        final long windowConfigToken = proto.start(WINDOW_CONFIGURATION);
+
+        int windowingMode = mFullConfiguration.windowConfiguration.getWindowingMode();
+        proto.write(WINDOWING_MODE, windowingMode);
+
+        proto.end(windowConfigToken);
+        proto.end(fullConfigToken);
     }
 
     /**
@@ -596,7 +739,9 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         pw.println(getName()
                 + " type=" + activityTypeToString(getActivityType())
                 + " mode=" + windowingModeToString(getWindowingMode())
-                + " override-mode=" + windowingModeToString(getRequestedOverrideWindowingMode()));
+                + " override-mode=" + windowingModeToString(getRequestedOverrideWindowingMode())
+                + " requested-bounds=" + getRequestedOverrideBounds().toShortString()
+                + " bounds=" + getBounds().toShortString());
         for (int i = getChildCount() - 1; i >= 0; --i) {
             final E cc = getChildAt(i);
             pw.print(childPrefix + "#" + i + " ");

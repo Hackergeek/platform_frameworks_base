@@ -18,6 +18,7 @@ package android.app;
 
 import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.IAccessibilityServiceClient;
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
@@ -25,6 +26,7 @@ import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.hardware.input.InputManager;
 import android.os.Binder;
+import android.os.Build;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
@@ -34,7 +36,10 @@ import android.os.UserHandle;
 import android.permission.IPermissionManager;
 import android.util.Log;
 import android.view.IWindowManager;
+import android.view.InputDevice;
 import android.view.InputEvent;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.SurfaceControl;
 import android.view.WindowAnimationFrameStats;
 import android.view.WindowContentFrameStats;
@@ -48,6 +53,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.List;
 
 /**
  * This is a remote object that is passed from the shell to an instrumentation
@@ -88,7 +94,7 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
 
     private int mOwningUid;
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public UiAutomationConnection() {
     }
 
@@ -123,18 +129,42 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
     }
 
     @Override
-    public boolean injectInputEvent(InputEvent event, boolean sync) {
+    public boolean injectInputEvent(InputEvent event, boolean sync, boolean waitForAnimations) {
         synchronized (mLock) {
             throwIfCalledByNotTrustedUidLocked();
             throwIfShutdownLocked();
             throwIfNotConnectedLocked();
         }
-        final int mode = (sync) ? InputManager.INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH
-                : InputManager.INJECT_INPUT_EVENT_MODE_ASYNC;
+
+        final boolean syncTransactionsBefore;
+        final boolean syncTransactionsAfter;
+        if (event instanceof KeyEvent) {
+            KeyEvent keyEvent = (KeyEvent) event;
+            syncTransactionsBefore = keyEvent.getAction() == KeyEvent.ACTION_DOWN;
+            syncTransactionsAfter = keyEvent.getAction() == KeyEvent.ACTION_UP;
+        } else {
+            MotionEvent motionEvent = (MotionEvent) event;
+            syncTransactionsBefore = motionEvent.getAction() == MotionEvent.ACTION_DOWN
+                    || motionEvent.isFromSource(InputDevice.SOURCE_MOUSE);
+            syncTransactionsAfter = motionEvent.getAction() == MotionEvent.ACTION_UP;
+        }
+
         final long identity = Binder.clearCallingIdentity();
         try {
-            return mWindowManager.injectInputAfterTransactionsApplied(event, mode);
+            if (syncTransactionsBefore) {
+                mWindowManager.syncInputTransactions(waitForAnimations);
+            }
+
+            final boolean result = InputManager.getInstance().injectInputEvent(event,
+                    sync ? InputManager.INJECT_INPUT_EVENT_MODE_WAIT_FOR_FINISH
+                            : InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
+
+            if (syncTransactionsAfter) {
+                mWindowManager.syncInputTransactions(waitForAnimations);
+            }
+            return result;
         } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
@@ -142,7 +172,7 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
     }
 
     @Override
-    public void syncInputTransactions() {
+    public void syncInputTransactions(boolean waitForAnimations) {
         synchronized (mLock) {
             throwIfCalledByNotTrustedUidLocked();
             throwIfShutdownLocked();
@@ -150,11 +180,10 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
         }
 
         try {
-            mWindowManager.syncInputTransactions();
+            mWindowManager.syncInputTransactions(waitForAnimations);
         } catch (RemoteException e) {
         }
     }
-
 
     @Override
     public boolean setRotation(int rotation) {
@@ -180,7 +209,7 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
     }
 
     @Override
-    public Bitmap takeScreenshot(Rect crop, int rotation) {
+    public Bitmap takeScreenshot(Rect crop) {
         synchronized (mLock) {
             throwIfCalledByNotTrustedUidLocked();
             throwIfShutdownLocked();
@@ -190,10 +219,44 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
         try {
             int width = crop.width();
             int height = crop.height();
-            return SurfaceControl.screenshot(crop, width, height, rotation);
+            final IBinder displayToken = SurfaceControl.getInternalDisplayToken();
+            final SurfaceControl.DisplayCaptureArgs captureArgs =
+                    new SurfaceControl.DisplayCaptureArgs.Builder(displayToken)
+                            .setSourceCrop(crop)
+                            .setSize(width, height)
+                            .build();
+            final SurfaceControl.ScreenshotHardwareBuffer screenshotBuffer =
+                    SurfaceControl.captureDisplay(captureArgs);
+            return screenshotBuffer == null ? null : screenshotBuffer.asBitmap();
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
+    }
+
+    @Nullable
+    @Override
+    public Bitmap takeSurfaceControlScreenshot(@NonNull SurfaceControl surfaceControl) {
+        synchronized (mLock) {
+            throwIfCalledByNotTrustedUidLocked();
+            throwIfShutdownLocked();
+            throwIfNotConnectedLocked();
+        }
+
+        SurfaceControl.ScreenshotHardwareBuffer captureBuffer;
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            captureBuffer = SurfaceControl.captureLayers(
+                    new SurfaceControl.LayerCaptureArgs.Builder(surfaceControl)
+                            .setChildrenOnly(false)
+                            .build());
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+
+        if (captureBuffer == null) {
+            return null;
+        }
+        return captureBuffer.asBitmap();
     }
 
     @Override
@@ -331,6 +394,22 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
         }
     }
 
+    @Override
+    @Nullable
+    public List<String> getAdoptedShellPermissions() throws RemoteException {
+        synchronized (mLock) {
+            throwIfCalledByNotTrustedUidLocked();
+            throwIfShutdownLocked();
+            throwIfNotConnectedLocked();
+        }
+        final long identity = Binder.clearCallingIdentity();
+        try {
+            return mActivityManager.getDelegatedShellPermissions();
+        } finally {
+            Binder.restoreCallingIdentity(identity);
+        }
+    }
+
     public class Repeater implements Runnable {
         // Continuously read readFrom and write back to writeTo until EOF is encountered
         private final InputStream readFrom;
@@ -364,6 +443,13 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
     @Override
     public void executeShellCommand(final String command, final ParcelFileDescriptor sink,
             final ParcelFileDescriptor source) throws RemoteException {
+        executeShellCommandWithStderr(command, sink, source, null /* stderrSink */);
+    }
+
+    @Override
+    public void executeShellCommandWithStderr(final String command, final ParcelFileDescriptor sink,
+            final ParcelFileDescriptor source, final ParcelFileDescriptor stderrSink)
+            throws RemoteException {
         synchronized (mLock) {
             throwIfCalledByNotTrustedUidLocked();
             throwIfShutdownLocked();
@@ -401,6 +487,18 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
             writeToProcess = null;
         }
 
+        // Read from process stderr and write to pipe
+        final Thread readStderrFromProcess;
+        if (stderrSink != null) {
+            InputStream sink_in = process.getErrorStream();
+            OutputStream sink_out = new FileOutputStream(stderrSink.getFileDescriptor());
+
+            readStderrFromProcess = new Thread(new Repeater(sink_in, sink_out));
+            readStderrFromProcess.start();
+        } else {
+            readStderrFromProcess = null;
+        }
+
         Thread cleanup = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -411,14 +509,18 @@ public final class UiAutomationConnection extends IUiAutomationConnection.Stub {
                     if (readFromProcess != null) {
                         readFromProcess.join();
                     }
+                    if (readStderrFromProcess != null) {
+                        readStderrFromProcess.join();
+                    }
                 } catch (InterruptedException exc) {
                     Log.e(TAG, "At least one of the threads was interrupted");
                 }
                 IoUtils.closeQuietly(sink);
                 IoUtils.closeQuietly(source);
+                IoUtils.closeQuietly(stderrSink);
                 process.destroy();
-                }
-            });
+            }
+        });
         cleanup.start();
     }
 

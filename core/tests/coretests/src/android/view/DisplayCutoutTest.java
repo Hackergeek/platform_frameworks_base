@@ -19,9 +19,15 @@ package android.view;
 import static android.view.DisplayCutout.NO_CUTOUT;
 import static android.view.DisplayCutout.extractBoundsFromList;
 import static android.view.DisplayCutout.fromSpec;
+import static android.view.Surface.ROTATION_0;
+import static android.view.Surface.ROTATION_180;
+import static android.view.Surface.ROTATION_270;
+import static android.view.Surface.ROTATION_90;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -30,6 +36,7 @@ import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
 import android.graphics.Insets;
+import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Parcel;
 import android.platform.test.annotations.Presubmit;
@@ -130,6 +137,8 @@ public class DisplayCutoutTest {
     @Test
     public void testHasCutout_noCutout() throws Exception {
         assertTrue(NO_CUTOUT.isBoundsEmpty());
+        assertThat(NO_CUTOUT.getWaterfallInsets(), equalTo(Insets.NONE));
+        assertThat(NO_CUTOUT.getCutoutPath(), nullValue());
     }
 
     @Test
@@ -162,6 +171,59 @@ public class DisplayCutoutTest {
         DisplayCutout cutout =
                 createCutoutWaterfallOnly(Insets.of(5, 6, 7, 8));
         assertEquals(Insets.of(5, 6, 7, 8), cutout.getWaterfallInsets());
+    }
+
+    @Test
+    public void testGetCutoutPath() throws Exception {
+        final String cutoutSpecString = "L1,0 L1,1 L0,1 z";
+        final int displayWidth = 200;
+        final int displayHeight = 400;
+        final float density = 1f;
+        final DisplayCutout cutout = fromSpec(cutoutSpecString, displayWidth, displayHeight,
+                density, Insets.NONE);
+        assertThat(cutout.getCutoutPath(), notNullValue());
+    }
+
+    @Test
+    public void testGetCutoutPath_caches() throws Exception {
+        final String cutoutSpecString = "L1,0 L1,1 L0,1 z";
+        final int displayWidth = 200;
+        final int displayHeight = 400;
+        final float density = 1f;
+        final Path first = fromSpec(cutoutSpecString, displayWidth, displayHeight,
+                density, Insets.NONE).getCutoutPath();
+        final Path second = fromSpec(cutoutSpecString, displayWidth, displayHeight,
+                density, Insets.NONE).getCutoutPath();
+        assertThat(first, equalTo(second));
+    }
+
+    @Test
+    public void testGetCutoutPath_wontCacheIfCutoutPathParerInfoChanged() throws Exception {
+        final int displayWidth = 200;
+        final int displayHeight = 400;
+        final float density = 1f;
+        final Path first = fromSpec("L1,0 L1,1 L0,1 z", displayWidth, displayHeight,
+                density, Insets.NONE).getCutoutPath();
+        final Path second = fromSpec("L2,0 L2,2 L0,2 z", displayWidth, displayHeight,
+                density, Insets.NONE).getCutoutPath();
+        assertThat(first, not(equalTo(second)));
+    }
+
+    @Test
+    public void testGetCutoutPathParserInfo() throws Exception {
+        final String cutoutSpecString = "L1,0 L1,1 L0,1 z";
+        final int displayWidth = 200;
+        final int displayHeight = 400;
+        final float density = 1f;
+        final DisplayCutout cutout = fromSpec(cutoutSpecString, displayWidth, displayHeight,
+                density, Insets.NONE);
+        assertThat(displayWidth, equalTo(cutout.getCutoutPathParserInfo().getDisplayWidth()));
+        assertThat(displayHeight, equalTo(cutout.getCutoutPathParserInfo().getDisplayHeight()));
+        assertThat(density, equalTo(cutout.getCutoutPathParserInfo().getDensity()));
+        assertThat(cutoutSpecString.trim(),
+                equalTo(cutout.getCutoutPathParserInfo().getCutoutSpec()));
+        assertThat(0, equalTo(cutout.getCutoutPathParserInfo().getRotation()));
+        assertThat(1f, equalTo(cutout.getCutoutPathParserInfo().getScale()));
     }
 
     @Test
@@ -439,6 +501,74 @@ public class DisplayCutoutTest {
                 new ParcelableWrapper(mCutoutNumbers));
     }
 
+    @Test
+    public void testGetRotatedBounds_top_rot0() {
+        int displayW = 500, displayH = 1000;
+        DisplayCutout expected = new DisplayCutout(Insets.of(20, 100, 20, 0),
+                ZERO_RECT, new Rect(50, 0, 75, 100), ZERO_RECT, ZERO_RECT,
+                Insets.of(20, 0, 20, 0));
+        DisplayCutout cutout = new DisplayCutout(Insets.of(20, 100, 20, 0),
+                ZERO_RECT, new Rect(50, 0, 75, 100), ZERO_RECT, ZERO_RECT,
+                Insets.of(20, 0, 20, 0));
+        DisplayCutout rotated = cutout.getRotated(displayW, displayH, ROTATION_0, ROTATION_0);
+        assertEquals(expected, rotated);
+    }
+
+    @Test
+    public void testGetRotatedBounds_top_rot90() {
+        int displayW = 500, displayH = 1000;
+        DisplayCutout expected = new DisplayCutout(Insets.of(100, 20, 0, 20),
+                new Rect(0, displayW - 75, 100, displayW - 50), ZERO_RECT, ZERO_RECT, ZERO_RECT,
+                Insets.of(0, 20, 0, 20), createParserInfo(ROTATION_90));
+        DisplayCutout cutout = new DisplayCutout(Insets.of(20, 100, 20, 0),
+                ZERO_RECT, new Rect(50, 0, 75, 100), ZERO_RECT, ZERO_RECT,
+                Insets.of(20, 0, 20, 0));
+        DisplayCutout rotated = cutout.getRotated(displayW, displayH, ROTATION_0, ROTATION_90);
+        assertEquals(expected, rotated);
+    }
+
+    @Test
+    public void testGetRotatedBounds_top_rot180() {
+        int displayW = 500, displayH = 1000;
+        DisplayCutout expected = new DisplayCutout(Insets.of(20, 0, 20, 100),
+                ZERO_RECT, ZERO_RECT, ZERO_RECT,
+                new Rect(displayW - 75, displayH - 100, displayW - 50, displayH - 0),
+                Insets.of(20, 0, 20, 0), createParserInfo(ROTATION_180));
+        DisplayCutout cutout = new DisplayCutout(Insets.of(20, 100, 20, 0),
+                ZERO_RECT, new Rect(50, 0, 75, 100), ZERO_RECT, ZERO_RECT,
+                Insets.of(20, 0, 20, 0));
+        DisplayCutout rotated = cutout.getRotated(displayW, displayH, ROTATION_0, ROTATION_180);
+        assertEquals(expected, rotated);
+    }
+
+    @Test
+    public void testGetRotatedBounds_top_rot270() {
+        int displayW = 500, displayH = 1000;
+        DisplayCutout expected = new DisplayCutout(Insets.of(0, 20, 100, 20),
+                ZERO_RECT, ZERO_RECT, new Rect(displayH - 100, 50, displayH - 0, 75), ZERO_RECT,
+                Insets.of(0, 20, 0, 20), createParserInfo(ROTATION_270));
+        DisplayCutout cutout = new DisplayCutout(Insets.of(20, 100, 20, 0),
+                ZERO_RECT, new Rect(50, 0, 75, 100), ZERO_RECT, ZERO_RECT,
+                Insets.of(20, 0, 20, 0));
+        DisplayCutout rotated = cutout.getRotated(displayW, displayH, ROTATION_0, ROTATION_270);
+        assertEquals(expected, rotated);
+    }
+
+    @Test
+    public void testGetRotatedBounds_top_rot90to180() {
+        int displayW = 500, displayH = 1000;
+        DisplayCutout expected = new DisplayCutout(Insets.of(20, 0, 20, 100),
+                ZERO_RECT, ZERO_RECT, ZERO_RECT,
+                new Rect(displayW - 75, displayH - 100, displayW - 50, displayH - 0),
+                Insets.of(20, 0, 20, 0), createParserInfo(ROTATION_180));
+        DisplayCutout cutout = new DisplayCutout(Insets.of(100, 20, 0, 20),
+                new Rect(0, displayW - 75, 100, displayW - 50), ZERO_RECT, ZERO_RECT, ZERO_RECT,
+                Insets.of(0, 20, 0, 20));
+        // starting from 90, so the start displayW/H are swapped:
+        DisplayCutout rotated = cutout.getRotated(displayH, displayW, ROTATION_90, ROTATION_180);
+        assertEquals(expected, rotated);
+    }
+
     private static DisplayCutout createCutoutTop() {
         return createCutoutWithInsets(0, 100, 0, 0);
     }
@@ -474,5 +604,13 @@ public class DisplayCutoutTest {
                 ZERO_RECT,
                 ZERO_RECT,
                 waterfallInsets);
+    }
+
+    private static DisplayCutout.CutoutPathParserInfo createParserInfo(
+            @Surface.Rotation int rotation) {
+        return new DisplayCutout.CutoutPathParserInfo(
+                0 /* displayWidth */, 0 /* displayHeight */, 0 /* displayWidth */,
+                0 /* displayHeight */, 0f /* density */, "" /* cutoutSpec */,
+                rotation, 0f /* scale */, 0f /* displaySizeRatio */);
     }
 }

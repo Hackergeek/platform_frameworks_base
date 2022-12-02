@@ -34,7 +34,8 @@ public interface ChooserActivityLogger {
             int appProvidedApp, boolean isWorkprofile, int previewType, String intent);
 
     /** Logs a UiEventReported event for the system sharesheet when the user selects a target. */
-    void logShareTargetSelected(int targetType, String packageName, int positionPicked);
+    void logShareTargetSelected(int targetType, String packageName, int positionPicked,
+            boolean isPinned);
 
     /** Logs a UiEventReported event for the system sharesheet being triggered by the user. */
     default void logSharesheetTriggered() {
@@ -72,6 +73,20 @@ public interface ChooserActivityLogger {
     default void logSharesheetExpansionChanged(boolean isCollapsed) {
         log(isCollapsed ? SharesheetStandardEvent.SHARESHEET_COLLAPSED :
                 SharesheetStandardEvent.SHARESHEET_EXPANDED, getInstanceId());
+    }
+
+    /**
+     * Logs a UiEventReported event for the system sharesheet app share ranking timing out.
+     */
+    default void logSharesheetAppShareRankingTimeout() {
+        log(SharesheetStandardEvent.SHARESHEET_APP_SHARE_RANKING_TIMEOUT, getInstanceId());
+    }
+
+    /**
+     * Logs a UiEventReported event for the system sharesheet when direct share row is empty.
+     */
+    default void logSharesheetEmptyDirectShareRow() {
+        log(SharesheetStandardEvent.SHARESHEET_EMPTY_DIRECT_SHARE_ROW, getInstanceId());
     }
 
     /**
@@ -116,7 +131,11 @@ public interface ChooserActivityLogger {
         @UiEvent(doc = "User selected a standard target.")
         SHARESHEET_STANDARD_TARGET_SELECTED(234),
         @UiEvent(doc = "User selected the copy target.")
-        SHARESHEET_COPY_TARGET_SELECTED(235);
+        SHARESHEET_COPY_TARGET_SELECTED(235),
+        @UiEvent(doc = "User selected the nearby target.")
+        SHARESHEET_NEARBY_TARGET_SELECTED(626),
+        @UiEvent(doc = "User selected the edit target.")
+        SHARESHEET_EDIT_TARGET_SELECTED(669);
 
         private final int mId;
         SharesheetTargetSelectedEvent(int id) {
@@ -136,6 +155,10 @@ public interface ChooserActivityLogger {
                     return SHARESHEET_STANDARD_TARGET_SELECTED;
                 case ChooserActivity.SELECTION_TYPE_COPY:
                     return SHARESHEET_COPY_TARGET_SELECTED;
+                case ChooserActivity.SELECTION_TYPE_NEARBY:
+                    return SHARESHEET_NEARBY_TARGET_SELECTED;
+                case ChooserActivity.SELECTION_TYPE_EDIT:
+                    return SHARESHEET_EDIT_TARGET_SELECTED;
                 default:
                     return INVALID;
             }
@@ -160,7 +183,11 @@ public interface ChooserActivityLogger {
         @UiEvent(doc = "Sharesheet direct targets is fully populated.")
         SHARESHEET_DIRECT_LOAD_COMPLETE(323),
         @UiEvent(doc = "Sharesheet direct targets timed out.")
-        SHARESHEET_DIRECT_LOAD_TIMEOUT(324);
+        SHARESHEET_DIRECT_LOAD_TIMEOUT(324),
+        @UiEvent(doc = "Sharesheet app share ranking timed out.")
+        SHARESHEET_APP_SHARE_RANKING_TIMEOUT(831),
+        @UiEvent(doc = "Sharesheet empty direct share row.")
+        SHARESHEET_EMPTY_DIRECT_SHARE_ROW(828);
 
         private final int mId;
         SharesheetStandardEvent(int id) {

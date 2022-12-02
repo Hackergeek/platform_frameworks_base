@@ -130,7 +130,7 @@ public class AccessPointTest {
         mContext = InstrumentationRegistry.getTargetContext();
         mMaxSignalLevel = mContext.getSystemService(WifiManager.class).getMaxSignalLevel();
         mWifiInfo = new WifiInfo();
-        mWifiInfo.setSSID(WifiSsid.createFromAsciiEncoded(TEST_SSID));
+        mWifiInfo.setSSID(WifiSsid.fromString(TEST_SSID));
         mWifiInfo.setBSSID(TEST_BSSID);
         mScanResults = buildScanResultCache(TEST_SSID);
         mRoamingScans = buildScanResultCache(ROAMING_SSID);
@@ -145,6 +145,17 @@ public class AccessPointTest {
         final CharSequence ssid = ap.getSsid();
 
         assertThat(ssid instanceof SpannableString).isFalse();
+    }
+
+    @Test
+    public void testCompareTo_GivesNull() {
+        WifiConfiguration spyConfig = spy(new WifiConfiguration());
+
+        when(spyConfig.isPasspoint()).thenReturn(true);
+        spyConfig.providerFriendlyName = null;
+        AccessPoint passpointAp = new AccessPoint(mContext, spyConfig);
+
+        assertThat(passpointAp.getTitle()).isEqualTo("");
     }
 
     @Test
@@ -307,7 +318,7 @@ public class AccessPointTest {
                 new NetworkInfo(ConnectivityManager.TYPE_WIFI, 2, "WIFI", "WIFI_SUBTYPE");
         AccessPoint accessPoint = new AccessPoint(mContext, configuration);
         WifiInfo wifiInfo = new WifiInfo();
-        wifiInfo.setSSID(WifiSsid.createFromAsciiEncoded(configuration.SSID));
+        wifiInfo.setSSID(WifiSsid.fromString(configuration.SSID));
         wifiInfo.setBSSID(configuration.BSSID);
         wifiInfo.setNetworkId(configuration.networkId);
         accessPoint.update(configuration, wifiInfo, networkInfo);
@@ -323,7 +334,7 @@ public class AccessPointTest {
                 new NetworkInfo(ConnectivityManager.TYPE_WIFI, 2, "WIFI", "WIFI_SUBTYPE");
         AccessPoint accessPoint = new AccessPoint(mContext, configuration);
         WifiInfo wifiInfo = new WifiInfo();
-        wifiInfo.setSSID(WifiSsid.createFromAsciiEncoded(configuration.SSID));
+        wifiInfo.setSSID(WifiSsid.fromString(configuration.SSID));
         wifiInfo.setBSSID(configuration.BSSID);
         wifiInfo.setNetworkId(configuration.networkId);
         wifiInfo.setMeteredHint(true);
@@ -356,7 +367,7 @@ public class AccessPointTest {
                 new NetworkInfo(ConnectivityManager.TYPE_WIFI, 2, "WIFI", "WIFI_SUBTYPE");
         AccessPoint accessPoint = new AccessPoint(mContext, configuration);
         WifiInfo wifiInfo = new WifiInfo();
-        wifiInfo.setSSID(WifiSsid.createFromAsciiEncoded(configuration.SSID));
+        wifiInfo.setSSID(WifiSsid.fromString(configuration.SSID));
         wifiInfo.setBSSID(configuration.BSSID);
         wifiInfo.setNetworkId(configuration.networkId);
         accessPoint.update(configuration, wifiInfo, networkInfo);
@@ -507,7 +518,7 @@ public class AccessPointTest {
         final String connectedViaAppResourceString = "Connected via ";
 
         WifiInfo wifiInfo = new WifiInfo();
-        wifiInfo.setSSID(WifiSsid.createFromAsciiEncoded(TEST_SSID));
+        wifiInfo.setSSID(WifiSsid.fromString(TEST_SSID));
         wifiInfo.setEphemeral(true);
         wifiInfo.setRequestingPackageName(appPackageName);
         wifiInfo.setRssi(rssi);
@@ -574,7 +585,7 @@ public class AccessPointTest {
     private WifiConfiguration createWifiConfiguration() {
         WifiConfiguration configuration = new WifiConfiguration();
         configuration.BSSID = "bssid";
-        configuration.SSID = "ssid";
+        configuration.SSID = "\"ssid\"";
         configuration.networkId = 123;
         return configuration;
     }
@@ -683,6 +694,16 @@ public class AccessPointTest {
         assertThat(ap.getTitle()).isEqualTo(providerFriendlyName);
     }
 
+    // This method doesn't copy mIsFailover, mIsAvailable and mIsRoaming because NetworkInfo
+    // doesn't expose those three set methods. But that's fine since the tests don't use those three
+    // variables.
+    private NetworkInfo copyNetworkInfo(NetworkInfo ni) {
+        final NetworkInfo copy = new NetworkInfo(ni.getType(), ni.getSubtype(), ni.getTypeName(),
+                ni.getSubtypeName());
+        copy.setDetailedState(ni.getDetailedState(), ni.getReason(), ni.getExtraInfo());
+        return copy;
+    }
+
     @Test
     public void testUpdateNetworkInfo_returnsTrue() {
         int networkId = 123;
@@ -704,7 +725,7 @@ public class AccessPointTest {
                 .setWifiInfo(wifiInfo)
                 .build();
 
-        NetworkInfo newInfo = new NetworkInfo(networkInfo);
+        NetworkInfo newInfo = copyNetworkInfo(networkInfo);
         newInfo.setDetailedState(NetworkInfo.DetailedState.CONNECTED, "", "");
         assertThat(ap.update(config, wifiInfo, newInfo)).isTrue();
     }
@@ -730,7 +751,7 @@ public class AccessPointTest {
                 .setWifiInfo(wifiInfo)
                 .build();
 
-        NetworkInfo newInfo = new NetworkInfo(networkInfo); // same values
+        NetworkInfo newInfo = copyNetworkInfo(networkInfo); // same values
         assertThat(ap.update(config, wifiInfo, newInfo)).isFalse();
     }
 
@@ -755,7 +776,7 @@ public class AccessPointTest {
                 .setWifiInfo(wifiInfo)
                 .build();
 
-        NetworkInfo newInfo = new NetworkInfo(networkInfo); // same values
+        NetworkInfo newInfo = copyNetworkInfo(networkInfo); // same values
         wifiInfo.setRssi(rssi + 1);
         assertThat(ap.update(config, wifiInfo, newInfo)).isTrue();
     }
@@ -781,7 +802,7 @@ public class AccessPointTest {
                 .setWifiInfo(wifiInfo)
                 .build();
 
-        NetworkInfo newInfo = new NetworkInfo(networkInfo); // same values
+        NetworkInfo newInfo = copyNetworkInfo(networkInfo); // same values
         wifiInfo.setRssi(WifiInfo.INVALID_RSSI);
         assertThat(ap.update(config, wifiInfo, newInfo)).isFalse();
     }
@@ -1003,7 +1024,7 @@ public class AccessPointTest {
 
         WifiInfo info = new WifiInfo();
         info.setRssi(DEFAULT_RSSI);
-        info.setSSID(WifiSsid.createFromAsciiEncoded(TEST_SSID));
+        info.setSSID(WifiSsid.fromString(TEST_SSID));
         info.setBSSID(bssid);
         info.setNetworkId(NETWORK_ID);
 

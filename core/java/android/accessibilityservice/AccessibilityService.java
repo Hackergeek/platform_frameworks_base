@@ -16,8 +16,13 @@
 
 package android.accessibilityservice;
 
+import static android.accessibilityservice.MagnificationConfig.MAGNIFICATION_MODE_FULLSCREEN;
+import static android.view.WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY;
+
 import android.accessibilityservice.GestureDescription.MotionEventGenerator;
 import android.annotation.CallbackExecutor;
+import android.annotation.CheckResult;
+import android.annotation.ColorInt;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
@@ -26,6 +31,7 @@ import android.annotation.TestApi;
 import android.app.Service;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.pm.ParceledListSlice;
 import android.graphics.Bitmap;
@@ -33,7 +39,9 @@ import android.graphics.ColorSpace;
 import android.graphics.ParcelableColorSpace;
 import android.graphics.Region;
 import android.hardware.HardwareBuffer;
+import android.hardware.display.DisplayManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -47,18 +55,27 @@ import android.util.Slog;
 import android.util.SparseArray;
 import android.view.Display;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.SurfaceView;
 import android.view.WindowManager;
 import android.view.WindowManagerImpl;
+import android.view.accessibility.AccessibilityCache;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityInteractionClient;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
 import android.view.accessibility.AccessibilityWindowInfo;
+import android.view.inputmethod.EditorInfo;
 
+import com.android.internal.inputmethod.CancellationGroup;
+import com.android.internal.inputmethod.IAccessibilityInputMethodSession;
+import com.android.internal.inputmethod.IAccessibilityInputMethodSessionCallback;
+import com.android.internal.inputmethod.IRemoteAccessibilityInputConnection;
+import com.android.internal.inputmethod.RemoteAccessibilityInputConnection;
 import com.android.internal.os.HandlerCaller;
 import com.android.internal.os.SomeArgs;
 import com.android.internal.util.Preconditions;
+import com.android.internal.util.function.pooled.PooledLambda;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -100,14 +117,14 @@ import java.util.function.Consumer;
  * An accessibility is declared as any other service in an AndroidManifest.xml, but it
  * must do two things:
  * <ul>
- *     <ol>
+ *     <li>
  *         Specify that it handles the "android.accessibilityservice.AccessibilityService"
  *         {@link android.content.Intent}.
- *     </ol>
- *     <ol>
+ *     </li>
+ *     <li>
  *         Request the {@link android.Manifest.permission#BIND_ACCESSIBILITY_SERVICE} permission to
  *         ensure that only the system can bind to it.
- *     </ol>
+ *     </li>
  * </ul>
  * If either of these items is missing, the system will ignore the accessibility service.
  * Following is an example declaration:
@@ -222,7 +239,7 @@ import java.util.function.Consumer;
  * <ul>
  * <li>{@link AccessibilityServiceInfo#FEEDBACK_AUDIBLE}</li>
  * <li>{@link AccessibilityServiceInfo#FEEDBACK_HAPTIC}</li>
- * <li>{@link AccessibilityServiceInfo#FEEDBACK_AUDIBLE}</li>
+ * <li>{@link AccessibilityServiceInfo#FEEDBACK_SPOKEN}</li>
  * <li>{@link AccessibilityServiceInfo#FEEDBACK_VISUAL}</li>
  * <li>{@link AccessibilityServiceInfo#FEEDBACK_GENERIC}</li>
  * <li>{@link AccessibilityServiceInfo#FEEDBACK_BRAILLE}</li>
@@ -232,6 +249,29 @@ import java.util.function.Consumer;
  * @see android.view.accessibility.AccessibilityManager
  */
 public abstract class AccessibilityService extends Service {
+
+    /**
+     * The user has performed a touch-exploration gesture on the touch screen without ever
+     * triggering gesture detection. This gesture is only dispatched when {@link
+     * AccessibilityServiceInfo#FLAG_SEND_MOTION_EVENTS} is set.
+     *
+     * @hide
+     */
+    public static final int GESTURE_TOUCH_EXPLORATION = -2;
+
+    /**
+     * The user has performed a passthrough gesture on the touch screen without ever triggering
+     * gesture detection. This gesture is only dispatched when {@link
+     * AccessibilityServiceInfo#FLAG_SEND_MOTION_EVENTS} is set.
+     * @hide
+     */
+    public static final int GESTURE_PASSTHROUGH = -1;
+
+    /**
+     * The user has performed an unrecognized gesture on the touch screen. This gesture is only
+     * dispatched when {@link AccessibilityServiceInfo#FLAG_SEND_MOTION_EVENTS} is set.
+     */
+    public static final int GESTURE_UNKNOWN = 0;
 
     /**
      * The user has performed a swipe up gesture on the touch screen.
@@ -420,6 +460,15 @@ public abstract class AccessibilityService extends Service {
     /** The user has performed a three-finger double tap and hold gesture on the touch screen. */
     public static final int GESTURE_3_FINGER_DOUBLE_TAP_AND_HOLD = 41;
 
+    /** The user has performed a two-finger  triple-tap and hold gesture on the touch screen. */
+    public static final int GESTURE_2_FINGER_TRIPLE_TAP_AND_HOLD = 43;
+
+    /** The user has performed a three-finger  single-tap and hold gesture on the touch screen. */
+    public static final int GESTURE_3_FINGER_SINGLE_TAP_AND_HOLD = 44;
+
+    /** The user has performed a three-finger  triple-tap and hold gesture on the touch screen. */
+    public static final int GESTURE_3_FINGER_TRIPLE_TAP_AND_HOLD = 45;
+
     /** The user has performed a two-finger double tap and hold gesture on the touch screen. */
     public static final int GESTURE_4_FINGER_DOUBLE_TAP_AND_HOLD = 42;
 
@@ -480,7 +529,9 @@ public abstract class AccessibilityService extends Service {
     public static final int GLOBAL_ACTION_POWER_DIALOG = 6;
 
     /**
-     * Action to toggle docking the current app's window
+     * Action to toggle docking the current app's window.
+     * <p>
+     * <strong>Note:</strong>  It is effective only if it appears in {@link #getSystemActions()}.
      */
     public static final int GLOBAL_ACTION_TOGGLE_SPLIT_SCREEN = 7;
 
@@ -497,34 +548,59 @@ public abstract class AccessibilityService extends Service {
     /**
      * Action to send the KEYCODE_HEADSETHOOK KeyEvent, which is used to answer/hang up calls and
      * play/stop media
-     * @hide
      */
     public static final int GLOBAL_ACTION_KEYCODE_HEADSETHOOK = 10;
 
     /**
      * Action to trigger the Accessibility Button
-     * @hide
      */
     public static final int GLOBAL_ACTION_ACCESSIBILITY_BUTTON = 11;
 
     /**
      * Action to bring up the Accessibility Button's chooser menu
-     * @hide
      */
     public static final int GLOBAL_ACTION_ACCESSIBILITY_BUTTON_CHOOSER = 12;
 
     /**
      * Action to trigger the Accessibility Shortcut. This shortcut has a hardware trigger and can
      * be activated by holding down the two volume keys.
-     * @hide
      */
     public static final int GLOBAL_ACTION_ACCESSIBILITY_SHORTCUT = 13;
 
     /**
      * Action to show Launcher's all apps.
-     * @hide
      */
     public static final int GLOBAL_ACTION_ACCESSIBILITY_ALL_APPS = 14;
+
+    /**
+     * Action to dismiss the notification shade
+     */
+    public static final int GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE = 15;
+
+    /**
+     * Action to trigger dpad up keyevent.
+     */
+    public static final int GLOBAL_ACTION_DPAD_UP = 16;
+
+    /**
+     * Action to trigger dpad down keyevent.
+     */
+    public static final int GLOBAL_ACTION_DPAD_DOWN = 17;
+
+    /**
+     * Action to trigger dpad left keyevent.
+     */
+    public static final int GLOBAL_ACTION_DPAD_LEFT = 18;
+
+    /**
+     * Action to trigger dpad right keyevent.
+     */
+    public static final int GLOBAL_ACTION_DPAD_RIGHT = 19;
+
+    /**
+     * Action to trigger dpad center keyevent.
+     */
+    public static final int GLOBAL_ACTION_DPAD_CENTER = 20;
 
     private static final String LOG_TAG = "AccessibilityService";
 
@@ -543,7 +619,11 @@ public abstract class AccessibilityService extends Service {
         boolean onKeyEvent(KeyEvent event);
         /** Magnification changed callbacks for different displays */
         void onMagnificationChanged(int displayId, @NonNull Region region,
-                float scale, float centerX, float centerY);
+                MagnificationConfig config);
+        /** Callbacks for receiving motion events. */
+        void onMotionEvent(MotionEvent event);
+        /** Callback for tuch state changes. */
+        void onTouchStateChanged(int displayId, int state);
         void onSoftKeyboardShowModeChanged(int showMode);
         void onPerformGestureResult(int sequence, boolean completedSuccessfully);
         void onFingerprintCapturingGesturesChanged(boolean active);
@@ -553,6 +633,11 @@ public abstract class AccessibilityService extends Service {
         void onAccessibilityButtonAvailabilityChanged(boolean available);
         /** This is called when the system action list is changed. */
         void onSystemActionsChanged();
+        /** This is called when an app requests ime sessions or when the service is enabled. */
+        void createImeSession(IAccessibilityInputMethodSessionCallback callback);
+        /** This is called when an app starts input or when the service is enabled. */
+        void startInput(@Nullable RemoteAccessibilityInputConnection inputConnection,
+                @NonNull EditorInfo editorInfo, boolean restarting);
     }
 
     /**
@@ -651,7 +736,7 @@ public abstract class AccessibilityService extends Service {
      * @hide
      */
     @TestApi
-    public static final int ACCESSIBILITY_TAKE_SCREENSHOT_REQUEST_INTERVAL_TIMES_MS = 1000;
+    public static final int ACCESSIBILITY_TAKE_SCREENSHOT_REQUEST_INTERVAL_TIMES_MS = 333;
 
     /** @hide */
     public static final String KEY_ACCESSIBILITY_SCREENSHOT_STATUS =
@@ -682,7 +767,15 @@ public abstract class AccessibilityService extends Service {
     /** List of magnification controllers, mapping from displayId -> MagnificationController. */
     private final SparseArray<MagnificationController> mMagnificationControllers =
             new SparseArray<>(0);
+    /**
+     * List of touch interaction controllers, mapping from displayId -> TouchInteractionController.
+     */
+    private final SparseArray<TouchInteractionController> mTouchInteractionControllers =
+            new SparseArray<>(0);
+
     private SoftKeyboardController mSoftKeyboardController;
+    private InputMethod mInputMethod;
+    private boolean mInputMethodInitialized = false;
     private final SparseArray<AccessibilityButtonController> mAccessibilityButtonControllers =
             new SparseArray<>(0);
 
@@ -693,7 +786,6 @@ public abstract class AccessibilityService extends Service {
     private final Object mLock = new Object();
 
     private FingerprintGestureController mFingerprintGestureController;
-
 
     /**
      * Callback for {@link android.view.accessibility.AccessibilityEvent}s.
@@ -718,6 +810,7 @@ public abstract class AccessibilityService extends Service {
             for (int i = 0; i < mMagnificationControllers.size(); i++) {
                 mMagnificationControllers.valueAt(i).onServiceConnectedLocked();
             }
+            updateInputMethod(getServiceInfo());
         }
         if (mSoftKeyboardController != null) {
             mSoftKeyboardController.onServiceConnected();
@@ -726,6 +819,20 @@ public abstract class AccessibilityService extends Service {
         // The client gets to handle service connection last, after we've set
         // up any state upon which their code may rely.
         onServiceConnected();
+    }
+
+    private void updateInputMethod(AccessibilityServiceInfo info) {
+        if (info != null) {
+            boolean requestIme = (info.flags
+                    & AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR) != 0;
+            if (requestIme && !mInputMethodInitialized) {
+                mInputMethod = onCreateInputMethod();
+                mInputMethodInitialized = true;
+            } else if (!requestIme & mInputMethodInitialized) {
+                mInputMethod = null;
+                mInputMethodInitialized = false;
+            }
+        }
     }
 
     /**
@@ -852,7 +959,7 @@ public abstract class AccessibilityService extends Service {
      *         them, otherwise an empty list.
      */
     public List<AccessibilityWindowInfo> getWindows() {
-        return AccessibilityInteractionClient.getInstance().getWindows(mConnectionId);
+        return AccessibilityInteractionClient.getInstance(this).getWindows(mConnectionId);
     }
 
     /**
@@ -880,7 +987,8 @@ public abstract class AccessibilityService extends Service {
      */
     @NonNull
     public final SparseArray<List<AccessibilityWindowInfo>> getWindowsOnAllDisplays() {
-        return AccessibilityInteractionClient.getInstance().getWindowsOnAllDisplays(mConnectionId);
+        return AccessibilityInteractionClient.getInstance(this).getWindowsOnAllDisplays(
+                mConnectionId);
     }
 
     /**
@@ -889,14 +997,6 @@ public abstract class AccessibilityService extends Service {
      * is currently touching or the window with input focus, if the user is not
      * touching any window. It could be from any logical display.
      * <p>
-     * The currently active window is defined as the window that most recently fired one
-     * of the following events:
-     * {@link AccessibilityEvent#TYPE_WINDOW_STATE_CHANGED},
-     * {@link AccessibilityEvent#TYPE_VIEW_HOVER_ENTER},
-     * {@link AccessibilityEvent#TYPE_VIEW_HOVER_EXIT}.
-     * In other words, the last window shown that also has input focus.
-     * </p>
-     * <p>
      * <strong>Note:</strong> In order to access the root node your service has
      * to declare the capability to retrieve window content by setting the
      * {@link android.R.styleable#AccessibilityService_canRetrieveWindowContent}
@@ -904,9 +1004,29 @@ public abstract class AccessibilityService extends Service {
      * </p>
      *
      * @return The root node if this service can retrieve window content.
+     * @see AccessibilityWindowInfo#isActive() for more explanation about the active window.
      */
     public AccessibilityNodeInfo getRootInActiveWindow() {
-        return AccessibilityInteractionClient.getInstance().getRootInActiveWindow(mConnectionId);
+        return getRootInActiveWindow(AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID);
+    }
+
+    /**
+     * Gets the root node in the currently active window if this service
+     * can retrieve window content. The active window is the one that the user
+     * is currently touching or the window with input focus, if the user is not
+     * touching any window. It could be from any logical display.
+     *
+     * @param prefetchingStrategy the prefetching strategy.
+     * @return The root node if this service can retrieve window content.
+     *
+     * @see #getRootInActiveWindow()
+     * @see AccessibilityNodeInfo#getParent(int) for a description of prefetching.
+     */
+    @Nullable
+    public AccessibilityNodeInfo getRootInActiveWindow(
+            @AccessibilityNodeInfo.PrefetchingStrategy int prefetchingStrategy) {
+        return AccessibilityInteractionClient.getInstance(this).getRootInActiveWindow(
+                mConnectionId, prefetchingStrategy);
     }
 
     /**
@@ -915,7 +1035,7 @@ public abstract class AccessibilityService extends Service {
      */
     public final void disableSelf() {
         final IAccessibilityServiceConnection connection =
-                AccessibilityInteractionClient.getInstance().getConnection(mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (connection != null) {
             try {
                 connection.disableSelf();
@@ -925,30 +1045,31 @@ public abstract class AccessibilityService extends Service {
         }
     }
 
+    @NonNull
     @Override
     public Context createDisplayContext(Display display) {
-        final Context context = super.createDisplayContext(display);
-        final int displayId = display.getDisplayId();
-        setDefaultTokenInternal(context, displayId);
-        return context;
+        return new AccessibilityContext(super.createDisplayContext(display), mConnectionId);
     }
 
-    private void setDefaultTokenInternal(Context context, int displayId) {
-        final WindowManagerImpl wm = (WindowManagerImpl) context.getSystemService(WINDOW_SERVICE);
-        final IAccessibilityServiceConnection connection =
-                AccessibilityInteractionClient.getInstance().getConnection(mConnectionId);
-        IBinder token = null;
-        if (connection != null) {
-            synchronized (mLock) {
-                try {
-                    token = connection.getOverlayWindowToken(displayId);
-                } catch (RemoteException re) {
-                    Log.w(LOG_TAG, "Failed to get window token", re);
-                    re.rethrowFromSystemServer();
-                }
-            }
-            wm.setDefaultToken(token);
+    @NonNull
+    @Override
+    public Context createWindowContext(int type, @Nullable Bundle options) {
+        final Context context = super.createWindowContext(type, options);
+        if (type != TYPE_ACCESSIBILITY_OVERLAY) {
+            return context;
         }
+        return new AccessibilityContext(context, mConnectionId);
+    }
+
+    @NonNull
+    @Override
+    public Context createWindowContext(@NonNull Display display, int type,
+            @Nullable Bundle options) {
+        final Context context = super.createWindowContext(display, type, options);
+        if (type != TYPE_ACCESSIBILITY_OVERLAY) {
+            return context;
+        }
+        return new AccessibilityContext(context, mConnectionId);
     }
 
     /**
@@ -1008,7 +1129,7 @@ public abstract class AccessibilityService extends Service {
     public final @NonNull FingerprintGestureController getFingerprintGestureController() {
         if (mFingerprintGestureController == null) {
             mFingerprintGestureController = new FingerprintGestureController(
-                    AccessibilityInteractionClient.getInstance().getConnection(mConnectionId));
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId));
         }
         return mFingerprintGestureController;
     }
@@ -1040,13 +1161,13 @@ public abstract class AccessibilityService extends Service {
             @Nullable GestureResultCallback callback,
             @Nullable Handler handler) {
         final IAccessibilityServiceConnection connection =
-                AccessibilityInteractionClient.getInstance().getConnection(
-                        mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (connection == null) {
             return false;
         }
+        int sampleTimeMs = calculateGestureSampleTimeMs(gesture.getDisplayId());
         List<GestureDescription.GestureStep> steps =
-                MotionEventGenerator.getGestureStepsFromGestureDescription(gesture, 16);
+                MotionEventGenerator.getGestureStepsFromGestureDescription(gesture, sampleTimeMs);
         try {
             synchronized (mLock) {
                 mGestureStatusCallbackSequence++;
@@ -1065,6 +1186,30 @@ public abstract class AccessibilityService extends Service {
             throw new RuntimeException(re);
         }
         return true;
+    }
+
+    /**
+     * Returns the sample time in millis of gesture steps for the current display.
+     *
+     * <p>For gestures to be smooth they should line up with the refresh rate of the display.
+     * On versions of Android before R, the sample time was fixed to 100ms.
+     */
+    private int calculateGestureSampleTimeMs(int displayId) {
+        if (getApplicationInfo().targetSdkVersion <= Build.VERSION_CODES.Q) {
+            return 100;
+        }
+        Display display = getSystemService(DisplayManager.class).getDisplay(
+                displayId);
+        if (display == null) {
+            return 100;
+        }
+        int msPerSecond = 1000;
+        int sampleTimeMs = (int) (msPerSecond / display.getRefreshRate());
+        if (sampleTimeMs < 1) {
+            // Should be impossible, but do not return 0.
+            return 100;
+        }
+        return sampleTimeMs;
     }
 
     void onPerformGestureResult(int sequence, final boolean completedSuccessfully) {
@@ -1102,14 +1247,14 @@ public abstract class AccessibilityService extends Service {
         }
     }
 
-    private void onMagnificationChanged(int displayId, @NonNull Region region, float scale,
-            float centerX, float centerY) {
+    private void onMagnificationChanged(int displayId, @NonNull Region region,
+            MagnificationConfig config) {
         MagnificationController controller;
         synchronized (mLock) {
             controller = mMagnificationControllers.get(displayId);
         }
         if (controller != null) {
-            controller.dispatchMagnificationChanged(region, scale, centerX, centerY);
+            controller.dispatchMagnificationChanged(region, config);
         }
     }
 
@@ -1127,6 +1272,10 @@ public abstract class AccessibilityService extends Service {
      */
     private void onFingerprintGesture(int gesture) {
         getFingerprintGestureController().onGesture(gesture);
+    }
+
+    int getConnectionId() {
+        return mConnectionId;
     }
 
     /**
@@ -1228,7 +1377,7 @@ public abstract class AccessibilityService extends Service {
 
         private void setMagnificationCallbackEnabled(boolean enabled) {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
@@ -1243,8 +1392,8 @@ public abstract class AccessibilityService extends Service {
          * Dispatches magnification changes to any registered listeners. This
          * should be called on the service's main thread.
          */
-        void dispatchMagnificationChanged(final @NonNull Region region, final float scale,
-                final float centerX, final float centerY) {
+        void dispatchMagnificationChanged(final @NonNull Region region,
+                final MagnificationConfig config) {
             final ArrayMap<OnMagnificationChangedListener, Handler> entries;
             synchronized (mLock) {
                 if (mListeners == null || mListeners.isEmpty()) {
@@ -1263,18 +1412,41 @@ public abstract class AccessibilityService extends Service {
                 final OnMagnificationChangedListener listener = entries.keyAt(i);
                 final Handler handler = entries.valueAt(i);
                 if (handler != null) {
-                    handler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            listener.onMagnificationChanged(MagnificationController.this,
-                                    region, scale, centerX, centerY);
-                        }
+                    handler.post(() -> {
+                        listener.onMagnificationChanged(MagnificationController.this,
+                                region, config);
                     });
                 } else {
                     // We're already on the main thread, just run the listener.
-                    listener.onMagnificationChanged(this, region, scale, centerX, centerY);
+                    listener.onMagnificationChanged(this, region, config);
                 }
             }
+        }
+
+        /**
+         * Gets the {@link MagnificationConfig} of the controlling magnifier on the display.
+         * <p>
+         * <strong>Note:</strong> If the service is not yet connected (e.g.
+         * {@link AccessibilityService#onServiceConnected()} has not yet been
+         * called) or the service has been disconnected, this method will
+         * return null.
+         * </p>
+         *
+         * @return the magnification config that the service controls
+         */
+        public @Nullable MagnificationConfig getMagnificationConfig() {
+            final IAccessibilityServiceConnection connection =
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
+                            mService.mConnectionId);
+            if (connection != null) {
+                try {
+                    return connection.getMagnificationConfig(mDisplayId);
+                } catch (RemoteException re) {
+                    Log.w(LOG_TAG, "Failed to obtain magnification config", re);
+                    re.rethrowFromSystemServer();
+                }
+            }
+            return null;
         }
 
         /**
@@ -1284,12 +1456,20 @@ public abstract class AccessibilityService extends Service {
          * {@link AccessibilityService#onServiceConnected()} has not yet been
          * called) or the service has been disconnected, this method will
          * return a default value of {@code 1.0f}.
+         * </p>
+         * <p>
+         * <strong>Note:</strong> This legacy API gets the scale of full-screen
+         * magnification. To get the scale of the current controlling magnifier,
+         * use {@link #getMagnificationConfig} instead.
+         * </p>
          *
          * @return the current magnification scale
+         * @deprecated Use {@link #getMagnificationConfig()} instead
          */
+        @Deprecated
         public float getScale() {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
@@ -1312,13 +1492,21 @@ public abstract class AccessibilityService extends Service {
          * {@link AccessibilityService#onServiceConnected()} has not yet been
          * called) or the service has been disconnected, this method will
          * return a default value of {@code 0.0f}.
+         * </p>
+         * <p>
+         * <strong>Note:</strong> This legacy API gets the center position of full-screen
+         * magnification. To get the magnification center of the current controlling magnifier,
+         * use {@link #getMagnificationConfig} instead.
+         * </p>
          *
          * @return the unscaled screen-relative X coordinate of the center of
          *         the magnified region
+         * @deprecated Use {@link #getMagnificationConfig()} instead
          */
+        @Deprecated
         public float getCenterX() {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
@@ -1341,13 +1529,21 @@ public abstract class AccessibilityService extends Service {
          * {@link AccessibilityService#onServiceConnected()} has not yet been
          * called) or the service has been disconnected, this method will
          * return a default value of {@code 0.0f}.
+         * </p>
+         * <p>
+         * <strong>Note:</strong> This legacy API gets the center position of full-screen
+         * magnification. To get the magnification center of the current controlling magnifier,
+         * use {@link #getMagnificationConfig} instead.
+         * </p>
          *
          * @return the unscaled screen-relative Y coordinate of the center of
          *         the magnified region
+         * @deprecated Use {@link #getMagnificationConfig()} instead
          */
+        @Deprecated
         public float getCenterY() {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
@@ -1374,20 +1570,67 @@ public abstract class AccessibilityService extends Service {
          * {@link AccessibilityService#onServiceConnected()} has not yet been
          * called) or the service has been disconnected, this method will
          * return an empty region.
+         * </p>
+         * <p>
+         * <strong>Note:</strong> This legacy API gets the magnification region of full-screen
+         * magnification. To get the magnification region of the current controlling magnifier,
+         * use {@link #getCurrentMagnificationRegion()} instead.
+         * </p>
          *
          * @return the region of the screen currently active for magnification, or an empty region
          * if magnification is not active.
+         * @deprecated Use {@link #getCurrentMagnificationRegion()} instead
          */
+        @Deprecated
         @NonNull
         public Region getMagnificationRegion() {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
                     return connection.getMagnificationRegion(mDisplayId);
                 } catch (RemoteException re) {
                     Log.w(LOG_TAG, "Failed to obtain magnified region", re);
+                    re.rethrowFromSystemServer();
+                }
+            }
+            return Region.obtain();
+        }
+
+        /**
+         * Returns the region of the screen currently active for magnification if the
+         * controlling magnification is {@link MagnificationConfig#MAGNIFICATION_MODE_FULLSCREEN}.
+         * Returns the region of screen projected on the magnification window if the
+         * controlling magnification is {@link MagnificationConfig#MAGNIFICATION_MODE_WINDOW}.
+         *
+         * <p>
+         * If the controlling mode is {@link MagnificationConfig#MAGNIFICATION_MODE_FULLSCREEN},
+         * the returned region will be empty if the magnification is
+         * not active. And the magnification is active if magnification gestures are enabled
+         * or if a service is running that can control magnification.
+         * </p><p>
+         * If the controlling mode is {@link MagnificationConfig#MAGNIFICATION_MODE_WINDOW},
+         * the returned region will be empty if the magnification is not activated.
+         * </p><p>
+         * <strong>Note:</strong> If the service is not yet connected (e.g.
+         * {@link AccessibilityService#onServiceConnected()} has not yet been
+         * called) or the service has been disconnected, this method will
+         * return an empty region.
+         * </p>
+         *
+         * @return the magnification region of the currently controlling magnification
+         */
+        @NonNull
+        public Region getCurrentMagnificationRegion() {
+            final IAccessibilityServiceConnection connection =
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
+                            mService.mConnectionId);
+            if (connection != null) {
+                try {
+                    return connection.getCurrentMagnificationRegion(mDisplayId);
+                } catch (RemoteException re) {
+                    Log.w(LOG_TAG, "Failed to obtain the current magnified region", re);
                     re.rethrowFromSystemServer();
                 }
             }
@@ -1402,6 +1645,11 @@ public abstract class AccessibilityService extends Service {
          * {@link AccessibilityService#onServiceConnected()} has not yet been
          * called) or the service has been disconnected, this method will have
          * no effect and return {@code false}.
+         * <p>
+         * <strong>Note:</strong> This legacy API reset full-screen magnification.
+         * To reset the current controlling magnifier, use
+         * {@link #resetCurrentMagnification(boolean)} ()} instead.
+         * </p>
          *
          * @param animate {@code true} to animate from the current scale and
          *                center or {@code false} to reset the scale and center
@@ -1410,7 +1658,7 @@ public abstract class AccessibilityService extends Service {
          */
         public boolean reset(boolean animate) {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
@@ -1424,26 +1672,96 @@ public abstract class AccessibilityService extends Service {
         }
 
         /**
+         * Resets magnification scale and center of the controlling magnification
+         * to their default (e.g. no magnification) values.
+         * <p>
+         * <strong>Note:</strong> If the service is not yet connected (e.g.
+         * {@link AccessibilityService#onServiceConnected()} has not yet been
+         * called) or the service has been disconnected, this method will have
+         * no effect and return {@code false}.
+         * </p>
+         *
+         * @param animate {@code true} to animate from the current scale and
+         *                center or {@code false} to reset the scale and center
+         *                immediately
+         * @return {@code true} on success, {@code false} on failure
+         */
+        public boolean resetCurrentMagnification(boolean animate) {
+            final IAccessibilityServiceConnection connection =
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
+                            mService.mConnectionId);
+            if (connection != null) {
+                try {
+                    return connection.resetCurrentMagnification(mDisplayId, animate);
+                } catch (RemoteException re) {
+                    Log.w(LOG_TAG, "Failed to reset", re);
+                    re.rethrowFromSystemServer();
+                }
+            }
+            return false;
+        }
+
+        /**
+         * Sets the {@link MagnificationConfig}. The service controls the magnification by
+         * setting the config.
+         * <p>
+         * <strong>Note:</strong> If the service is not yet connected (e.g.
+         * {@link AccessibilityService#onServiceConnected()} has not yet been
+         * called) or the service has been disconnected, this method will have
+         * no effect and return {@code false}.
+         * </p>
+         *
+         * @param config the magnification config
+         * @param animate {@code true} to animate from the current spec or
+         *                {@code false} to set the spec immediately
+         * @return {@code true} on success, {@code false} on failure
+         */
+        public boolean setMagnificationConfig(@NonNull MagnificationConfig config,
+                boolean animate) {
+            final IAccessibilityServiceConnection connection =
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
+                            mService.mConnectionId);
+            if (connection != null) {
+                try {
+                    return connection.setMagnificationConfig(mDisplayId, config, animate);
+                } catch (RemoteException re) {
+                    Log.w(LOG_TAG, "Failed to set magnification config", re);
+                    re.rethrowFromSystemServer();
+                }
+            }
+            return false;
+        }
+
+        /**
          * Sets the magnification scale.
          * <p>
          * <strong>Note:</strong> If the service is not yet connected (e.g.
          * {@link AccessibilityService#onServiceConnected()} has not yet been
          * called) or the service has been disconnected, this method will have
          * no effect and return {@code false}.
+         * <p>
+         * <strong>Note:</strong> This legacy API sets the scale of full-screen
+         * magnification. To set the scale of the specified magnifier,
+         * use {@link #setMagnificationConfig} instead.
+         * </p>
          *
          * @param scale the magnification scale to set, must be >= 1 and <= 8
          * @param animate {@code true} to animate from the current scale or
          *                {@code false} to set the scale immediately
          * @return {@code true} on success, {@code false} on failure
+         * @deprecated Use {@link #setMagnificationConfig(MagnificationConfig, boolean)} instead
          */
+        @Deprecated
         public boolean setScale(float scale, boolean animate) {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
-                    return connection.setMagnificationScaleAndCenter(mDisplayId,
-                            scale, Float.NaN, Float.NaN, animate);
+                    final MagnificationConfig config = new MagnificationConfig.Builder()
+                            .setMode(MAGNIFICATION_MODE_FULLSCREEN)
+                            .setScale(scale).build();
+                    return connection.setMagnificationConfig(mDisplayId, config, animate);
                 } catch (RemoteException re) {
                     Log.w(LOG_TAG, "Failed to set scale", re);
                     re.rethrowFromSystemServer();
@@ -1459,6 +1777,12 @@ public abstract class AccessibilityService extends Service {
          * {@link AccessibilityService#onServiceConnected()} has not yet been
          * called) or the service has been disconnected, this method will have
          * no effect and return {@code false}.
+         * </p>
+         * <p>
+         * <strong>Note:</strong> This legacy API sets the center of full-screen
+         * magnification. To set the center of the specified magnifier,
+         * use {@link #setMagnificationConfig} instead.
+         * </p>
          *
          * @param centerX the unscaled screen-relative X coordinate on which to
          *                center the viewport
@@ -1467,15 +1791,19 @@ public abstract class AccessibilityService extends Service {
          * @param animate {@code true} to animate from the current viewport
          *                center or {@code false} to set the center immediately
          * @return {@code true} on success, {@code false} on failure
+         * @deprecated Use {@link #setMagnificationConfig(MagnificationConfig, boolean)} instead
          */
+        @Deprecated
         public boolean setCenter(float centerX, float centerY, boolean animate) {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
-                    return connection.setMagnificationScaleAndCenter(mDisplayId,
-                            Float.NaN, centerX, centerY, animate);
+                    final MagnificationConfig config = new MagnificationConfig.Builder()
+                            .setMode(MAGNIFICATION_MODE_FULLSCREEN)
+                            .setCenterX(centerX).setCenterY(centerY).build();
+                    return connection.setMagnificationConfig(mDisplayId, config, animate);
                 } catch (RemoteException re) {
                     Log.w(LOG_TAG, "Failed to set center", re);
                     re.rethrowFromSystemServer();
@@ -1490,6 +1818,10 @@ public abstract class AccessibilityService extends Service {
         public interface OnMagnificationChangedListener {
             /**
              * Called when the magnified region, scale, or center changes.
+             * <p>
+             * <strong>Note:</strong> This legacy callback notifies only full-screen
+             * magnification change.
+             * </p>
              *
              * @param controller the magnification controller
              * @param region the magnification region
@@ -1498,9 +1830,45 @@ public abstract class AccessibilityService extends Service {
              * magnification is focused
              * @param centerY the new Y coordinate, in unscaled coordinates, around which
              * magnification is focused
+             * @deprecated Override
+             * {@link #onMagnificationChanged(MagnificationController, Region, MagnificationConfig)}
+             * instead
              */
+            @Deprecated
             void onMagnificationChanged(@NonNull MagnificationController controller,
                     @NonNull Region region, float scale, float centerX, float centerY);
+
+            /**
+             * Called when the magnified region, mode, scale, or center changes of
+             * all magnification modes.
+             * <p>
+             * <strong>Note:</strong> This method can be overridden to listen to the
+             * magnification changes of all magnification modes then the legacy callback
+             * would not receive the notifications.
+             * Skipping calling super when overriding this method results in
+             * {@link #onMagnificationChanged(MagnificationController, Region, float, float, float)}
+             * not getting called.
+             * </p>
+             *
+             * @param controller the magnification controller
+             * @param region the magnification region
+             *               If the config mode is
+             *               {@link MagnificationConfig#MAGNIFICATION_MODE_FULLSCREEN},
+             *               it is the region of the screen currently active for magnification.
+             *               that is the same region as {@link #getMagnificationRegion()}.
+             *               If the config mode is
+             *               {@link MagnificationConfig#MAGNIFICATION_MODE_WINDOW},
+             *               it is the region of screen projected on the magnification window.
+             * @param config The magnification config. That has the controlling magnification
+             *               mode, the new scale and the new screen-relative center position
+             */
+            default void onMagnificationChanged(@NonNull MagnificationController controller,
+                    @NonNull Region region, @NonNull MagnificationConfig config) {
+                if (config.getMode() == MAGNIFICATION_MODE_FULLSCREEN) {
+                    onMagnificationChanged(controller, region,
+                            config.getScale(), config.getCenterX(), config.getCenterY());
+                }
+            }
         }
     }
 
@@ -1518,6 +1886,32 @@ public abstract class AccessibilityService extends Service {
             }
             return mSoftKeyboardController;
         }
+    }
+
+    /**
+     * The default implementation returns our default {@link InputMethod}. Subclasses can override
+     * it to provide their own customized version. Accessibility services need to set the
+     * {@link AccessibilityServiceInfo#FLAG_INPUT_METHOD_EDITOR} flag to use input method APIs.
+     *
+     * @return the InputMethod.
+     */
+    @NonNull
+    public InputMethod onCreateInputMethod() {
+        return new InputMethod(this);
+    }
+
+    /**
+     * Returns the InputMethod instance after the system calls {@link #onCreateInputMethod()},
+     * which may be used to input text or get editable text selection change notifications. It will
+     * return null if the accessibility service doesn't set the
+     * {@link AccessibilityServiceInfo#FLAG_INPUT_METHOD_EDITOR} flag or the system doesn't call
+     * {@link #onCreateInputMethod()}.
+     *
+     * @return the InputMethod instance
+     */
+    @Nullable
+    public final InputMethod getInputMethod() {
+        return mInputMethod;
     }
 
     private void onSoftKeyboardShowModeChanged(int showMode) {
@@ -1558,6 +1952,29 @@ public abstract class AccessibilityService extends Service {
          */
         private ArrayMap<OnShowModeChangedListener, Handler> mListeners;
         private final Object mLock;
+
+        /** @hide */
+        @Retention(RetentionPolicy.SOURCE)
+        @IntDef({
+                ENABLE_IME_SUCCESS,
+                ENABLE_IME_FAIL_BY_ADMIN,
+                ENABLE_IME_FAIL_UNKNOWN
+        })
+        public @interface EnableImeResult {}
+        /**
+         * Return value for {@link #setInputMethodEnabled(String, boolean)}. The action succeeded.
+         */
+        public static final int ENABLE_IME_SUCCESS = 0;
+        /**
+         * Return value for {@link #setInputMethodEnabled(String, boolean)}. The action failed
+         * because the InputMethod is not permitted by device policy manager.
+         */
+        public static final int ENABLE_IME_FAIL_BY_ADMIN = 1;
+        /**
+         * Return value for {@link #setInputMethodEnabled(String, boolean)}. The action failed
+         * and the reason is unknown.
+         */
+        public static final int ENABLE_IME_FAIL_UNKNOWN = 2;
 
         SoftKeyboardController(@NonNull AccessibilityService service, @NonNull Object lock) {
             mService = service;
@@ -1642,7 +2059,7 @@ public abstract class AccessibilityService extends Service {
 
         private void setSoftKeyboardCallbackEnabled(boolean enabled) {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
@@ -1701,7 +2118,7 @@ public abstract class AccessibilityService extends Service {
         @SoftKeyboardShowMode
         public int getShowMode() {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
@@ -1730,7 +2147,7 @@ public abstract class AccessibilityService extends Service {
          */
         public boolean setShowMode(@SoftKeyboardShowMode int showMode) {
            final IAccessibilityServiceConnection connection =
-                   AccessibilityInteractionClient.getInstance().getConnection(
+                   AccessibilityInteractionClient.getInstance(mService).getConnection(
                            mService.mConnectionId);
            if (connection != null) {
                try {
@@ -1776,7 +2193,7 @@ public abstract class AccessibilityService extends Service {
          */
         public boolean switchToInputMethod(@NonNull String imeId) {
             final IAccessibilityServiceConnection connection =
-                    AccessibilityInteractionClient.getInstance().getConnection(
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
                             mService.mConnectionId);
             if (connection != null) {
                 try {
@@ -1786,6 +2203,39 @@ public abstract class AccessibilityService extends Service {
                 }
             }
             return false;
+        }
+
+        /**
+         * Enable or disable the specified IME for the user for whom the service is activated. The
+         * IME needs to be in the same package as the service and needs to be allowed by device
+         * policy, if there is one. The change will persist until the specified IME is next
+         * explicitly enabled or disabled by whatever means, such as user choice, and may persist
+         * beyond the life cycle of the requesting service.
+         *
+         * @param imeId The ID of the input method to enable or disable. This IME must be installed.
+         * @param enabled {@code true} if the input method associated with {@code imeId} should be
+         *                enabled.
+         * @return status code for the result of enabling/disabling the input method associated
+         *         with {@code imeId}.
+         * @throws SecurityException if the input method is not in the same package as the service.
+         *
+         * @see android.view.inputmethod.InputMethodInfo#getId()
+         */
+        @CheckResult
+        @EnableImeResult
+        public int setInputMethodEnabled(@NonNull String imeId, boolean enabled)
+                throws SecurityException {
+            final IAccessibilityServiceConnection connection =
+                    AccessibilityInteractionClient.getInstance(mService).getConnection(
+                            mService.mConnectionId);
+            if (connection != null) {
+                try {
+                    return connection.setInputMethodEnabled(imeId, enabled);
+                } catch (RemoteException re) {
+                    throw new RuntimeException(re);
+                }
+            }
+            return ENABLE_IME_FAIL_UNKNOWN;
         }
     }
 
@@ -1829,7 +2279,7 @@ public abstract class AccessibilityService extends Service {
                     displayId);
             if (controller == null) {
                 controller = new AccessibilityButtonController(
-                        AccessibilityInteractionClient.getInstance().getConnection(mConnectionId));
+                    AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId));
                 mAccessibilityButtonControllers.put(displayId, controller);
             }
             return controller;
@@ -1843,6 +2293,85 @@ public abstract class AccessibilityService extends Service {
     private void onAccessibilityButtonAvailabilityChanged(boolean available) {
         getAccessibilityButtonController().dispatchAccessibilityButtonAvailabilityChanged(
                 available);
+    }
+
+    /** Sets the cache status.
+     *
+     * <p>If {@code enabled}, enable the cache and prefetching. Otherwise, disable the cache
+     * and prefetching.
+     * Note: By default the cache is enabled.
+     * @param enabled whether to enable or disable the cache.
+     * @return {@code true} if the cache and connection are not null, so the cache status is set.
+     */
+    public boolean setCacheEnabled(boolean enabled) {
+        AccessibilityCache cache =
+                AccessibilityInteractionClient.getCache(mConnectionId);
+        if (cache == null) {
+            return false;
+        }
+        final IAccessibilityServiceConnection connection =
+                AccessibilityInteractionClient.getConnection(mConnectionId);
+        if (connection == null) {
+            return false;
+        }
+        try {
+            connection.setCacheEnabled(enabled);
+            cache.setEnabled(enabled);
+            return true;
+        } catch (RemoteException re) {
+            Log.w(LOG_TAG, "Error while setting status of cache", re);
+            re.rethrowFromSystemServer();
+        }
+        return false;
+    }
+
+    /** Invalidates {@code node} and its subtree in the cache.
+     * @param node the node to invalidate.
+     * @return {@code true} if the subtree rooted at {@code node} was invalidated.
+     */
+    public boolean clearCachedSubtree(@NonNull AccessibilityNodeInfo node) {
+        AccessibilityCache cache =
+                AccessibilityInteractionClient.getCache(mConnectionId);
+        if (cache == null) {
+            return false;
+        }
+        return cache.clearSubTree(node);
+    }
+
+    /** Clears the cache.
+     * @return {@code true} if the cache was cleared
+     */
+    public boolean clearCache() {
+        AccessibilityCache cache =
+                AccessibilityInteractionClient.getCache(mConnectionId);
+        if (cache == null) {
+            return false;
+        }
+        cache.clear();
+        return true;
+    }
+
+    /** Checks if {@code node} is in the cache.
+     * @param node the node to check.
+     * @return {@code true} if {@code node} is in the cache.
+     */
+    public boolean isNodeInCache(@NonNull AccessibilityNodeInfo node) {
+        AccessibilityCache cache =
+                AccessibilityInteractionClient.getCache(mConnectionId);
+        if (cache == null) {
+            return false;
+        }
+        return cache.isNodeInCache(node);
+    }
+
+    /** Returns {@code true} if the cache is enabled. */
+    public boolean isCacheEnabled() {
+        AccessibilityCache cache =
+                AccessibilityInteractionClient.getCache(mConnectionId);
+        if (cache == null) {
+            return false;
+        }
+        return cache.isEnabled();
     }
 
     /** This is called when the system action list is changed. */
@@ -1863,7 +2392,7 @@ public abstract class AccessibilityService extends Service {
      */
     public final @NonNull List<AccessibilityAction> getSystemActions() {
         IAccessibilityServiceConnection connection =
-                AccessibilityInteractionClient.getInstance().getConnection(mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (connection != null) {
             try {
                 return connection.getSystemActions();
@@ -1881,17 +2410,28 @@ public abstract class AccessibilityService extends Service {
      * location in that application. For example going back, going
      * home, opening recents, etc.
      *
+     * <p>
+     * Note: The global action ids themselves give no information about the current availability
+     * of their corresponding actions. To determine if a global action is available, use
+     * {@link #getSystemActions()}
+     *
      * @param action The action to perform.
      * @return Whether the action was successfully performed.
      *
+     * Perform actions using ids like the id constants referenced below:
      * @see #GLOBAL_ACTION_BACK
      * @see #GLOBAL_ACTION_HOME
      * @see #GLOBAL_ACTION_NOTIFICATIONS
      * @see #GLOBAL_ACTION_RECENTS
+     * @see #GLOBAL_ACTION_DPAD_UP
+     * @see #GLOBAL_ACTION_DPAD_DOWN
+     * @see #GLOBAL_ACTION_DPAD_LEFT
+     * @see #GLOBAL_ACTION_DPAD_RIGHT
+     * @see #GLOBAL_ACTION_DPAD_CENTER
      */
     public final boolean performGlobalAction(int action) {
         IAccessibilityServiceConnection connection =
-            AccessibilityInteractionClient.getInstance().getConnection(mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (connection != null) {
             try {
                 return connection.performGlobalAction(action);
@@ -1932,7 +2472,7 @@ public abstract class AccessibilityService extends Service {
      * @see AccessibilityNodeInfo#FOCUS_ACCESSIBILITY
      */
     public AccessibilityNodeInfo findFocus(int focus) {
-        return AccessibilityInteractionClient.getInstance().findFocus(mConnectionId,
+        return AccessibilityInteractionClient.getInstance(this).findFocus(mConnectionId,
                 AccessibilityWindowInfo.ANY_WINDOW_ID, AccessibilityNodeInfo.ROOT_NODE_ID, focus);
     }
 
@@ -1948,7 +2488,7 @@ public abstract class AccessibilityService extends Service {
      */
     public final AccessibilityServiceInfo getServiceInfo() {
         IAccessibilityServiceConnection connection =
-            AccessibilityInteractionClient.getInstance().getConnection(mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (connection != null) {
             try {
                 return connection.getServiceInfo();
@@ -1970,6 +2510,7 @@ public abstract class AccessibilityService extends Service {
      */
     public final void setServiceInfo(AccessibilityServiceInfo info) {
         mInfo = info;
+        updateInputMethod(info);
         sendServiceInfo();
     }
 
@@ -1980,12 +2521,12 @@ public abstract class AccessibilityService extends Service {
      */
     private void sendServiceInfo() {
         IAccessibilityServiceConnection connection =
-            AccessibilityInteractionClient.getInstance().getConnection(mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (mInfo != null && connection != null) {
             try {
                 connection.setServiceInfo(mInfo);
                 mInfo = null;
-                AccessibilityInteractionClient.getInstance().clearCache();
+                AccessibilityInteractionClient.getInstance(this).clearCache(mConnectionId);
             } catch (RemoteException re) {
                 Log.w(LOG_TAG, "Error while setting AccessibilityServiceInfo", re);
                 re.rethrowFromSystemServer();
@@ -2004,6 +2545,10 @@ public abstract class AccessibilityService extends Service {
         if (WINDOW_SERVICE.equals(name)) {
             if (mWindowManager == null) {
                 mWindowManager = (WindowManager) getBaseContext().getSystemService(name);
+                final WindowManagerImpl wm = (WindowManagerImpl) mWindowManager;
+                // Set e default token obtained from the connection to ensure client could use
+                // accessibility overlay.
+                wm.setDefaultToken(mWindowToken);
             }
             return mWindowManager;
         }
@@ -2032,8 +2577,7 @@ public abstract class AccessibilityService extends Service {
         Preconditions.checkNotNull(executor, "executor cannot be null");
         Preconditions.checkNotNull(callback, "callback cannot be null");
         final IAccessibilityServiceConnection connection =
-                AccessibilityInteractionClient.getInstance().getConnection(
-                        mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (connection == null) {
             sendScreenshotFailure(ERROR_TAKE_SCREENSHOT_INTERNAL_ERROR, executor, callback);
             return;
@@ -2056,6 +2600,31 @@ public abstract class AccessibilityService extends Service {
             }));
         } catch (RemoteException re) {
             throw new RuntimeException(re);
+        }
+    }
+
+    /**
+     * Sets the strokeWidth and color of the accessibility focus rectangle.
+     * <p>
+     * <strong>Note:</strong> This setting persists until this or another active
+     * AccessibilityService changes it or the device reboots.
+     * </p>
+     *
+     * @param strokeWidth The stroke width of the rectangle in pixels.
+     *                    Setting this value to zero results in no focus rectangle being drawn.
+     * @param color The color of the rectangle.
+     */
+    public void setAccessibilityFocusAppearance(int strokeWidth, @ColorInt int color) {
+        IAccessibilityServiceConnection connection =
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
+        if (connection != null) {
+            try {
+                connection.setFocusAppearance(strokeWidth, color);
+            } catch (RemoteException re) {
+                Log.w(LOG_TAG, "Error while setting the strokeWidth and color of the "
+                        + "accessibility focus rectangle", re);
+                re.rethrowFromSystemServer();
+            }
         }
     }
 
@@ -2088,8 +2657,10 @@ public abstract class AccessibilityService extends Service {
 
                 // The client may have already obtained the window manager, so
                 // update the default token on whatever manager we gave them.
-                final WindowManagerImpl wm = (WindowManagerImpl) getSystemService(WINDOW_SERVICE);
-                wm.setDefaultToken(windowToken);
+                if (mWindowManager != null) {
+                    final WindowManagerImpl wm = (WindowManagerImpl) mWindowManager;
+                    wm.setDefaultToken(mWindowToken);
+                }
             }
 
             @Override
@@ -2104,9 +2675,18 @@ public abstract class AccessibilityService extends Service {
 
             @Override
             public void onMagnificationChanged(int displayId, @NonNull Region region,
-                    float scale, float centerX, float centerY) {
-                AccessibilityService.this.onMagnificationChanged(displayId, region, scale,
-                        centerX, centerY);
+                    MagnificationConfig config) {
+                AccessibilityService.this.onMagnificationChanged(displayId, region, config);
+            }
+
+            @Override
+            public void onMotionEvent(MotionEvent event) {
+                AccessibilityService.this.onMotionEvent(event);
+            }
+
+            @Override
+            public void onTouchStateChanged(int displayId, int state) {
+                AccessibilityService.this.onTouchStateChanged(displayId, state);
             }
 
             @Override
@@ -2143,6 +2723,25 @@ public abstract class AccessibilityService extends Service {
             public void onSystemActionsChanged() {
                 AccessibilityService.this.onSystemActionsChanged();
             }
+
+            @Override
+            public void createImeSession(IAccessibilityInputMethodSessionCallback callback) {
+                if (mInputMethod != null) {
+                    mInputMethod.createImeSession(callback);
+                }
+            }
+
+            @Override
+            public void startInput(@Nullable RemoteAccessibilityInputConnection connection,
+                    @NonNull EditorInfo editorInfo, boolean restarting) {
+                if (mInputMethod != null) {
+                    if (restarting) {
+                        mInputMethod.restartInput(connection, editorInfo);
+                    } else {
+                        mInputMethod.startInput(connection, editorInfo);
+                    }
+                }
+            }
         });
     }
 
@@ -2168,16 +2767,36 @@ public abstract class AccessibilityService extends Service {
         private static final int DO_ACCESSIBILITY_BUTTON_CLICKED = 12;
         private static final int DO_ACCESSIBILITY_BUTTON_AVAILABILITY_CHANGED = 13;
         private static final int DO_ON_SYSTEM_ACTIONS_CHANGED = 14;
+        private static final int DO_CREATE_IME_SESSION = 15;
+        private static final int DO_SET_IME_SESSION_ENABLED = 16;
+        private static final int DO_START_INPUT = 19;
 
         private final HandlerCaller mCaller;
 
         private final Callbacks mCallback;
+        private final Context mContext;
 
         private int mConnectionId = AccessibilityInteractionClient.NO_ID;
+
+        /**
+         * This is not {@code null} only between {@link #bindInput()} and {@link #unbindInput()} so
+         * that {@link RemoteAccessibilityInputConnection} can query if {@link #unbindInput()} has
+         * already been called or not, mainly to avoid unnecessary blocking operations.
+         *
+         * <p>This field must be set and cleared only from the binder thread(s), where the system
+         * guarantees that {@link #bindInput()},
+         * {@link #startInput(IRemoteAccessibilityInputConnection, EditorInfo, boolean)},
+         * and {@link #unbindInput()} are called with the same order as the original calls
+         * in {@link com.android.server.inputmethod.InputMethodManagerService}.
+         * See {@link IBinder#FLAG_ONEWAY} for detailed semantics.</p>
+         */
+        @Nullable
+        CancellationGroup mCancellationGroup = null;
 
         public IAccessibilityServiceClientWrapper(Context context, Looper looper,
                 Callbacks callback) {
             mCallback = callback;
+            mContext = context;
             mCaller = new HandlerCaller(context, looper, this, true /*asyncHandler*/);
         }
 
@@ -2218,12 +2837,10 @@ public abstract class AccessibilityService extends Service {
 
         /** Magnification changed callbacks for different displays */
         public void onMagnificationChanged(int displayId, @NonNull Region region,
-                float scale, float centerX, float centerY) {
+                MagnificationConfig config) {
             final SomeArgs args = SomeArgs.obtain();
             args.arg1 = region;
-            args.arg2 = scale;
-            args.arg3 = centerX;
-            args.arg4 = centerY;
+            args.arg2 = config;
             args.argi1 = displayId;
 
             final Message message = mCaller.obtainMessageO(DO_ON_MAGNIFICATION_CHANGED, args);
@@ -2269,6 +2886,79 @@ public abstract class AccessibilityService extends Service {
             mCaller.sendMessage(mCaller.obtainMessage(DO_ON_SYSTEM_ACTIONS_CHANGED));
         }
 
+        /** This is called when an app requests ime sessions or when the service is enabled. */
+        public void createImeSession(IAccessibilityInputMethodSessionCallback callback) {
+            final Message message = mCaller.obtainMessageO(DO_CREATE_IME_SESSION, callback);
+            mCaller.sendMessage(message);
+        }
+
+        /**
+         * This is called when InputMethodManagerService requests to set the session enabled or
+         * disabled
+         */
+        public void setImeSessionEnabled(IAccessibilityInputMethodSession session,
+                boolean enabled) {
+            try {
+                AccessibilityInputMethodSession ls =
+                        ((AccessibilityInputMethodSessionWrapper) session).getSession();
+                if (ls == null) {
+                    Log.w(LOG_TAG, "Session is already finished: " + session);
+                    return;
+                }
+                mCaller.sendMessage(mCaller.obtainMessageIO(
+                        DO_SET_IME_SESSION_ENABLED, enabled ? 1 : 0, ls));
+            } catch (ClassCastException e) {
+                Log.w(LOG_TAG, "Incoming session not of correct type: " + session, e);
+            }
+        }
+
+        /** This is called when an app binds input or when the service is enabled. */
+        public void bindInput() {
+            if (mCancellationGroup != null) {
+                Log.e(LOG_TAG, "bindInput must be paired with unbindInput.");
+            }
+            mCancellationGroup = new CancellationGroup();
+        }
+
+        /** This is called when an app unbinds input or when the service is disabled. */
+        public void unbindInput() {
+            if (mCancellationGroup != null) {
+                // Signal the flag then forget it.
+                mCancellationGroup.cancelAll();
+                mCancellationGroup = null;
+            } else {
+                Log.e(LOG_TAG, "unbindInput must be paired with bindInput.");
+            }
+        }
+
+        /** This is called when an app starts input or when the service is enabled. */
+        public void startInput(IRemoteAccessibilityInputConnection connection,
+                EditorInfo editorInfo, boolean restarting) {
+            if (mCancellationGroup == null) {
+                Log.e(LOG_TAG, "startInput must be called after bindInput.");
+                mCancellationGroup = new CancellationGroup();
+            }
+            final Message message = mCaller.obtainMessageOOOOII(DO_START_INPUT, null /* unused */,
+                    connection, editorInfo, mCancellationGroup, restarting ? 1 : 0,
+                    0 /* unused */);
+            mCaller.sendMessage(message);
+        }
+
+        @Override
+        public void onMotionEvent(MotionEvent event) {
+            final Message message = PooledLambda.obtainMessage(
+                            Callbacks::onMotionEvent, mCallback, event);
+            mCaller.sendMessage(message);
+        }
+
+        @Override
+        public void onTouchStateChanged(int displayId, int state) {
+            final Message message = PooledLambda.obtainMessage(Callbacks::onTouchStateChanged,
+                    mCallback,
+                    displayId, state);
+            mCaller.sendMessage(message);
+        }
+
         @Override
         public void executeMessage(Message message) {
             switch (message.what) {
@@ -2277,7 +2967,8 @@ public abstract class AccessibilityService extends Service {
                     boolean serviceWantsEvent = message.arg1 != 0;
                     if (event != null) {
                         // Send the event to AccessibilityCache via AccessibilityInteractionClient
-                        AccessibilityInteractionClient.getInstance().onAccessibilityEvent(event);
+                        AccessibilityInteractionClient.getInstance(mContext).onAccessibilityEvent(
+                                event, mConnectionId);
                         if (serviceWantsEvent
                                 && (mConnectionId != AccessibilityInteractionClient.NO_ID)) {
                             // Send the event to AccessibilityService
@@ -2306,15 +2997,24 @@ public abstract class AccessibilityService extends Service {
                     IBinder windowToken = (IBinder) args.arg2;
                     args.recycle();
                     if (connection != null) {
-                        AccessibilityInteractionClient.getInstance().addConnection(mConnectionId,
-                                connection);
+                        AccessibilityInteractionClient.getInstance(mContext).addConnection(
+                                mConnectionId, connection, /*initializeCache=*/true);
+                        if (mContext != null) {
+                            try {
+                                connection.setAttributionTag(mContext.getAttributionTag());
+                            } catch (RemoteException re) {
+                                Log.w(LOG_TAG, "Error while setting attributionTag", re);
+                                re.rethrowFromSystemServer();
+                            }
+                        }
                         mCallback.init(mConnectionId, windowToken);
                         mCallback.onServiceConnected();
                     } else {
-                        AccessibilityInteractionClient.getInstance().removeConnection(
+                        AccessibilityInteractionClient.getInstance(mContext)
+                                .clearCache(mConnectionId);
+                        AccessibilityInteractionClient.getInstance(mContext).removeConnection(
                                 mConnectionId);
                         mConnectionId = AccessibilityInteractionClient.NO_ID;
-                        AccessibilityInteractionClient.getInstance().clearCache();
                         mCallback.init(AccessibilityInteractionClient.NO_ID, null);
                     }
                     return;
@@ -2326,14 +3026,14 @@ public abstract class AccessibilityService extends Service {
                     return;
                 }
                 case DO_CLEAR_ACCESSIBILITY_CACHE: {
-                    AccessibilityInteractionClient.getInstance().clearCache();
+                    AccessibilityInteractionClient.getInstance(mContext).clearCache(mConnectionId);
                     return;
                 }
                 case DO_ON_KEY_EVENT: {
                     KeyEvent event = (KeyEvent) message.obj;
                     try {
                         IAccessibilityServiceConnection connection = AccessibilityInteractionClient
-                                .getInstance().getConnection(mConnectionId);
+                                .getInstance(mContext).getConnection(mConnectionId);
                         if (connection != null) {
                             final boolean result = mCallback.onKeyEvent(event);
                             final int sequence = message.arg1;
@@ -2357,13 +3057,10 @@ public abstract class AccessibilityService extends Service {
                     if (mConnectionId != AccessibilityInteractionClient.NO_ID) {
                         final SomeArgs args = (SomeArgs) message.obj;
                         final Region region = (Region) args.arg1;
-                        final float scale = (float) args.arg2;
-                        final float centerX = (float) args.arg3;
-                        final float centerY = (float) args.arg4;
+                        final MagnificationConfig config = (MagnificationConfig) args.arg2;
                         final int displayId = args.argi1;
                         args.recycle();
-                        mCallback.onMagnificationChanged(displayId, region, scale,
-                                centerX, centerY);
+                        mCallback.onMagnificationChanged(displayId, region, config);
                     }
                     return;
                 }
@@ -2412,7 +3109,40 @@ public abstract class AccessibilityService extends Service {
                     }
                     return;
                 }
-                default :
+                case DO_CREATE_IME_SESSION: {
+                    if (mConnectionId != AccessibilityInteractionClient.NO_ID) {
+                        IAccessibilityInputMethodSessionCallback callback =
+                                (IAccessibilityInputMethodSessionCallback) message.obj;
+                        mCallback.createImeSession(callback);
+                    }
+                    return;
+                }
+                case DO_SET_IME_SESSION_ENABLED: {
+                    if (mConnectionId != AccessibilityInteractionClient.NO_ID) {
+                        AccessibilityInputMethodSession session =
+                                (AccessibilityInputMethodSession) message.obj;
+                        session.setEnabled(message.arg1 != 0);
+                    }
+                    return;
+                }
+                case DO_START_INPUT: {
+                    if (mConnectionId != AccessibilityInteractionClient.NO_ID) {
+                        final SomeArgs args = (SomeArgs) message.obj;
+                        final IRemoteAccessibilityInputConnection connection =
+                                (IRemoteAccessibilityInputConnection) args.arg2;
+                        final EditorInfo info = (EditorInfo) args.arg3;
+                        final CancellationGroup cancellationGroup = (CancellationGroup) args.arg4;
+                        final boolean restarting = args.argi5 == 1;
+                        final RemoteAccessibilityInputConnection ic = connection == null ? null
+                                : new RemoteAccessibilityInputConnection(
+                                        connection, cancellationGroup);
+                        info.makeCompatible(mContext.getApplicationInfo().targetSdkVersion);
+                        mCallback.startInput(ic, info, restarting);
+                        args.recycle();
+                    }
+                    return;
+                }
+                default:
                     Log.w(LOG_TAG, "Unknown message type " + message.what);
             }
         }
@@ -2548,7 +3278,7 @@ public abstract class AccessibilityService extends Service {
     public void setGestureDetectionPassthroughRegion(int displayId, @NonNull Region region) {
         Preconditions.checkNotNull(region, "region cannot be null");
         final IAccessibilityServiceConnection connection =
-                AccessibilityInteractionClient.getInstance().getConnection(mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (connection != null) {
             try {
                 connection.setGestureDetectionPassthroughRegion(displayId, region);
@@ -2574,13 +3304,137 @@ public abstract class AccessibilityService extends Service {
     public void setTouchExplorationPassthroughRegion(int displayId, @NonNull Region region) {
         Preconditions.checkNotNull(region, "region cannot be null");
         final IAccessibilityServiceConnection connection =
-                AccessibilityInteractionClient.getInstance().getConnection(mConnectionId);
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
         if (connection != null) {
             try {
                 connection.setTouchExplorationPassthroughRegion(displayId, region);
             } catch (RemoteException re) {
                 throw new RuntimeException(re);
             }
+        }
+    }
+
+    /**
+     * Sets the system settings values that control the scaling factor for animations. The scale
+     * controls the animation playback speed for animations that respect these settings. Animations
+     * that do not respect the settings values will not be affected by this function. A lower scale
+     * value results in a faster speed. A value of <code>0</code> disables animations entirely. When
+     * animations are disabled services receive window change events more quickly which can reduce
+     * the potential by confusion by reducing the time during which windows are in transition.
+     *
+     * @see AccessibilityEvent#TYPE_WINDOWS_CHANGED
+     * @see AccessibilityEvent#TYPE_WINDOW_STATE_CHANGED
+     * @see android.provider.Settings.Global#WINDOW_ANIMATION_SCALE
+     * @see android.provider.Settings.Global#TRANSITION_ANIMATION_SCALE
+     * @see android.provider.Settings.Global#ANIMATOR_DURATION_SCALE
+     * @param scale The scaling factor for all animations.
+     */
+    public void setAnimationScale(float scale) {
+        final IAccessibilityServiceConnection connection =
+                AccessibilityInteractionClient.getInstance(this).getConnection(mConnectionId);
+        if (connection != null) {
+            try {
+                connection.setAnimationScale(scale);
+            } catch (RemoteException re) {
+                throw new RuntimeException(re);
+            }
+        }
+    }
+
+    private static class AccessibilityContext extends ContextWrapper {
+        private final int mConnectionId;
+
+        private AccessibilityContext(Context base, int connectionId) {
+            super(base);
+            mConnectionId = connectionId;
+            setDefaultTokenInternal(this, getDisplayId());
+        }
+
+        @NonNull
+        @Override
+        public Context createDisplayContext(Display display) {
+            return new AccessibilityContext(super.createDisplayContext(display), mConnectionId);
+        }
+
+        @NonNull
+        @Override
+        public Context createWindowContext(int type, @Nullable Bundle options) {
+            final Context context = super.createWindowContext(type, options);
+            if (type != TYPE_ACCESSIBILITY_OVERLAY) {
+                return context;
+            }
+            return new AccessibilityContext(context, mConnectionId);
+        }
+
+        @NonNull
+        @Override
+        public Context createWindowContext(@NonNull Display display, int type,
+                @Nullable Bundle options) {
+            final Context context = super.createWindowContext(display, type, options);
+            if (type != TYPE_ACCESSIBILITY_OVERLAY) {
+                return context;
+            }
+            return new AccessibilityContext(context, mConnectionId);
+        }
+
+        private void setDefaultTokenInternal(Context context, int displayId) {
+            final WindowManagerImpl wm = (WindowManagerImpl) context.getSystemService(
+                    WINDOW_SERVICE);
+            final IAccessibilityServiceConnection connection =
+                    AccessibilityInteractionClient.getConnection(mConnectionId);
+            IBinder token = null;
+            if (connection != null) {
+                try {
+                    token = connection.getOverlayWindowToken(displayId);
+                } catch (RemoteException re) {
+                    Log.w(LOG_TAG, "Failed to get window token", re);
+                    re.rethrowFromSystemServer();
+                }
+                wm.setDefaultToken(token);
+            }
+        }
+    }
+
+    /**
+     * Returns the touch interaction controller for the specified logical display, which may be used
+     * to detect gestures and otherwise control touch interactions. If
+     * {@link AccessibilityServiceInfo#FLAG_REQUEST_TOUCH_EXPLORATION_MODE} is disabled the
+     * controller's methods will have no effect.
+     *
+     * @param displayId The logical display id, use {@link Display#DEFAULT_DISPLAY} for default
+     *                      display.
+     * @return the TouchExploration controller
+     */
+    @NonNull
+    public final TouchInteractionController getTouchInteractionController(int displayId) {
+        synchronized (mLock) {
+            TouchInteractionController controller = mTouchInteractionControllers.get(displayId);
+            if (controller == null) {
+                controller = new TouchInteractionController(this, mLock, displayId);
+                mTouchInteractionControllers.put(displayId, controller);
+            }
+            return controller;
+        }
+    }
+
+    void onMotionEvent(MotionEvent event) {
+        TouchInteractionController controller;
+        synchronized (mLock) {
+            int displayId = event.getDisplayId();
+            controller = mTouchInteractionControllers.get(displayId);
+        }
+        if (controller != null) {
+            controller.onMotionEvent(event);
+        }
+    }
+
+    void onTouchStateChanged(int displayId, int state) {
+        TouchInteractionController controller;
+        synchronized (mLock) {
+            controller = mTouchInteractionControllers.get(displayId);
+        }
+        if (controller != null) {
+            controller.onStateChanged(state);
         }
     }
 }

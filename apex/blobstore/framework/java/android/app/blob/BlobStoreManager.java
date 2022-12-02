@@ -89,8 +89,8 @@ import java.util.function.Consumer;
  * <p> Before committing the session, apps can indicate which apps are allowed to access the
  * contributed data using one or more of the following access modes:
  * <ul>
- *     <li> {@link Session#allowPackageAccess(String, byte[])} which will allow whitelisting
- *          specific packages to access the blobs.
+ *     <li> {@link Session#allowPackageAccess(String, byte[])} which will allow specific packages
+ *          to access the blobs.
  *     <li> {@link Session#allowSameSignatureAccess()} which will allow only apps which are signed
  *          with the same certificate as the app which contributed the blob to access it.
  *     <li> {@link Session#allowPublicAccess()} which will allow any app on the device to access
@@ -498,6 +498,22 @@ public class BlobStoreManager {
     public void releaseLease(@NonNull BlobHandle blobHandle) throws IOException {
         try {
             mService.releaseLease(blobHandle, mContext.getOpPackageName());
+        } catch (ParcelableException e) {
+            e.maybeRethrow(IOException.class);
+            throw new RuntimeException(e);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Release all the leases which are currently held by the caller.
+     *
+     * @hide
+     */
+    public void releaseAllLeases() throws Exception {
+        try {
+            mService.releaseAllLeases(mContext.getOpPackageName());
         } catch (ParcelableException e) {
             e.maybeRethrow(IOException.class);
             throw new RuntimeException(e);

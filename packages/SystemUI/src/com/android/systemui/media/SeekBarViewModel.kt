@@ -28,9 +28,10 @@ import android.widget.SeekBar
 import androidx.annotation.AnyThread
 import androidx.annotation.WorkerThread
 import androidx.core.view.GestureDetectorCompat
-import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.LiveData
+import androidx.lifecycle.MutableLiveData
 import com.android.systemui.dagger.qualifiers.Background
+import com.android.systemui.statusbar.NotificationMediaManager
 import com.android.systemui.util.concurrency.RepeatableExecutor
 import javax.inject.Inject
 
@@ -70,10 +71,16 @@ private fun PlaybackState.computePosition(duration: Long): Long {
 }
 
 /** ViewModel for seek bar in QS media player. */
-class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: RepeatableExecutor) {
-    private var _data = Progress(false, false, null, null)
+class SeekBarViewModel @Inject constructor(
+    @Background private val bgExecutor: RepeatableExecutor
+) {
+    private var _data = Progress(false, false, false, false, null, 0)
         set(value) {
+            val enabledChanged = value.enabled != field.enabled
             field = value
+            if (enabledChanged) {
+                enabledChangeListener?.onEnabledChanged(value.enabled)
+            }
             _progress.postValue(value)
         }
     private val _progress = MutableLiveData<Progress>().apply {
@@ -91,9 +98,9 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
         }
     private var playbackState: PlaybackState? = null
     private var callback = object : MediaController.Callback() {
-        override fun onPlaybackStateChanged(state: PlaybackState) {
+        override fun onPlaybackStateChanged(state: PlaybackState?) {
             playbackState = state
-            if (PlaybackState.STATE_NONE.equals(playbackState)) {
+            if (playbackState == null || PlaybackState.STATE_NONE.equals(playbackState)) {
                 clearController()
             } else {
                 checkIfPollingNeeded()
@@ -118,14 +125,21 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
             }
         }
 
+    private var scrubbingChangeListener: ScrubbingChangeListener? = null
+    private var enabledChangeListener: EnabledChangeListener? = null
+
     /** Set to true when the user is touching the seek bar to change the position. */
     private var scrubbing = false
         set(value) {
             if (field != value) {
                 field = value
                 checkIfPollingNeeded()
+                scrubbingChangeListener?.onScrubbingChanged(value)
+                _data = _data.copy(scrubbing = value)
             }
         }
+
+    lateinit var logSeek: () -> Unit
 
     /**
      * Event indicating that the user has started interacting with the seek bar.
@@ -137,13 +151,21 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
     }
 
     /**
-     * Event indicating that the user has moved the seek bar but hasn't yet finished the gesture.
+     * Event indicating that the user has moved the seek bar.
+     *
      * @param position Current location in the track.
      */
     @AnyThread
     fun onSeekProgress(position: Long) = bgExecutor.execute {
         if (scrubbing) {
+            // The user hasn't yet finished their touch gesture, so only update the data for visual
+            // feedback and don't update [controller] yet.
             _data = _data.copy(elapsedTime = position.toInt())
+        } else {
+            // The seek progress came from an a11y action and we should immediately update to the
+            // new position. (a11y actions to change the seekbar position don't trigger
+            // SeekBar.OnSeekBarChangeListener.onStartTrackingTouch or onStopTrackingTouch.)
+            onSeek(position)
         }
     }
 
@@ -167,6 +189,7 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
             scrubbing = false
             checkPlaybackPosition()
         } else {
+            logSeek()
             controller?.transportControls?.seekTo(position)
             // Invalidate the cached playbackState to avoid the thumb jumping back to the previous
             // position.
@@ -177,6 +200,9 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
 
     /**
      * Updates media information.
+     *
+     * This function makes a binder call, so it must happen on a worker thread.
+     *
      * @param mediaController controller for media session
      */
     @WorkerThread
@@ -186,11 +212,13 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
         val mediaMetadata = controller?.metadata
         val seekAvailable = ((playbackState?.actions ?: 0L) and PlaybackState.ACTION_SEEK_TO) != 0L
         val position = playbackState?.position?.toInt()
-        val duration = mediaMetadata?.getLong(MediaMetadata.METADATA_KEY_DURATION)?.toInt()
+        val duration = mediaMetadata?.getLong(MediaMetadata.METADATA_KEY_DURATION)?.toInt() ?: 0
+        val playing = NotificationMediaManager
+                .isPlayingState(playbackState?.state ?: PlaybackState.STATE_NONE)
         val enabled = if (playbackState == null ||
                 playbackState?.getState() == PlaybackState.STATE_NONE ||
-                (duration != null && duration <= 0)) false else true
-        _data = Progress(enabled, seekAvailable, position, duration)
+                (duration <= 0)) false else true
+        _data = Progress(enabled, seekAvailable, playing, scrubbing, position, duration)
         checkIfPollingNeeded()
     }
 
@@ -217,6 +245,8 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
         playbackState = null
         cancel?.run()
         cancel = null
+        scrubbingChangeListener = null
+        enabledChangeListener = null
     }
 
     @WorkerThread
@@ -252,6 +282,36 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
     fun attachTouchHandlers(bar: SeekBar) {
         bar.setOnSeekBarChangeListener(seekBarListener)
         bar.setOnTouchListener(SeekBarTouchListener(this, bar))
+    }
+
+    fun setScrubbingChangeListener(listener: ScrubbingChangeListener) {
+        scrubbingChangeListener = listener
+    }
+
+    fun removeScrubbingChangeListener(listener: ScrubbingChangeListener) {
+        if (listener == scrubbingChangeListener) {
+            scrubbingChangeListener = null
+        }
+    }
+
+    fun setEnabledChangeListener(listener: EnabledChangeListener) {
+        enabledChangeListener = listener
+    }
+
+    fun removeEnabledChangeListener(listener: EnabledChangeListener) {
+        if (listener == enabledChangeListener) {
+            enabledChangeListener = null
+        }
+    }
+
+    /** Listener interface to be notified when the user starts or stops scrubbing. */
+    interface ScrubbingChangeListener {
+        fun onScrubbingChanged(scrubbing: Boolean)
+    }
+
+    /** Listener interface to be notified when the seekbar's enabled status changes. */
+    interface EnabledChangeListener {
+        fun onEnabledChanged(enabled: Boolean)
     }
 
     private class SeekBarChangeListener(
@@ -407,7 +467,9 @@ class SeekBarViewModel @Inject constructor(@Background private val bgExecutor: R
     data class Progress(
         val enabled: Boolean,
         val seekAvailable: Boolean,
+        val playing: Boolean,
+        val scrubbing: Boolean,
         val elapsedTime: Int?,
-        val duration: Int?
+        val duration: Int
     )
 }

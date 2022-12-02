@@ -12,16 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_base_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_base_license"],
+}
+
 android_test {
     name: "RollbackTest",
     manifest: "RollbackTest/AndroidManifest.xml",
+    platform_apis: true,
     srcs: ["RollbackTest/src/**/*.java"],
     static_libs: ["androidx.test.rules", "cts-rollback-lib", "cts-install-lib"],
     test_suites: ["general-tests"],
     test_config: "RollbackTest.xml",
     java_resources: [
         ":com.android.apex.apkrollback.test_v2",
-        ":com.android.apex.apkrollback.test_v2Crashing"
+        ":com.android.apex.apkrollback.test_v2Crashing",
+        ":test.rebootless_apex_v2",
     ],
 }
 
@@ -37,7 +48,11 @@ java_test_host {
     ],
     test_suites: ["general-tests"],
     test_config: "StagedRollbackTest.xml",
-    data: [":com.android.apex.apkrollback.test_v1"],
+    data: [
+        ":com.android.apex.apkrollback.test_v1",
+        ":test.rebootless_apex_v1",
+        ":RollbackTest",
+    ],
 }
 
 java_test_host {
@@ -47,12 +62,16 @@ java_test_host {
     static_libs: ["RollbackTestLib", "frameworks-base-hostutils"],
     test_suites: ["general-tests"],
     test_config: "NetworkStagedRollbackTest.xml",
+    data: [":RollbackTest"],
 }
 
 java_test_host {
     name: "MultiUserRollbackTest",
     srcs: ["MultiUserRollbackTest/src/**/*.java"],
     libs: ["tradefed"],
+    static_libs: [
+        "frameworks-base-hostutils",
+    ],
     test_suites: ["general-tests"],
     test_config: "MultiUserRollbackTest.xml",
 }
@@ -92,6 +111,7 @@ apex {
   key: "com.android.apex.apkrollback.test.key",
   apps: ["TestAppAv1"],
   installable: false,
+  updatable: false,
 }
 
 apex {
@@ -102,6 +122,7 @@ apex {
   key: "com.android.apex.apkrollback.test.key",
   apps: ["TestAppAv2"],
   installable: false,
+  updatable: false,
 }
 
 apex {
@@ -112,4 +133,5 @@ apex {
   key: "com.android.apex.apkrollback.test.key",
   apps: ["TestAppACrashingV2"],
   installable: false,
+  updatable: false,
 }

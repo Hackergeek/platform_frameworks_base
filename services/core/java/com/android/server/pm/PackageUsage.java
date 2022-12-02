@@ -24,8 +24,6 @@ import android.os.FileUtils;
 import android.util.AtomicFile;
 import android.util.Log;
 
-import com.android.server.pm.parsing.pkg.AndroidPackage;
-
 import libcore.io.IoUtils;
 
 import java.io.BufferedInputStream;
@@ -68,11 +66,12 @@ class PackageUsage extends AbstractStatsBase<Map<String, PackageSetting>> {
             out.write(sb.toString().getBytes(StandardCharsets.US_ASCII));
 
             for (PackageSetting pkgSetting : pkgSettings.values()) {
-                if (pkgSetting.getPkgState().getLatestPackageUseTimeInMills() == 0L) {
+                if (pkgSetting == null || pkgSetting.getPkgState() == null
+                        || pkgSetting.getPkgState().getLatestPackageUseTimeInMills() == 0L) {
                     continue;
                 }
                 sb.setLength(0);
-                sb.append(pkgSetting.name);
+                sb.append(pkgSetting.getPackageName());
                 for (long usageTimeInMillis : pkgSetting.getPkgState()
                         .getLastPackageUsageTimeInMills()) {
                     sb.append(' ');
@@ -97,7 +96,7 @@ class PackageUsage extends AbstractStatsBase<Map<String, PackageSetting>> {
         BufferedInputStream in = null;
         try {
             in = new BufferedInputStream(file.openRead());
-            StringBuffer sb = new StringBuffer();
+            StringBuilder sb = new StringBuilder();
 
             String firstLine = readLine(in, sb);
             if (firstLine == null) {
@@ -117,7 +116,7 @@ class PackageUsage extends AbstractStatsBase<Map<String, PackageSetting>> {
     }
 
     private void readVersion0LP(Map<String, PackageSetting> pkgSettings, InputStream in,
-            StringBuffer sb, String firstLine)
+            StringBuilder sb, String firstLine)
             throws IOException {
         // Initial version of the file had no version number and stored one
         // package-timestamp pair per line.
@@ -145,7 +144,7 @@ class PackageUsage extends AbstractStatsBase<Map<String, PackageSetting>> {
     }
 
     private void readVersion1LP(Map<String, PackageSetting> pkgSettings, InputStream in,
-            StringBuffer sb) throws IOException {
+            StringBuilder sb) throws IOException {
         // Version 1 of the file started with the corresponding version
         // number and then stored a package name and eight timestamps per line.
         String line;
@@ -178,11 +177,11 @@ class PackageUsage extends AbstractStatsBase<Map<String, PackageSetting>> {
         }
     }
 
-    private String readLine(InputStream in, StringBuffer sb) throws IOException {
+    private String readLine(InputStream in, StringBuilder sb) throws IOException {
         return readToken(in, sb, '\n');
     }
 
-    private String readToken(InputStream in, StringBuffer sb, char endOfToken)
+    private String readToken(InputStream in, StringBuilder sb, char endOfToken)
             throws IOException {
         sb.setLength(0);
         while (true) {

@@ -40,7 +40,7 @@ public class PointerEventDispatcher extends InputEventReceiver {
         try {
             if (event instanceof MotionEvent
                     && (event.getSource() & InputDevice.SOURCE_CLASS_POINTER) != 0) {
-                final MotionEvent motionEvent = (MotionEvent) event;
+                MotionEvent motionEvent = (MotionEvent) event;
                 PointerEventListener[] listeners;
                 synchronized (mListeners) {
                     if (mListenersArray == null) {

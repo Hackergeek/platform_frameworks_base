@@ -19,7 +19,11 @@ package com.android.internal.app;
 import com.android.internal.os.BatteryStatsImpl;
 
 import android.bluetooth.BluetoothActivityEnergyInfo;
+import android.os.BatteryUsageStats;
+import android.os.BatteryUsageStatsQuery;
+import android.os.BluetoothBatteryStats;
 import android.os.ParcelFileDescriptor;
+import android.os.WakeLockStats;
 import android.os.WorkSource;
 import android.os.connectivity.CellularBatteryStats;
 import android.os.connectivity.WifiActivityEnergyInfo;
@@ -32,7 +36,7 @@ import android.telephony.SignalStrength;
 
 interface IBatteryStats {
     // These first methods are also called by native code, so must
-    // be kept in sync with frameworks/native/libs/binder/include/binder/IBatteryStats.h
+    // be kept in sync with frameworks/native/libs/binder/include_batterystats/batterystats/IBatteryStats.h
     void noteStartSensor(int uid, int sensor);
     void noteStopSensor(int uid, int sensor);
     void noteStartVideo(int uid);
@@ -49,13 +53,16 @@ interface IBatteryStats {
     void noteResetFlashlight();
 
     // Remaining methods are only used in Java.
+
+    List<BatteryUsageStats> getBatteryUsageStats(in List<BatteryUsageStatsQuery> queries);
+
     @UnsupportedAppUsage
     byte[] getStatistics();
 
-    ParcelFileDescriptor getStatisticsStream();
+    ParcelFileDescriptor getStatisticsStream(boolean updateAll);
 
     // Return true if we see the battery as currently charging.
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     boolean isCharging();
 
     // Return the computed amount of time remaining on battery, in milliseconds.
@@ -64,7 +71,7 @@ interface IBatteryStats {
 
     // Return the computed amount of time remaining to fully charge, in milliseconds.
     // Returns -1 if nothing could be computed.
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     long computeChargeTimeRemaining();
 
     void noteEvent(int code, String name, int uid);
@@ -106,7 +113,7 @@ interface IBatteryStats {
     void notePhoneOn();
     void notePhoneOff();
     void notePhoneSignalStrength(in SignalStrength signalStrength);
-    void notePhoneDataConnectionState(int dataType, boolean hasData, int serviceType);
+    void notePhoneDataConnectionState(int dataType, boolean hasData, int serviceType, int nrFrequency);
     void notePhoneState(int phoneState);
     void noteWifiOn();
     void noteWifiOff();
@@ -129,18 +136,20 @@ interface IBatteryStats {
     void noteWifiBatchedScanStartedFromSource(in WorkSource ws, int csph);
     void noteWifiBatchedScanStoppedFromSource(in WorkSource ws);
     void noteWifiRadioPowerState(int powerState, long timestampNs, int uid);
-    void noteNetworkInterfaceType(String iface, int type);
+    void noteNetworkInterfaceForTransports(String iface, in int[] transportTypes);
     void noteNetworkStatsEnabled();
     void noteDeviceIdleMode(int mode, String activeReason, int activeUid);
     void setBatteryState(int status, int health, int plugType, int level, int temp, int volt,
             int chargeUAh, int chargeFullUAh, long chargeTimeToFullSeconds);
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     long getAwakeTimeBattery();
     long getAwakeTimePlugged();
 
+    void noteBluetoothOn(int uid, int reason, String packageName);
+    void noteBluetoothOff(int uid, int reason, String packageName);
     void noteBleScanStarted(in WorkSource ws, boolean isUnoptimized);
     void noteBleScanStopped(in WorkSource ws, boolean isUnoptimized);
-    void noteResetBleScan();
+    void noteBleScanReset();
     void noteBleScanResults(in WorkSource ws, int numNewResults);
 
     /** {@hide} */
@@ -152,6 +161,14 @@ interface IBatteryStats {
     /** {@hide} */
     GpsBatteryStats getGpsBatteryStats();
 
+    /** {@hide} */
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.BATTERY_STATS)")
+    WakeLockStats getWakeLockStats();
+
+    /** {@hide} */
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.BATTERY_STATS)")
+    BluetoothBatteryStats getBluetoothBatteryStats();
+
     HealthStatsParceler takeUidSnapshot(int uid);
     HealthStatsParceler[] takeUidSnapshots(in int[] uid);
 
@@ -161,4 +178,15 @@ interface IBatteryStats {
 
     /** {@hide} */
     boolean setChargingStateUpdateDelayMillis(int delay);
+
+    /** Exposed as a test API. */
+    void setChargerAcOnline(boolean online, boolean forceUpdate);
+    /** Exposed as a test API. */
+    void setBatteryLevel(int level, boolean forceUpdate);
+    /** Exposed as a test API. */
+    void unplugBattery(boolean forceUpdate);
+    /** Exposed as a test API. */
+    void resetBattery(boolean forceUpdate);
+    /** Exposed as a test API. */
+    void suspendBatteryInput();
 }

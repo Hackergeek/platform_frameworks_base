@@ -127,7 +127,7 @@ public class ImageView extends View {
 
     @UnsupportedAppUsage
     private Drawable mDrawable = null;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private BitmapDrawable mRecycleableBitmapDrawable = null;
     private ColorStateList mDrawableTintList = null;
     private BlendMode mDrawableBlendMode = null;
@@ -136,6 +136,7 @@ public class ImageView extends View {
 
     private int[] mState = null;
     private boolean mMergeState = false;
+    private boolean mHasLevelSet = false;
     private int mLevel = 0;
     @UnsupportedAppUsage
     private int mDrawableWidth;
@@ -195,11 +196,6 @@ public class ImageView extends View {
         super(context, attrs, defStyleAttr, defStyleRes);
 
         initImageView();
-
-        // ImageView is not important by default, unless app developer overrode attribute.
-        if (getImportantForAutofill() == IMPORTANT_FOR_AUTOFILL_AUTO) {
-            setImportantForAutofill(IMPORTANT_FOR_AUTOFILL_NO);
-        }
 
         final TypedArray a = context.obtainStyledAttributes(
                 attrs, R.styleable.ImageView, defStyleAttr, defStyleRes);
@@ -264,6 +260,15 @@ public class ImageView extends View {
             sCompatUseCorrectStreamDensity = targetSdkVersion > Build.VERSION_CODES.M;
             sCompatDrawableVisibilityDispatch = targetSdkVersion < Build.VERSION_CODES.N;
             sCompatDone = true;
+        }
+
+        // By default, ImageView is not important for autofill but important for content capture.
+        // Developers can override these defaults via the corresponding attributes.
+        if (getImportantForAutofill() == IMPORTANT_FOR_AUTOFILL_AUTO) {
+            setImportantForAutofill(IMPORTANT_FOR_AUTOFILL_NO);
+        }
+        if (getImportantForContentCapture() == IMPORTANT_FOR_CONTENT_CAPTURE_AUTO) {
+            setImportantForContentCapture(IMPORTANT_FOR_CONTENT_CAPTURE_YES);
         }
     }
 
@@ -644,6 +649,7 @@ public class ImageView extends View {
      * @see #getImageTintList()
      * @see Drawable#setTintList(ColorStateList)
      */
+    @android.view.RemotableViewMethod
     public void setImageTintList(@Nullable ColorStateList tint) {
         mDrawableTintList = tint;
         mHasDrawableTint = true;
@@ -691,6 +697,7 @@ public class ImageView extends View {
      * @see #getImageTintMode()
      * @see Drawable#setTintBlendMode(BlendMode)
      */
+    @RemotableViewMethod
     public void setImageTintBlendMode(@Nullable BlendMode blendMode) {
         mDrawableBlendMode = blendMode;
         mHasDrawableBlendMode = true;
@@ -792,6 +799,7 @@ public class ImageView extends View {
     @android.view.RemotableViewMethod
     public void setImageLevel(int level) {
         mLevel = level;
+        mHasLevelSet = true;
         if (mDrawable != null) {
             mDrawable.setLevel(level);
             resizeFromDrawable();
@@ -1063,7 +1071,9 @@ public class ImageView extends View {
                         : isAttachedToWindow() && getWindowVisibility() == VISIBLE && isShown();
                 d.setVisible(visible, true);
             }
-            d.setLevel(mLevel);
+            if (mHasLevelSet) {
+                d.setLevel(mLevel);
+            }
             mDrawableWidth = d.getIntrinsicWidth();
             mDrawableHeight = d.getIntrinsicHeight();
             applyImageTint();

@@ -20,9 +20,10 @@ import android.app.ActivityManager;
 import android.app.AppGlobals;
 import android.content.pm.IPackageManager;
 import android.content.pm.PackageManager;
-import android.os.BasicShellCommandHandler;
 import android.os.Binder;
 import android.os.UserHandle;
+
+import com.android.modules.utils.BasicShellCommandHandler;
 
 import java.io.PrintWriter;
 
@@ -292,13 +293,13 @@ public final class JobSchedulerShellCommand extends BasicShellCommandHandler {
     }
 
     private int getBatteryCharging(PrintWriter pw) {
-        boolean val = mInternal.getBatteryCharging();
+        boolean val = mInternal.isBatteryCharging();
         pw.println(val);
         return 0;
     }
 
     private int getBatteryNotLow(PrintWriter pw) {
-        boolean val = mInternal.getBatteryNotLow();
+        boolean val = mInternal.isBatteryNotLow();
         pw.println(val);
         return 0;
     }

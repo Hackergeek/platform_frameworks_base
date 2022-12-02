@@ -1,6 +1,8 @@
 package android.telephony;
 
 import android.annotation.IntDef;
+import android.net.NetworkAgent;
+import android.net.NetworkCapabilities;
 import android.telecom.Connection;
 import android.telephony.data.ApnSetting;
 
@@ -111,6 +113,7 @@ public class Annotation {
     public @interface NetworkType {
     }
 
+    // TODO(b/180542000): remove and replace references with @ApnSetting.ApnType
     @IntDef(flag = true, prefix = {"TYPE_"}, value = {
             ApnSetting.TYPE_DEFAULT,
             ApnSetting.TYPE_MMS,
@@ -124,6 +127,9 @@ public class Annotation {
             ApnSetting.TYPE_EMERGENCY,
             ApnSetting.TYPE_MCX,
             ApnSetting.TYPE_XCAP,
+            ApnSetting.TYPE_BIP,
+            ApnSetting.TYPE_VSIM,
+            ApnSetting.TYPE_ENTERPRISE
     })
     @Retention(RetentionPolicy.SOURCE)
     public @interface ApnType {
@@ -445,6 +451,9 @@ public class Annotation {
             DataFailCause.VSNCP_RECONNECT_NOT_ALLOWED,
             DataFailCause.IPV6_PREFIX_UNAVAILABLE,
             DataFailCause.HANDOFF_PREFERENCE_CHANGED,
+            DataFailCause.SLICE_REJECTED,
+            DataFailCause.MATCH_ALL_RULE_NOT_ALLOWED,
+            DataFailCause.ALL_MATCHING_RULES_FAILED,
             DataFailCause.OEM_DCFAILCAUSE_1,
             DataFailCause.OEM_DCFAILCAUSE_2,
             DataFailCause.OEM_DCFAILCAUSE_3,
@@ -624,6 +633,20 @@ public class Annotation {
     public @interface UiccAppType{}
 
     /**
+     * UICC SIM Application Types including UNKNOWN
+     */
+    @IntDef(prefix = { "APPTYPE_" }, value = {
+            TelephonyManager.APPTYPE_UNKNOWN,
+            TelephonyManager.APPTYPE_SIM,
+            TelephonyManager.APPTYPE_USIM,
+            TelephonyManager.APPTYPE_RUIM,
+            TelephonyManager.APPTYPE_CSIM,
+            TelephonyManager.APPTYPE_ISIM
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface UiccAppTypeExt{}
+
+    /**
      * Override network type
      */
     @Retention(RetentionPolicy.SOURCE)
@@ -632,6 +655,87 @@ public class Annotation {
             TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_LTE_CA,
             TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_LTE_ADVANCED_PRO,
             TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_NSA,
-            TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_NSA_MMWAVE})
+            TelephonyDisplayInfo.OVERRIDE_NETWORK_TYPE_NR_ADVANCED})
     public @interface OverrideNetworkType {}
+
+    /**
+     *  Result of a thermal mitigation request.
+     */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(prefix = { "THERMAL_MITIGATION_RESULT_" }, value = {
+        TelephonyManager.THERMAL_MITIGATION_RESULT_SUCCESS,
+        TelephonyManager.THERMAL_MITIGATION_RESULT_MODEM_ERROR,
+        TelephonyManager.THERMAL_MITIGATION_RESULT_INVALID_STATE,
+        TelephonyManager.THERMAL_MITIGATION_RESULT_UNKNOWN_ERROR})
+    public @interface ThermalMitigationResult {}
+
+    /**
+     * Per Android API guideline 8.15, annotation can't be public APIs. So duplicate
+     * android.net.NetworkCapabilities.NetCapability here. Must update here when new capabilities
+     * are added in {@link NetworkCapabilities}.
+     */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(prefix = { "NET_CAPABILITY_" }, value = {
+            NetworkCapabilities.NET_CAPABILITY_MMS,
+            NetworkCapabilities.NET_CAPABILITY_SUPL,
+            NetworkCapabilities.NET_CAPABILITY_DUN,
+            NetworkCapabilities.NET_CAPABILITY_FOTA,
+            NetworkCapabilities.NET_CAPABILITY_IMS,
+            NetworkCapabilities.NET_CAPABILITY_CBS,
+            NetworkCapabilities.NET_CAPABILITY_WIFI_P2P,
+            NetworkCapabilities.NET_CAPABILITY_IA,
+            NetworkCapabilities.NET_CAPABILITY_RCS,
+            NetworkCapabilities.NET_CAPABILITY_XCAP,
+            NetworkCapabilities.NET_CAPABILITY_EIMS,
+            NetworkCapabilities.NET_CAPABILITY_NOT_METERED,
+            NetworkCapabilities.NET_CAPABILITY_INTERNET,
+            NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED,
+            NetworkCapabilities.NET_CAPABILITY_TRUSTED,
+            NetworkCapabilities.NET_CAPABILITY_NOT_VPN,
+            NetworkCapabilities.NET_CAPABILITY_VALIDATED,
+            NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL,
+            NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING,
+            NetworkCapabilities.NET_CAPABILITY_FOREGROUND,
+            NetworkCapabilities.NET_CAPABILITY_NOT_CONGESTED,
+            NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED,
+            NetworkCapabilities.NET_CAPABILITY_OEM_PAID,
+            NetworkCapabilities.NET_CAPABILITY_MCX,
+            NetworkCapabilities.NET_CAPABILITY_PARTIAL_CONNECTIVITY,
+            NetworkCapabilities.NET_CAPABILITY_TEMPORARILY_NOT_METERED,
+            NetworkCapabilities.NET_CAPABILITY_OEM_PRIVATE,
+            NetworkCapabilities.NET_CAPABILITY_VEHICLE_INTERNAL,
+            NetworkCapabilities.NET_CAPABILITY_NOT_VCN_MANAGED,
+            NetworkCapabilities.NET_CAPABILITY_ENTERPRISE,
+            NetworkCapabilities.NET_CAPABILITY_VSIM,
+            NetworkCapabilities.NET_CAPABILITY_BIP,
+            NetworkCapabilities.NET_CAPABILITY_HEAD_UNIT,
+            NetworkCapabilities.NET_CAPABILITY_MMTEL,
+            NetworkCapabilities.NET_CAPABILITY_PRIORITIZE_LATENCY,
+            NetworkCapabilities.NET_CAPABILITY_PRIORITIZE_BANDWIDTH
+    })
+    public @interface NetCapability { }
+
+    /**
+     * Per Android API guideline 8.15, annotation can't be public APIs. So duplicate
+     * android.net.NetworkAgent.ValidationStatus here. Must update here when new validation status
+     * are added in {@link NetworkAgent}.
+     */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(prefix = { "VALIDATION_STATUS_" }, value = {
+            NetworkAgent.VALIDATION_STATUS_VALID,
+            NetworkAgent.VALIDATION_STATUS_NOT_VALID
+    })
+    public @interface ValidationStatus {}
+
+    /** @hide */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(prefix = { "NET_CAPABILITY_ENTERPRISE_SUB_LEVEL" }, value = {
+            NetworkCapabilities.NET_ENTERPRISE_ID_1,
+            NetworkCapabilities.NET_ENTERPRISE_ID_2,
+            NetworkCapabilities.NET_ENTERPRISE_ID_3,
+            NetworkCapabilities.NET_ENTERPRISE_ID_4,
+            NetworkCapabilities.NET_ENTERPRISE_ID_5
+    })
+
+    public @interface EnterpriseId {}
 }

@@ -20,6 +20,7 @@ import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession;
 import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CameraOfflineSession;
 import android.hardware.camera2.CameraOfflineSession.CameraOfflineSessionCallback;
 import android.hardware.camera2.CaptureRequest;
@@ -29,9 +30,11 @@ import android.hardware.camera2.utils.SurfaceUtils;
 import android.os.Handler;
 import android.os.ConditionVariable;
 import android.util.Range;
+import android.util.Log;
 import android.view.Surface;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
@@ -55,6 +58,7 @@ public class CameraConstrainedHighSpeedCaptureSessionImpl
     private final CameraCharacteristics mCharacteristics;
     private final CameraCaptureSessionImpl mSessionImpl;
     private final ConditionVariable mInitialized = new ConditionVariable();
+    private final String TAG = "CameraConstrainedHighSpeedCaptureSessionImpl";
 
     /**
      * Create a new CameraCaptureSession.
@@ -81,17 +85,46 @@ public class CameraConstrainedHighSpeedCaptureSessionImpl
         if (request == null) {
             throw new IllegalArgumentException("Input capture request must not be null");
         }
+        CameraCharacteristics.Key<StreamConfigurationMap> ck =
+                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP;
+        Integer sensorPixelMode = request.get(CaptureRequest.SENSOR_PIXEL_MODE);
+        if (sensorPixelMode != null && sensorPixelMode ==
+                CameraMetadata.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION) {
+            ck = CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION;
+        }
         Collection<Surface> outputSurfaces = request.getTargets();
         Range<Integer> fpsRange = request.get(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE);
 
-        StreamConfigurationMap config =
-                mCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        StreamConfigurationMap config = mCharacteristics.get(ck);
         SurfaceUtils.checkConstrainedHighSpeedSurfaces(outputSurfaces, fpsRange, config);
 
-        // Request list size: to limit the preview to 30fps, need use maxFps/30; to maximize
-        // the preview frame rate, should use maxBatch size for that high speed stream
-        // configuration. We choose the former for now.
-        int requestListSize = fpsRange.getUpper() / 30;
+        // Check the high speed video fps ranges for video size and find the min value from the list
+        // and assign it to previewFps which will be used to calculate the requestList size.
+        Range<Integer>[] highSpeedFpsRanges = config.getHighSpeedVideoFpsRangesFor(
+                SurfaceUtils.getSurfaceSize(outputSurfaces.iterator().next()));
+        Log.v(TAG, "High speed fps ranges: " + Arrays.toString(highSpeedFpsRanges));
+        int previewFps = Integer.MAX_VALUE;
+        for (Range<Integer> range : highSpeedFpsRanges) {
+            int rangeMin = range.getLower();
+            if (previewFps > rangeMin) {
+                previewFps = rangeMin;
+            }
+        }
+        // Since we only want to support 60fps apart from 30fps, if the min value is not 60,
+        // then continue to calculate the requestList size using value 30.
+        if (previewFps != 60 && previewFps != 30) {
+            Log.w(TAG, "previewFps is neither 60 nor 30.");
+            previewFps = 30;
+        }
+        Log.v(TAG, "previewFps: " + previewFps);
+
+        int requestListSize = fpsRange.getUpper() / previewFps;
+        // If it's a preview, keep requestList size fixed = 1.
+        if (fpsRange.getUpper() > fpsRange.getLower()) {
+            requestListSize = 1;
+        }
+
+        Log.v(TAG, "Request list size is: " + requestListSize);
         List<CaptureRequest> requestList = new ArrayList<CaptureRequest>();
 
         // Prepare the Request builders: need carry over the request controls.

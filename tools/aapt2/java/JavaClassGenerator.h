@@ -46,7 +46,7 @@ struct JavaClassGeneratorOptions {
 
   // If set, generates code to rewrite the package ID of resources.
   // Implies use_final == true. Default is unset.
-  Maybe<OnResourcesLoadedCallbackOptions> rewrite_callback_options;
+  std::optional<OnResourcesLoadedCallbackOptions> rewrite_callback_options;
 
   enum class SymbolTypes {
     kAll,
@@ -83,13 +83,13 @@ class JavaClassGenerator {
 
  private:
   bool SkipSymbol(Visibility::Level state);
-  bool SkipSymbol(const Maybe<SymbolTable::Symbol>& symbol);
+  bool SkipSymbol(const std::optional<SymbolTable::Symbol>& symbol);
 
   // Returns the unmangled resource entry name if the unmangled package is the same as
   // package_name_to_generate. Returns nothing if the resource should be skipped.
-  Maybe<std::string> UnmangleResource(const android::StringPiece& package_name,
-                                      const android::StringPiece& package_name_to_generate,
-                                      const ResourceEntry& entry);
+  std::optional<std::string> UnmangleResource(const android::StringPiece& package_name,
+                                              const android::StringPiece& package_name_to_generate,
+                                              const ResourceEntry& entry);
 
   bool ProcessType(const android::StringPiece& package_name_to_generate,
                    const ResourceTablePackage& package, const ResourceTableType& type,
@@ -105,7 +105,7 @@ class JavaClassGenerator {
   // Writes a styleable resource to the R.java file, optionally writing out a rewrite rule for
   // its package ID if `out_rewrite_method` is not nullptr.
   // `package_name_to_generate` is the package
-  void ProcessStyleable(const ResourceNameRef& name, const ResourceId& id,
+  bool ProcessStyleable(const ResourceNameRef& name, const ResourceId& id,
                         const Styleable& styleable,
                         const android::StringPiece& package_name_to_generate,
                         ClassDefinition* out_class_def, MethodDefinition* out_rewrite_method,

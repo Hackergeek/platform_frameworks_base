@@ -19,7 +19,6 @@ import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.os.Parcel;
 import android.os.Parcelable;
 
@@ -32,7 +31,6 @@ import java.lang.annotation.RetentionPolicy;
  * @hide
  */
 @SystemApi
-@TestApi
 public final class AppTargetEvent implements Parcelable {
 
     /**
@@ -62,6 +60,11 @@ public final class AppTargetEvent implements Parcelable {
      */
     public static final int ACTION_UNPIN = 4;
 
+    /**
+     * Event type constant indicating an app target has been un-dismissed.
+     */
+    public static final int ACTION_UNDISMISS = 5;
+
     private final AppTarget mTarget;
     private final String mLocation;
     private final int mAction;
@@ -74,7 +77,7 @@ public final class AppTargetEvent implements Parcelable {
     }
 
     private AppTargetEvent(Parcel parcel) {
-        mTarget = parcel.readParcelable(null);
+        mTarget = parcel.readParcelable(null, android.app.prediction.AppTarget.class);
         mLocation = parcel.readString();
         mAction = parcel.readInt();
     }
@@ -141,7 +144,6 @@ public final class AppTargetEvent implements Parcelable {
      * @hide
      */
     @SystemApi
-    @TestApi
     public static final class Builder {
         private AppTarget mTarget;
         private String mLocation;

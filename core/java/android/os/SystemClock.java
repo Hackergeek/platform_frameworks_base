@@ -104,6 +104,8 @@ import java.time.ZoneOffset;
 public final class SystemClock {
     private static final String TAG = "SystemClock";
 
+    private static volatile IAlarmManager sIAlarmManager;
+
     /**
      * This class is uninstantiable.
      */
@@ -151,8 +153,7 @@ public final class SystemClock {
      * @return if the clock was successfully set to the specified time.
      */
     public static boolean setCurrentTimeMillis(long millis) {
-        final IAlarmManager mgr = IAlarmManager.Stub
-                .asInterface(ServiceManager.getService(Context.ALARM_SERVICE));
+        final IAlarmManager mgr = getIAlarmManager();
         if (mgr == null) {
             Slog.e(TAG, "Unable to set RTC: mgr == null");
             return false;
@@ -176,6 +177,15 @@ public final class SystemClock {
      */
     @CriticalNative
     native public static long uptimeMillis();
+
+    /**
+     * Returns nanoseconds since boot, not counting time spent in deep sleep.
+     *
+     * @return nanoseconds of non-sleep uptime since boot.
+     * @hide
+     */
+    @CriticalNative
+    public static native long uptimeNanos();
 
     /**
      * Return {@link Clock} that starts at system boot, not counting time spent
@@ -238,7 +248,7 @@ public final class SystemClock {
      *
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     @CriticalNative
     public static native long currentThreadTimeMicro();
 
@@ -271,8 +281,7 @@ public final class SystemClock {
      * @hide
      */
     public static long currentNetworkTimeMillis() {
-        final IAlarmManager mgr = IAlarmManager.Stub
-                .asInterface(ServiceManager.getService(Context.ALARM_SERVICE));
+        final IAlarmManager mgr = getIAlarmManager();
         if (mgr != null) {
             try {
                 return mgr.currentNetworkTimeMillis();
@@ -285,6 +294,14 @@ public final class SystemClock {
         } else {
             throw new RuntimeException(new DeadSystemException());
         }
+    }
+
+    private static IAlarmManager getIAlarmManager() {
+        if (sIAlarmManager == null) {
+            sIAlarmManager = IAlarmManager.Stub
+                    .asInterface(ServiceManager.getService(Context.ALARM_SERVICE));
+        }
+        return sIAlarmManager;
     }
 
     /**
@@ -302,7 +319,6 @@ public final class SystemClock {
      * time or throw.
      *
      * @throws DateTimeException when no accurate network time can be provided.
-     * @hide
      */
     public static @NonNull Clock currentNetworkTimeClock() {
         return new SimpleClock(ZoneOffset.UTC) {
@@ -329,15 +345,14 @@ public final class SystemClock {
                 try {
                     time = mMgr.getGnssTimeMillis();
                 } catch (RemoteException e) {
-                    e.rethrowFromSystemServer();
-                    return 0;
+                    throw e.rethrowFromSystemServer();
                 }
                 if (time == null) {
                     throw new DateTimeException("Gnss based time is not available.");
                 }
                 long currentNanos = elapsedRealtimeNanos();
                 long deltaMs = (currentNanos - time.getElapsedRealtimeNanos()) / 1000000L;
-                return time.getTime() + deltaMs;
+                return time.getUnixEpochTimeMillis() + deltaMs;
             }
         };
     }

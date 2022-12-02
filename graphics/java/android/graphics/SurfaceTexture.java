@@ -17,7 +17,10 @@
 package android.graphics;
 
 import android.annotation.Nullable;
+import android.annotation.SuppressLint;
 import android.compat.annotation.UnsupportedAppUsage;
+import android.hardware.DataSpace.NamedDataSpace;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
@@ -69,17 +72,17 @@ import java.lang.ref.WeakReference;
  */
 public class SurfaceTexture {
     private final Looper mCreatorLooper;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private Handler mOnFrameAvailableHandler;
 
     /**
      * These fields are used by native code, do not access or modify.
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(trackingBug = 176388660)
     private long mSurfaceTexture;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(trackingBug = 176388660)
     private long mProducer;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private long mFrameAvailableListener;
 
     private boolean mIsSingleBuffered;
@@ -287,7 +290,7 @@ public class SurfaceTexture {
      * context at a time.
      *
      * @param texName The name of the OpenGL ES texture that will be created.  This texture name
-     * must be unusued in the OpenGL ES context that is current on the calling thread.
+     * must be unused in the OpenGL ES context that is current on the calling thread.
      */
     public void attachToGLContext(int texName) {
         int err = nativeAttachToGLContext(texName);
@@ -347,6 +350,14 @@ public class SurfaceTexture {
     }
 
     /**
+     * Retrieve the dataspace associated with the texture image.
+     */
+    @SuppressLint("MethodNameUnits")
+    public @NamedDataSpace int getDataSpace() {
+        return nativeGetDataSpace();
+    }
+
+    /**
      * {@code release()} frees all the buffers and puts the SurfaceTexture into the
      * 'abandoned' state. Once put in this state the SurfaceTexture can never
      * leave it. When in the 'abandoned' state, all methods of the
@@ -390,7 +401,7 @@ public class SurfaceTexture {
      * This method is invoked from native code only.
      */
     @SuppressWarnings({"UnusedDeclaration"})
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private static void postEventFromNative(WeakReference<SurfaceTexture> weakSelf) {
         SurfaceTexture st = weakSelf.get();
         if (st != null) {
@@ -415,6 +426,7 @@ public class SurfaceTexture {
     private native void nativeFinalize();
     private native void nativeGetTransformMatrix(float[] mtx);
     private native long nativeGetTimestamp();
+    private native int nativeGetDataSpace();
     private native void nativeSetDefaultBufferSize(int width, int height);
     private native void nativeUpdateTexImage();
     private native void nativeReleaseTexImage();

@@ -36,6 +36,7 @@ import android.content.res.AssetFileDescriptor;
 import android.database.Cursor;
 import android.database.StaleDataException;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Environment;
 import android.os.FileUtils;
 import android.os.IBinder;
@@ -520,12 +521,12 @@ public class RingtoneManager {
     public int getRingtonePosition(Uri ringtoneUri) {
         try {
             if (ringtoneUri == null) return -1;
-            final long ringtoneId = ContentUris.parseId(ringtoneUri);
 
             final Cursor cursor = getCursor();
             cursor.moveToPosition(-1);
             while (cursor.moveToNext()) {
-                if (ringtoneId == cursor.getLong(ID_COLUMN_INDEX)) {
+                Uri uriFromCursor = getUriFromCursor(mContext, cursor);
+                if (ringtoneUri.equals(uriFromCursor)) {
                     return cursor.getPosition();
                 }
             }
@@ -585,7 +586,7 @@ public class RingtoneManager {
         return new ExternalRingtonesCursorWrapper(res, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI);
     }
 
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private Cursor getMediaRingtones(Context context) {
         // MediaStore now returns ringtones on other storage devices, even when
         // we don't have storage or audio permissions
@@ -728,7 +729,7 @@ public class RingtoneManager {
      * @param volumeShaperConfig config for volume shaper of the ringtone if applied.
      * @see #getRingtone(Context, Uri)
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private static Ringtone getRingtone(
             final Context context, Uri ringtoneUri, int streamType,
             @Nullable VolumeShaper.Configuration volumeShaperConfig) {
@@ -745,32 +746,6 @@ public class RingtoneManager {
         }
 
         return null;
-    }
-
-    /**
-     * Disables Settings.System.SYNC_PARENT_SOUNDS.
-     *
-     * @hide
-     */
-    public static void disableSyncFromParent(Context userContext) {
-        IBinder b = ServiceManager.getService(Context.AUDIO_SERVICE);
-        IAudioService audioService = IAudioService.Stub.asInterface(b);
-        try {
-            audioService.disableRingtoneSync(userContext.getUserId());
-        } catch (RemoteException e) {
-            Log.e(TAG, "Unable to disable ringtone sync.");
-        }
-    }
-
-    /**
-     * Enables Settings.System.SYNC_PARENT_SOUNDS for the content's user
-     *
-     * @hide
-     */
-    @RequiresPermission(Manifest.permission.WRITE_SECURE_SETTINGS)
-    public static void enableSyncFromParent(Context userContext) {
-        Settings.Secure.putIntForUser(userContext.getContentResolver(),
-                Settings.Secure.SYNC_PARENT_SOUNDS, 1 /* true */, userContext.getUserId());
     }
 
     /**
@@ -817,11 +792,6 @@ public class RingtoneManager {
         if (setting == null) return;
 
         final ContentResolver resolver = context.getContentResolver();
-        if (Settings.Secure.getIntForUser(resolver, Settings.Secure.SYNC_PARENT_SOUNDS, 0,
-                    context.getUserId()) == 1) {
-            // Parent sound override is enabled. Disable it using the audio service.
-            disableSyncFromParent(context);
-        }
         if(!isInternalRingtoneUri(ringtoneUri)) {
             ringtoneUri = ContentProvider.maybeAddUserId(ringtoneUri, context.getUserId());
         }
@@ -894,7 +864,7 @@ public class RingtoneManager {
             throw new IOException("External storage is not mounted. Unable to install ringtones.");
         }
 
-        // Sanity-check: are we actually being asked to install an audio file?
+        // Consistency-check: are we actually being asked to install an audio file?
         final String mimeType = mContext.getContentResolver().getType(fileUri);
         if(mimeType == null ||
                 !(mimeType.startsWith("audio/") || mimeType.equals("application/ogg"))) {
@@ -1081,18 +1051,33 @@ public class RingtoneManager {
      * @return true if the ringtone contains haptic channels.
      */
     public boolean hasHapticChannels(int position) {
-        return hasHapticChannels(getRingtoneUri(position));
+        return AudioManager.hasHapticChannels(mContext, getRingtoneUri(position));
     }
 
     /**
      * Returns if the {@link Ringtone} from a given sound URI contains
-     * haptic channels or not.
+     * haptic channels or not. As this function doesn't has a context
+     * to resolve the uri, the result may be wrong if the uri cannot be
+     * resolved correctly.
+     * Use {@link #hasHapticChannels(int)} or {@link #hasHapticChannels(Context, Uri)}
+     * instead when possible.
      *
      * @param ringtoneUri The {@link Uri} of a sound or ringtone.
      * @return true if the ringtone contains haptic channels.
      */
     public static boolean hasHapticChannels(@NonNull Uri ringtoneUri) {
-        return AudioManager.hasHapticChannels(ringtoneUri);
+        return AudioManager.hasHapticChannels(null, ringtoneUri);
+    }
+
+    /**
+     * Returns if the {@link Ringtone} from a given sound URI contains haptics channels or not.
+     *
+     * @param context the {@link android.content.Context} to use when resolving the Uri.
+     * @param ringtoneUri the {@link Uri} of a sound or ringtone.
+     * @return true if the ringtone contains haptic channels.
+     */
+    public static boolean hasHapticChannels(@NonNull Context context, @NonNull Uri ringtoneUri) {
+        return AudioManager.hasHapticChannels(context, ringtoneUri);
     }
 
     /**

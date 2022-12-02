@@ -47,6 +47,26 @@ public final class SystemUiDeviceConfigFlags {
      */
     public static final String NAS_MAX_SUGGESTIONS = "nas_max_suggestions";
 
+    /**
+     * Whether the Notification Assistant can change ranking.
+     */
+    public static final String ENABLE_NAS_RANKING = "enable_nas_ranking";
+
+    /**
+     * Whether the Notification Assistant can prioritize notification.
+     */
+    public static final String ENABLE_NAS_PRIORITIZER = "enable_nas_prioritizer";
+
+    /**
+     * Whether to enable feedback UI for Notification Assistant
+     */
+    public static final String ENABLE_NAS_FEEDBACK = "enable_nas_feedback";
+
+    /**
+     * Whether the Notification Assistant can label a notification not a conversation
+     */
+    public static final String ENABLE_NAS_NOT_CONVERSATION = "enable_nas_not_conversation";
+
     // Flags related to screenshot intelligence
 
     /**
@@ -60,6 +80,12 @@ public final class SystemUiDeviceConfigFlags {
      */
     public static final String SCREENSHOT_NOTIFICATION_SMART_ACTIONS_TIMEOUT_MS =
             "screenshot_notification_smart_actions_timeout_ms";
+
+    /**
+     * (int) Timeout value in ms to get Quick Share actions for screenshot notification.
+     */
+    public static final String SCREENSHOT_NOTIFICATION_QUICK_SHARE_ACTIONS_TIMEOUT_MS =
+            "screenshot_notification_quick_share_actions_timeout_ms";
 
     // Flags related to Smart Suggestions - these are read in SmartReplyConstants.
 
@@ -110,15 +136,44 @@ public final class SystemUiDeviceConfigFlags {
     // Flags related to media notifications
 
     /**
-     * (boolean) If {@code true}, enables the seekbar in compact media notifications.
-     */
-    public static final String COMPACT_MEDIA_SEEKBAR_ENABLED =
-            "compact_media_notification_seekbar_enabled";
-
-    /**
      * (int) Maximum number of days to retain the salt for hashing direct share targets in logging
      */
     public static final String HASH_SALT_MAX_DAYS = "hash_salt_max_days";
+
+    // Flag related to Privacy Indicators
+
+    /**
+     * Whether to show the complete ongoing app ops chip.
+     */
+    public static final String PROPERTY_PERMISSIONS_HUB_ENABLED = "permissions_hub_2_enabled";
+
+    /**
+     * Whether to show app ops chip for just microphone + camera.
+     */
+    public static final String PROPERTY_MIC_CAMERA_ENABLED = "camera_mic_icons_enabled";
+
+    /**
+     * Whether to show app ops chip for location.
+     */
+    public static final String PROPERTY_LOCATION_INDICATORS_ENABLED = "location_indicators_enabled";
+
+    /**
+     * Whether to show privacy chip for media projection.
+     */
+    public static final String PROPERTY_MEDIA_PROJECTION_INDICATORS_ENABLED =
+            "media_projection_indicators_enabled";
+
+    /**
+     * Whether to show old location indicator on all location accesses.
+     */
+    public static final String PROPERTY_LOCATION_INDICATORS_SMALL_ENABLED =
+            "location_indicators_small_enabled";
+
+    /**
+     * Whether to show the location indicator for system apps.
+     */
+    public static final String PROPERTY_LOCATION_INDICATORS_SHOW_SYSTEM =
+            "location_indicators_show_system";
 
     // Flags related to Assistant
 
@@ -343,11 +398,6 @@ public final class SystemUiDeviceConfigFlags {
      */
     public static final String SCREENSHOT_CORNER_FLOW = "enable_screenshot_corner_flow";
 
-    /**
-     * (boolean) Whether scrolling screenshots are enabled.
-     */
-    public static final String SCREENSHOT_SCROLLING_ENABLED = "enable_screenshot_scrolling";
-
     // Flags related to Nav Bar
 
     /**
@@ -378,9 +428,26 @@ public final class SystemUiDeviceConfigFlags {
     public static final String CHOOSER_TARGET_RANKING_ENABLED = "chooser_target_ranking_enabled";
 
     /**
-     * (boolean) Whether to enable user-drag resizing for PIP.
+     * (boolean) Whether dark launch of remote prediction service is enabled.
      */
-    public static final String PIP_USER_RESIZE = "pip_user_resize";
+    public static final String DARK_LAUNCH_REMOTE_PREDICTION_SERVICE_ENABLED =
+            "dark_launch_remote_prediction_service_enabled";
+
+    /**
+     * (boolean) Whether to enable pinch resizing for PIP.
+     */
+    public static final String PIP_PINCH_RESIZE = "pip_pinch_resize";
+
+    /**
+     * (boolean) Whether to enable stashing for PIP.
+     */
+    public static final String PIP_STASHING = "pip_stashing";
+
+    /**
+     * (float) The threshold velocity to cause PiP to be stashed when flinging from one edge to the
+     * other.
+     */
+    public static final String PIP_STASH_MINIMUM_VELOCITY_THRESHOLD = "pip_velocity_threshold";
 
     /**
      * (float) Bottom height in DP for Back Gesture.
@@ -396,6 +463,114 @@ public final class SystemUiDeviceConfigFlags {
      * (float) Slop multiplier for Back Gesture.
      */
     public static final String BACK_GESTURE_SLOP_MULTIPLIER = "back_gesture_slop_multiplier";
+
+    /**
+     * (long) Screenshot keychord delay (how long the buttons must be pressed), in ms
+     */
+    public static final String SCREENSHOT_KEYCHORD_DELAY = "screenshot_keychord_delay";
+
+    /**
+     * (boolean) Whether to use an ML model for the Back Gesture.
+     */
+    public static final String USE_BACK_GESTURE_ML_MODEL = "use_back_gesture_ml_model";
+
+    /**
+     * (string) The name of the ML model for Back Gesture.
+     */
+    public static final String BACK_GESTURE_ML_MODEL_NAME = "back_gesture_ml_model_name";
+
+    /**
+     * (float) Threshold for Back Gesture ML model prediction.
+     */
+    public static final String BACK_GESTURE_ML_MODEL_THRESHOLD = "back_gesture_ml_model_threshold";
+
+    /**
+     * (boolean) Sharesheet - Whether to use the deprecated
+     * {@link android.service.chooser.ChooserTargetService} API for
+     *  direct share targets. If true, both CTS and Shortcuts will be used to find Direct
+     *  Share targets. If false, only Shortcuts will be used.
+     */
+    public static final String SHARE_USE_SERVICE_TARGETS = "share_use_service_targets";
+
+    /**
+     * (boolean) If true, SysUI provides guardrails for app usage of Direct Share by enforcing
+     * limits on number of targets per app & adjusting scores for apps providing many targets. If
+     * false, this step is skipped. This should be true unless the ranking provider configured by
+     * [some other flag] is expected to manage these incentives.
+     */
+    public static final String APPLY_SHARING_APP_LIMITS_IN_SYSUI =
+            "apply_sharing_app_limits_in_sysui";
+
+    /*
+     * (long) The duration that the home button must be pressed before triggering Assist
+     */
+    public static final String HOME_BUTTON_LONG_PRESS_DURATION_MS =
+            "home_button_long_press_duration_ms";
+
+    /**
+     * (boolean) Whether shortcut integration over app search service is enabled.
+     */
+    public static final String SHORTCUT_APPSEARCH_INTEGRATION =
+            "shortcut_appsearch_integration";
+
+    /**
+     * (boolean) Whether nearby share should be the first target in ranked apps.
+     */
+    public static final String IS_NEARBY_SHARE_FIRST_TARGET_IN_RANKED_APP =
+            "is_nearby_share_first_target_in_ranked_app";
+
+    /**
+     * (boolean) Whether to enable the new unbundled sharesheet
+     * (com.android.intentresolver.ChooserActivity).
+     */
+    public static final String USE_UNBUNDLED_SHARESHEET = "use_unbundled_sharesheet";
+
+    /**
+     * (int) The delay (in ms) before refreshing the Sharesheet UI after a change to the share
+     * target data model. For more info see go/sharesheet-list-view-update-delay.
+     */
+    public static final String SHARESHEET_LIST_VIEW_UPDATE_DELAY =
+            "sharesheet_list_view_update_delay";
+
+    /**
+     * (string) Name of the default QR code scanner activity. On the eligible devices this activity
+     * is provided by GMS core.
+     */
+    public static final String DEFAULT_QR_CODE_SCANNER = "default_qr_code_scanner";
+
+    /**
+     * (boolean) Whether the task manager entrypoint is enabled.
+     */
+    public static final String TASK_MANAGER_ENABLED = "task_manager_enabled";
+
+    /**
+     * (boolean) Whether the task manager should show an attention grabbing dot when tasks changed.
+     */
+    public static final String TASK_MANAGER_SHOW_FOOTER_DOT = "task_manager_show_footer_dot";
+
+
+    /**
+     * (boolean) Whether the clipboard overlay is enabled.
+     */
+    public static final String CLIPBOARD_OVERLAY_ENABLED = "clipboard_overlay_enabled";
+
+    /**
+     * (boolean) Whether widget provider info would be saved to / loaded from system persistence
+     * layer as opposed to individual manifests in respective apps.
+     */
+    public static final String PERSISTS_WIDGET_PROVIDER_INFO = "persists_widget_provider_info";
+
+    /**
+     * (boolean) Whether the clipboard overlay shows an edit button (as opposed to requiring tapping
+     * the preview to send an edit intent).
+     */
+    public static final String CLIPBOARD_OVERLAY_SHOW_EDIT_BUTTON =
+            "clipboard_overlay_show_edit_button";
+
+    /**
+     * (boolean) Whether to show smart chips (based on TextClassifier) in the clipboard overlay.
+     */
+    public static final String CLIPBOARD_OVERLAY_SHOW_ACTIONS = "clipboard_overlay_show_actions";
 
     private SystemUiDeviceConfigFlags() {
     }

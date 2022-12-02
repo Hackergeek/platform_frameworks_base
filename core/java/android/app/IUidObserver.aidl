@@ -24,7 +24,7 @@ oneway interface IUidObserver {
     // below block of transactions.
 
     // Since these transactions are also called from native code, these must be kept in sync with
-    // the ones in frameworks/native/include/binder/IActivityManager.h
+    // the ones in frameworks/native/include_activitymanager/binder/IActivityManager.h
     // =============== Beginning of transactions used on native side as well ======================
 
     /**
@@ -53,6 +53,13 @@ oneway interface IUidObserver {
      * @param capability the updated process capability for the uid.
      */
     void onUidStateChanged(int uid, int procState, long procStateSeq, int capability);
+
+    /**
+     * Report a proc oom adj change associated with a uid.
+     *
+     * @param uid The uid for which the state change is being reported.
+     */
+    void onUidProcAdjChanged(int uid);
 
     // =============== End of transactions used on native side as well ============================
 

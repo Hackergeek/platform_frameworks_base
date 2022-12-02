@@ -25,6 +25,7 @@ import android.os.SystemClock;
 import androidx.annotation.NonNull;
 
 import com.android.systemui.Dumpable;
+import com.android.systemui.dagger.SysUISingleton;
 import com.android.systemui.dump.DumpManager;
 import com.android.systemui.shared.tracing.FrameProtoTracer;
 import com.android.systemui.shared.tracing.FrameProtoTracer.ProtoTraceParams;
@@ -36,20 +37,23 @@ import com.android.systemui.tracing.nano.SystemUiTraceProto;
 import com.google.protobuf.nano.MessageNano;
 
 import java.io.File;
-import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Queue;
 
 import javax.inject.Inject;
-import javax.inject.Singleton;
 
 /**
  * Controller for coordinating winscope proto tracing.
  */
-@Singleton
-public class ProtoTracer implements Dumpable, ProtoTraceParams<MessageNano, SystemUiTraceFileProto,
-        SystemUiTraceEntryProto, SystemUiTraceProto> {
+@SysUISingleton
+public class ProtoTracer implements
+        Dumpable,
+        ProtoTraceParams<
+                MessageNano,
+                SystemUiTraceFileProto,
+                SystemUiTraceEntryProto,
+                SystemUiTraceProto> {
 
     private static final String TAG = "ProtoTracer";
     private static final long MAGIC_NUMBER_VALUE = ((long) MAGIC_NUMBER_H << 32) | MAGIC_NUMBER_L;
@@ -62,7 +66,7 @@ public class ProtoTracer implements Dumpable, ProtoTraceParams<MessageNano, Syst
     public ProtoTracer(Context context, DumpManager dumpManager) {
         mContext = context;
         mProtoTracer = new FrameProtoTracer<>(this);
-        dumpManager.registerDumpable(getClass().getName(), this);
+        dumpManager.registerDumpable(this);
     }
 
     @Override
@@ -136,7 +140,7 @@ public class ProtoTracer implements Dumpable, ProtoTraceParams<MessageNano, Syst
     }
 
     @Override
-    public void dump(@NonNull FileDescriptor fd, @NonNull PrintWriter pw, @NonNull String[] args) {
+    public void dump(@NonNull PrintWriter pw, @NonNull String[] args) {
         pw.println("ProtoTracer:");
         pw.print("    "); pw.println("enabled: " + mProtoTracer.isEnabled());
         pw.print("    "); pw.println("usagePct: " + mProtoTracer.getBufferUsagePct());

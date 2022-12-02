@@ -18,10 +18,16 @@ package com.android.server.connectivity;
 
 import static android.net.ConnectivityManager.NetworkCallback;
 import static android.net.ipsec.ike.SaProposal.DH_GROUP_2048_BIT_MODP;
+import static android.net.ipsec.ike.SaProposal.DH_GROUP_3072_BIT_MODP;
+import static android.net.ipsec.ike.SaProposal.DH_GROUP_4096_BIT_MODP;
+import static android.net.ipsec.ike.SaProposal.DH_GROUP_CURVE_25519;
 import static android.net.ipsec.ike.SaProposal.ENCRYPTION_ALGORITHM_AES_CBC;
+import static android.net.ipsec.ike.SaProposal.ENCRYPTION_ALGORITHM_AES_CTR;
 import static android.net.ipsec.ike.SaProposal.ENCRYPTION_ALGORITHM_AES_GCM_12;
 import static android.net.ipsec.ike.SaProposal.ENCRYPTION_ALGORITHM_AES_GCM_16;
 import static android.net.ipsec.ike.SaProposal.ENCRYPTION_ALGORITHM_AES_GCM_8;
+import static android.net.ipsec.ike.SaProposal.ENCRYPTION_ALGORITHM_CHACHA20_POLY1305;
+import static android.net.ipsec.ike.SaProposal.INTEGRITY_ALGORITHM_AES_CMAC_96;
 import static android.net.ipsec.ike.SaProposal.INTEGRITY_ALGORITHM_AES_XCBC_96;
 import static android.net.ipsec.ike.SaProposal.INTEGRITY_ALGORITHM_HMAC_SHA2_256_128;
 import static android.net.ipsec.ike.SaProposal.INTEGRITY_ALGORITHM_HMAC_SHA2_384_192;
@@ -29,8 +35,13 @@ import static android.net.ipsec.ike.SaProposal.INTEGRITY_ALGORITHM_HMAC_SHA2_512
 import static android.net.ipsec.ike.SaProposal.KEY_LEN_AES_128;
 import static android.net.ipsec.ike.SaProposal.KEY_LEN_AES_192;
 import static android.net.ipsec.ike.SaProposal.KEY_LEN_AES_256;
+import static android.net.ipsec.ike.SaProposal.KEY_LEN_UNUSED;
+import static android.net.ipsec.ike.SaProposal.PSEUDORANDOM_FUNCTION_AES128_CMAC;
 import static android.net.ipsec.ike.SaProposal.PSEUDORANDOM_FUNCTION_AES128_XCBC;
 import static android.net.ipsec.ike.SaProposal.PSEUDORANDOM_FUNCTION_HMAC_SHA1;
+import static android.net.ipsec.ike.SaProposal.PSEUDORANDOM_FUNCTION_SHA2_256;
+import static android.net.ipsec.ike.SaProposal.PSEUDORANDOM_FUNCTION_SHA2_384;
+import static android.net.ipsec.ike.SaProposal.PSEUDORANDOM_FUNCTION_SHA2_512;
 
 import android.annotation.NonNull;
 import android.content.Context;
@@ -39,7 +50,9 @@ import android.net.InetAddresses;
 import android.net.IpPrefix;
 import android.net.IpSecAlgorithm;
 import android.net.IpSecTransform;
+import android.net.LinkProperties;
 import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.RouteInfo;
 import android.net.eap.EapSessionConfig;
 import android.net.ipsec.ike.ChildSaProposal;
@@ -55,17 +68,18 @@ import android.net.ipsec.ike.IkeRfc822AddrIdentification;
 import android.net.ipsec.ike.IkeSaProposal;
 import android.net.ipsec.ike.IkeSessionCallback;
 import android.net.ipsec.ike.IkeSessionConfiguration;
+import android.net.ipsec.ike.IkeSessionConnectionInfo;
 import android.net.ipsec.ike.IkeSessionParams;
 import android.net.ipsec.ike.IkeTrafficSelector;
 import android.net.ipsec.ike.TunnelModeChildSessionParams;
 import android.net.ipsec.ike.exceptions.IkeException;
 import android.net.ipsec.ike.exceptions.IkeProtocolException;
-import android.net.util.IpRange;
 import android.system.OsConstants;
 import android.util.Log;
 
 import com.android.internal.net.VpnProfile;
 import com.android.internal.util.HexDump;
+import com.android.net.module.util.IpRange;
 
 import java.net.Inet4Address;
 import java.net.Inet6Address;
@@ -75,6 +89,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.concurrent.Executor;
 
 /**
  * Utility class to build and convert IKEv2/IPsec parameters.
@@ -83,12 +98,6 @@ import java.util.List;
  */
 public class VpnIkev2Utils {
     private static final String TAG = VpnIkev2Utils.class.getSimpleName();
-
-    // TODO: Use IKE library exposed constants when @SystemApi is updated.
-    /** IANA-defined 3072 group for use in IKEv2 */
-    private static final int DH_GROUP_3072_BIT_MODP = 15;
-    /** IANA-defined 4096 group for use in IKEv2 */
-    private static final int DH_GROUP_4096_BIT_MODP = 16;
 
     static IkeSessionParams buildIkeSessionParams(
             @NonNull Context context, @NonNull Ikev2VpnProfile profile, @NonNull Network network) {
@@ -99,6 +108,7 @@ public class VpnIkev2Utils {
                 new IkeSessionParams.Builder(context)
                         .setServerHostname(profile.getServerAddr())
                         .setNetwork(network)
+                        .addIkeOption(IkeSessionParams.IKE_OPTION_MOBIKE)
                         .setLocalIdentification(localId)
                         .setRemoteIdentification(remoteId);
         setIkeAuth(profile, ikeOptionsBuilder);
@@ -154,12 +164,14 @@ public class VpnIkev2Utils {
         // TODO: Add ability to filter this when IKEv2 API is made Public API
         final List<IkeSaProposal> proposals = new ArrayList<>();
 
-        // Encryption Algorithms: Currently only AES_CBC is supported.
         final IkeSaProposal.Builder normalModeBuilder = new IkeSaProposal.Builder();
 
-        // Currently only AES_CBC is supported.
+        // Add normal mode encryption algorithms
+        normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CTR, KEY_LEN_AES_256);
         normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CBC, KEY_LEN_AES_256);
+        normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CTR, KEY_LEN_AES_192);
         normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CBC, KEY_LEN_AES_192);
+        normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CTR, KEY_LEN_AES_128);
         normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CBC, KEY_LEN_AES_128);
 
         // Authentication/Integrity Algorithms
@@ -167,9 +179,11 @@ public class VpnIkev2Utils {
         normalModeBuilder.addIntegrityAlgorithm(INTEGRITY_ALGORITHM_HMAC_SHA2_384_192);
         normalModeBuilder.addIntegrityAlgorithm(INTEGRITY_ALGORITHM_HMAC_SHA2_256_128);
         normalModeBuilder.addIntegrityAlgorithm(INTEGRITY_ALGORITHM_AES_XCBC_96);
+        normalModeBuilder.addIntegrityAlgorithm(INTEGRITY_ALGORITHM_AES_CMAC_96);
 
         // Add AEAD options
         final IkeSaProposal.Builder aeadBuilder = new IkeSaProposal.Builder();
+        aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_CHACHA20_POLY1305, KEY_LEN_UNUSED);
         aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_16, KEY_LEN_AES_256);
         aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_12, KEY_LEN_AES_256);
         aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_8, KEY_LEN_AES_256);
@@ -183,9 +197,17 @@ public class VpnIkev2Utils {
         // Add dh, prf for both builders
         for (final IkeSaProposal.Builder builder : Arrays.asList(normalModeBuilder, aeadBuilder)) {
             builder.addDhGroup(DH_GROUP_4096_BIT_MODP);
+
+            // Curve25519 has the same security strength as MODP 3072 and cost less bytes
+            builder.addDhGroup(DH_GROUP_CURVE_25519);
+
             builder.addDhGroup(DH_GROUP_3072_BIT_MODP);
             builder.addDhGroup(DH_GROUP_2048_BIT_MODP);
+            builder.addPseudorandomFunction(PSEUDORANDOM_FUNCTION_SHA2_512);
+            builder.addPseudorandomFunction(PSEUDORANDOM_FUNCTION_SHA2_384);
+            builder.addPseudorandomFunction(PSEUDORANDOM_FUNCTION_SHA2_256);
             builder.addPseudorandomFunction(PSEUDORANDOM_FUNCTION_AES128_XCBC);
+            builder.addPseudorandomFunction(PSEUDORANDOM_FUNCTION_AES128_CMAC);
             builder.addPseudorandomFunction(PSEUDORANDOM_FUNCTION_HMAC_SHA1);
         }
 
@@ -198,15 +220,23 @@ public class VpnIkev2Utils {
     private static List<ChildSaProposal> getChildSaProposals(List<String> allowedAlgorithms) {
         final List<ChildSaProposal> proposals = new ArrayList<>();
 
+        final List<Integer> aesKeyLenOptions =
+                Arrays.asList(KEY_LEN_AES_256, KEY_LEN_AES_192, KEY_LEN_AES_128);
+
         // Add non-AEAD options
         if (Ikev2VpnProfile.hasNormalModeAlgorithms(allowedAlgorithms)) {
             final ChildSaProposal.Builder normalModeBuilder = new ChildSaProposal.Builder();
 
             // Encryption Algorithms:
-            // AES-CBC is currently the only supported encryption algorithm.
-            normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CBC, KEY_LEN_AES_256);
-            normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CBC, KEY_LEN_AES_192);
-            normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CBC, KEY_LEN_AES_128);
+            // AES-CBC and AES_CTR are currently the only supported encryption algorithms.
+            for (int len : aesKeyLenOptions) {
+                if (allowedAlgorithms.contains(IpSecAlgorithm.CRYPT_AES_CTR)) {
+                    normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CTR, len);
+                }
+                if (allowedAlgorithms.contains(IpSecAlgorithm.CRYPT_AES_CBC)) {
+                    normalModeBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_CBC, len);
+                }
+            }
 
             // Authentication/Integrity Algorithms:
             // Guaranteed by Ikev2VpnProfile constructor to contain at least one of these.
@@ -218,6 +248,12 @@ public class VpnIkev2Utils {
             }
             if (allowedAlgorithms.contains(IpSecAlgorithm.AUTH_HMAC_SHA256)) {
                 normalModeBuilder.addIntegrityAlgorithm(INTEGRITY_ALGORITHM_HMAC_SHA2_256_128);
+            }
+            if (allowedAlgorithms.contains(IpSecAlgorithm.AUTH_AES_XCBC)) {
+                normalModeBuilder.addIntegrityAlgorithm(INTEGRITY_ALGORITHM_AES_XCBC_96);
+            }
+            if (allowedAlgorithms.contains(IpSecAlgorithm.AUTH_AES_CMAC)) {
+                normalModeBuilder.addIntegrityAlgorithm(INTEGRITY_ALGORITHM_AES_CMAC_96);
             }
 
             ChildSaProposal proposal = normalModeBuilder.build();
@@ -233,16 +269,27 @@ public class VpnIkev2Utils {
         if (Ikev2VpnProfile.hasAeadAlgorithms(allowedAlgorithms)) {
             final ChildSaProposal.Builder aeadBuilder = new ChildSaProposal.Builder();
 
-            // AES-GCM is currently the only supported AEAD algorithm
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_16, KEY_LEN_AES_256);
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_12, KEY_LEN_AES_256);
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_8, KEY_LEN_AES_256);
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_16, KEY_LEN_AES_192);
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_12, KEY_LEN_AES_192);
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_8, KEY_LEN_AES_192);
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_16, KEY_LEN_AES_128);
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_12, KEY_LEN_AES_128);
-            aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_8, KEY_LEN_AES_128);
+            if (allowedAlgorithms.contains(IpSecAlgorithm.AUTH_CRYPT_CHACHA20_POLY1305)) {
+                aeadBuilder.addEncryptionAlgorithm(
+                        ENCRYPTION_ALGORITHM_CHACHA20_POLY1305, KEY_LEN_UNUSED);
+            }
+            if (allowedAlgorithms.contains(IpSecAlgorithm.AUTH_CRYPT_AES_GCM)) {
+                aeadBuilder.addEncryptionAlgorithm(
+                        ENCRYPTION_ALGORITHM_AES_GCM_16, KEY_LEN_AES_256);
+                aeadBuilder.addEncryptionAlgorithm(
+                        ENCRYPTION_ALGORITHM_AES_GCM_12, KEY_LEN_AES_256);
+                aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_8, KEY_LEN_AES_256);
+                aeadBuilder.addEncryptionAlgorithm(
+                        ENCRYPTION_ALGORITHM_AES_GCM_16, KEY_LEN_AES_192);
+                aeadBuilder.addEncryptionAlgorithm(
+                        ENCRYPTION_ALGORITHM_AES_GCM_12, KEY_LEN_AES_192);
+                aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_8, KEY_LEN_AES_192);
+                aeadBuilder.addEncryptionAlgorithm(
+                        ENCRYPTION_ALGORITHM_AES_GCM_16, KEY_LEN_AES_128);
+                aeadBuilder.addEncryptionAlgorithm(
+                        ENCRYPTION_ALGORITHM_AES_GCM_12, KEY_LEN_AES_128);
+                aeadBuilder.addEncryptionAlgorithm(ENCRYPTION_ALGORITHM_AES_GCM_8, KEY_LEN_AES_128);
+            }
 
             proposals.add(aeadBuilder.build());
         }
@@ -253,72 +300,79 @@ public class VpnIkev2Utils {
     static class IkeSessionCallbackImpl implements IkeSessionCallback {
         private final String mTag;
         private final Vpn.IkeV2VpnRunnerCallback mCallback;
-        private final Network mNetwork;
+        private final int mToken;
 
-        IkeSessionCallbackImpl(String tag, Vpn.IkeV2VpnRunnerCallback callback, Network network) {
+        IkeSessionCallbackImpl(String tag, Vpn.IkeV2VpnRunnerCallback callback, int token) {
             mTag = tag;
             mCallback = callback;
-            mNetwork = network;
+            mToken = token;
         }
 
         @Override
         public void onOpened(@NonNull IkeSessionConfiguration ikeSessionConfig) {
-            Log.d(mTag, "IkeOpened for network " + mNetwork);
-            // Nothing to do here.
+            Log.d(mTag, "IkeOpened for token " + mToken);
+            mCallback.onIkeOpened(mToken, ikeSessionConfig);
         }
 
         @Override
         public void onClosed() {
-            Log.d(mTag, "IkeClosed for network " + mNetwork);
-            mCallback.onSessionLost(mNetwork, null); // Server requested session closure. Retry?
+            Log.d(mTag, "IkeClosed for token " + mToken);
+            mCallback.onSessionLost(mToken, null); // Server requested session closure. Retry?
         }
 
         @Override
         public void onClosedExceptionally(@NonNull IkeException exception) {
-            Log.d(mTag, "IkeClosedExceptionally for network " + mNetwork, exception);
-            mCallback.onSessionLost(mNetwork, exception);
+            Log.d(mTag, "IkeClosedExceptionally for token " + mToken, exception);
+            mCallback.onSessionLost(mToken, exception);
         }
 
         @Override
         public void onError(@NonNull IkeProtocolException exception) {
-            Log.d(mTag, "IkeError for network " + mNetwork, exception);
+            Log.d(mTag, "IkeError for token " + mToken, exception);
             // Non-fatal, log and continue.
+        }
+
+        @Override
+        public void onIkeSessionConnectionInfoChanged(
+                @NonNull IkeSessionConnectionInfo connectionInfo) {
+            Log.d(mTag, "onIkeSessionConnectionInfoChanged for token " + mToken);
+            mCallback.onIkeConnectionInfoChanged(mToken, connectionInfo);
         }
     }
 
     static class ChildSessionCallbackImpl implements ChildSessionCallback {
         private final String mTag;
         private final Vpn.IkeV2VpnRunnerCallback mCallback;
-        private final Network mNetwork;
+        private final int mToken;
 
-        ChildSessionCallbackImpl(String tag, Vpn.IkeV2VpnRunnerCallback callback, Network network) {
+        ChildSessionCallbackImpl(String tag, Vpn.IkeV2VpnRunnerCallback callback, int token) {
             mTag = tag;
             mCallback = callback;
-            mNetwork = network;
+            mToken = token;
         }
 
         @Override
         public void onOpened(@NonNull ChildSessionConfiguration childConfig) {
-            Log.d(mTag, "ChildOpened for network " + mNetwork);
-            mCallback.onChildOpened(mNetwork, childConfig);
+            Log.d(mTag, "ChildOpened for token " + mToken);
+            mCallback.onChildOpened(mToken, childConfig);
         }
 
         @Override
         public void onClosed() {
-            Log.d(mTag, "ChildClosed for network " + mNetwork);
-            mCallback.onSessionLost(mNetwork, null);
+            Log.d(mTag, "ChildClosed for token " + mToken);
+            mCallback.onSessionLost(mToken, null);
         }
 
         @Override
         public void onClosedExceptionally(@NonNull IkeException exception) {
-            Log.d(mTag, "ChildClosedExceptionally for network " + mNetwork, exception);
-            mCallback.onSessionLost(mNetwork, exception);
+            Log.d(mTag, "ChildClosedExceptionally for token " + mToken, exception);
+            mCallback.onSessionLost(mToken, exception);
         }
 
         @Override
         public void onIpSecTransformCreated(@NonNull IpSecTransform transform, int direction) {
-            Log.d(mTag, "ChildTransformCreated; Direction: " + direction + "; network " + mNetwork);
-            mCallback.onChildTransformCreated(mNetwork, transform, direction);
+            Log.d(mTag, "ChildTransformCreated; Direction: " + direction + "; token " + mToken);
+            mCallback.onChildTransformCreated(mToken, transform, direction);
         }
 
         @Override
@@ -326,30 +380,56 @@ public class VpnIkev2Utils {
             // Nothing to be done; no references to the IpSecTransform are held by the
             // Ikev2VpnRunner (or this callback class), and this transform will be closed by the
             // IKE library.
-            Log.d(mTag,
-                    "ChildTransformDeleted; Direction: " + direction + "; for network " + mNetwork);
+            Log.d(mTag, "ChildTransformDeleted; Direction: " + direction + "; for token " + mToken);
+        }
+
+        @Override
+        public void onIpSecTransformsMigrated(
+                @NonNull IpSecTransform inIpSecTransform,
+                @NonNull IpSecTransform outIpSecTransform) {
+            Log.d(mTag, "ChildTransformsMigrated; token " + mToken);
+            mCallback.onChildMigrated(mToken, inIpSecTransform, outIpSecTransform);
         }
     }
 
     static class Ikev2VpnNetworkCallback extends NetworkCallback {
         private final String mTag;
         private final Vpn.IkeV2VpnRunnerCallback mCallback;
+        private final Executor mExecutor;
 
-        Ikev2VpnNetworkCallback(String tag, Vpn.IkeV2VpnRunnerCallback callback) {
+        Ikev2VpnNetworkCallback(String tag, Vpn.IkeV2VpnRunnerCallback callback,
+                Executor executor) {
             mTag = tag;
             mCallback = callback;
+            mExecutor = executor;
         }
 
         @Override
         public void onAvailable(@NonNull Network network) {
-            Log.d(mTag, "Starting IKEv2/IPsec session on new network: " + network);
-            mCallback.onDefaultNetworkChanged(network);
+            Log.d(mTag, "onAvailable called for network: " + network);
+            mExecutor.execute(() -> mCallback.onDefaultNetworkChanged(network));
+        }
+
+        @Override
+        public void onCapabilitiesChanged(@NonNull Network network,
+                @NonNull NetworkCapabilities networkCapabilities) {
+            Log.d(mTag, "NC changed for net " + network + " : " + networkCapabilities);
+            mExecutor.execute(
+                    () -> mCallback.onDefaultNetworkCapabilitiesChanged(networkCapabilities));
+        }
+
+        @Override
+        public void onLinkPropertiesChanged(@NonNull Network network,
+                @NonNull LinkProperties linkProperties) {
+            Log.d(mTag, "LP changed for net " + network + " : " + linkProperties);
+            mExecutor.execute(
+                    () -> mCallback.onDefaultNetworkLinkPropertiesChanged(linkProperties));
         }
 
         @Override
         public void onLost(@NonNull Network network) {
-            Log.d(mTag, "Tearing down; lost network: " + network);
-            mCallback.onSessionLost(network, null);
+            Log.d(mTag, "onLost called for network: " + network);
+            mExecutor.execute(() -> mCallback.onDefaultNetworkLost(network));
         }
     }
 
@@ -405,7 +485,8 @@ public class VpnIkev2Utils {
         for (final IkeTrafficSelector selector : trafficSelectors) {
             for (final IpPrefix prefix :
                     new IpRange(selector.startingAddress, selector.endingAddress).asIpPrefixes()) {
-                routes.add(new RouteInfo(prefix, null));
+                routes.add(new RouteInfo(prefix, null /*gateway*/, null /*iface*/,
+                        RouteInfo.RTN_UNICAST));
             }
         }
 

@@ -23,14 +23,18 @@ import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.annotation.SystemService;
+import android.annotation.TestApi;
 import android.content.Context;
+import android.net.NetworkStack;
 import android.os.connectivity.CellularBatteryStats;
 import android.os.connectivity.WifiBatteryStats;
+import android.telephony.DataConnectionRealTimeInfo;
 
 import com.android.internal.app.IBatteryStats;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.List;
 
 /**
  * This class provides an API surface for internal system components to report events that are
@@ -85,7 +89,7 @@ public final class BatteryStatsManager {
     public static final int NUM_WIFI_STATES = WIFI_STATE_SOFT_AP + 1;
 
     /** @hide */
-    @IntDef(flag = true, prefix = { "WIFI_STATE_" }, value = {
+    @IntDef(prefix = { "WIFI_STATE_" }, value = {
             WIFI_STATE_OFF,
             WIFI_STATE_OFF_SCANNING,
             WIFI_STATE_ON_NO_NETWORKS,
@@ -135,7 +139,7 @@ public final class BatteryStatsManager {
     public static final int NUM_WIFI_SUPPL_STATES = WIFI_SUPPL_STATE_UNINITIALIZED + 1;
 
     /** @hide */
-    @IntDef(flag = true, prefix = { "WIFI_SUPPL_STATE_" }, value = {
+    @IntDef(prefix = { "WIFI_SUPPL_STATE_" }, value = {
             WIFI_SUPPL_STATE_INVALID,
             WIFI_SUPPL_STATE_DISCONNECTED,
             WIFI_SUPPL_STATE_INTERFACE_DISABLED,
@@ -153,11 +157,53 @@ public final class BatteryStatsManager {
     @Retention(RetentionPolicy.SOURCE)
     public @interface WifiSupplState {}
 
+
     private final IBatteryStats mBatteryStats;
 
     /** @hide */
     public BatteryStatsManager(IBatteryStats batteryStats) {
         mBatteryStats = batteryStats;
+    }
+
+
+    /**
+     * Returns BatteryUsageStats, which contains power attribution data on a per-subsystem
+     * and per-UID basis.
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.BATTERY_STATS)
+    @NonNull
+    public BatteryUsageStats getBatteryUsageStats() {
+        return getBatteryUsageStats(BatteryUsageStatsQuery.DEFAULT);
+    }
+
+    /**
+     * Returns BatteryUsageStats, which contains power attribution data on a per-subsystem
+     * and per-UID basis.
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.BATTERY_STATS)
+    @NonNull
+    public BatteryUsageStats getBatteryUsageStats(BatteryUsageStatsQuery query) {
+        return getBatteryUsageStats(List.of(query)).get(0);
+    }
+
+    /**
+     * Returns BatteryUsageStats, which contains power attribution data on a per-subsystem
+     * and per-UID basis.
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.BATTERY_STATS)
+    @NonNull
+    public List<BatteryUsageStats> getBatteryUsageStats(List<BatteryUsageStatsQuery> queries) {
+        try {
+            return mBatteryStats.getBatteryUsageStats(queries);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
     }
 
     /**
@@ -217,7 +263,7 @@ public final class BatteryStatsManager {
     /**
      * Indicates that a new wifi scan has started.
      *
-     * @param ws Worksource (to be used for battery blaming).
+     * @param ws worksource (to be used for battery blaming).
      */
     @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
     public void reportWifiScanStartedFromSource(@NonNull WorkSource ws) {
@@ -231,7 +277,7 @@ public final class BatteryStatsManager {
     /**
      * Indicates that an ongoing wifi scan has stopped.
      *
-     * @param ws Worksource (to be used for battery blaming).
+     * @param ws worksource (to be used for battery blaming).
      */
     @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
     public void reportWifiScanStoppedFromSource(@NonNull WorkSource ws) {
@@ -245,7 +291,7 @@ public final class BatteryStatsManager {
     /**
      * Indicates that a new wifi batched scan has started.
      *
-     * @param ws Worksource (to be used for battery blaming).
+     * @param ws worksource (to be used for battery blaming).
      * @param csph Channels scanned per hour.
      */
     @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
@@ -261,7 +307,7 @@ public final class BatteryStatsManager {
     /**
      * Indicates that an ongoing wifi batched scan has stopped.
      *
-     * @param ws Worksource (to be used for battery blaming).
+     * @param ws worksource (to be used for battery blaming).
      */
     @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
     public void reportWifiBatchedScanStoppedFromSource(@NonNull WorkSource ws) {
@@ -277,7 +323,9 @@ public final class BatteryStatsManager {
      *
      * @return Instance of {@link CellularBatteryStats}.
      */
-    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    @RequiresPermission(anyOf = {
+            android.Manifest.permission.BATTERY_STATS,
+            android.Manifest.permission.UPDATE_DEVICE_STATS})
     public @NonNull CellularBatteryStats getCellularBatteryStats() {
         try {
             return mBatteryStats.getCellularBatteryStats();
@@ -292,7 +340,9 @@ public final class BatteryStatsManager {
      *
      * @return Instance of {@link WifiBatteryStats}.
      */
-    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    @RequiresPermission(anyOf = {
+            android.Manifest.permission.BATTERY_STATS,
+            android.Manifest.permission.UPDATE_DEVICE_STATS})
     public @NonNull WifiBatteryStats getWifiBatteryStats() {
         try {
             return mBatteryStats.getWifiBatteryStats();
@@ -303,9 +353,39 @@ public final class BatteryStatsManager {
     }
 
     /**
+     * Retrieves accumulate wake lock stats.
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.BATTERY_STATS)
+    @NonNull
+    public WakeLockStats getWakeLockStats() {
+        try {
+            return mBatteryStats.getWakeLockStats();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Retrieves accumulated bluetooth stats.
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.BATTERY_STATS)
+    @NonNull
+    public BluetoothBatteryStats getBluetoothBatteryStats() {
+        try {
+            return mBatteryStats.getBluetoothBatteryStats();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
      * Indicates an app acquiring full wifi lock.
      *
-     * @param ws Worksource (to be used for battery blaming).
+     * @param ws worksource (to be used for battery blaming).
      */
     @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
     public void reportFullWifiLockAcquiredFromSource(@NonNull WorkSource ws) {
@@ -319,7 +399,7 @@ public final class BatteryStatsManager {
     /**
      * Indicates an app releasing full wifi lock.
      *
-     * @param ws Worksource (to be used for battery blaming).
+     * @param ws worksource (to be used for battery blaming).
      */
     @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
     public void reportFullWifiLockReleasedFromSource(@NonNull WorkSource ws) {
@@ -372,6 +452,230 @@ public final class BatteryStatsManager {
     public void reportWifiMulticastDisabled(@NonNull WorkSource ws) {
         try {
             mBatteryStats.noteWifiMulticastDisabled(ws.getAttributionUid());
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Indicates that the radio power state has changed.
+     *
+     * @param isActive indicates if the mobile radio is powered.
+     * @param uid Uid of this event. For the active state it represents the uid that was responsible
+     *            for waking the radio, or -1 if the system was responsible for waking the radio.
+     *            For inactive state, the UID should always be -1.
+     */
+    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    public void reportMobileRadioPowerState(boolean isActive, int uid) {
+        try {
+            mBatteryStats.noteMobileRadioPowerState(getDataConnectionPowerState(isActive),
+                    SystemClock.elapsedRealtimeNanos(), uid);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Indicates that the wifi power state has changed.
+     *
+     * @param isActive indicates if the wifi radio is powered.
+     * @param uid Uid of this event. For the active state it represents the uid that was responsible
+     *            for waking the radio, or -1 if the system was responsible for waking the radio.
+     *            For inactive state, the UID should always be -1.
+     */
+    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    public void reportWifiRadioPowerState(boolean isActive, int uid) {
+        try {
+            mBatteryStats.noteWifiRadioPowerState(getDataConnectionPowerState(isActive),
+                    SystemClock.elapsedRealtimeNanos(), uid);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Notifies the battery stats of a new interface, and the transport types of the network that
+     * includes that interface.
+     *
+     * @param iface The interface of the network.
+     * @param transportTypes The transport type of the network {@link Transport}.
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    @RequiresPermission(anyOf = {
+            NetworkStack.PERMISSION_MAINLINE_NETWORK_STACK,
+            android.Manifest.permission.NETWORK_STACK})
+    public void reportNetworkInterfaceForTransports(@NonNull String iface,
+            @NonNull int[] transportTypes) throws RuntimeException {
+        try {
+            mBatteryStats.noteNetworkInterfaceForTransports(iface, transportTypes);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Indicates that Bluetooth was toggled on.
+     *
+     * @param uid calling package uid
+     * @param reason why Bluetooth has been turned on
+     * @param packageName package responsible for this change
+     */
+    @RequiresPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
+    public void reportBluetoothOn(int uid, int reason, @NonNull String packageName) {
+        try {
+            mBatteryStats.noteBluetoothOn(uid, reason, packageName);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Indicates that Bluetooth was toggled off.
+     *
+     * @param uid calling package uid
+     * @param reason why Bluetooth has been turned on
+     * @param packageName package responsible for this change
+     */
+    @RequiresPermission(android.Manifest.permission.BLUETOOTH_CONNECT)
+    public void reportBluetoothOff(int uid, int reason, @NonNull String packageName) {
+        try {
+            mBatteryStats.noteBluetoothOff(uid, reason, packageName);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Indicates that a new Bluetooth LE scan has started.
+     *
+     * @param ws worksource (to be used for battery blaming).
+     * @param isUnoptimized whether or not the scan has a filter.
+     */
+    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    public void reportBleScanStarted(@NonNull WorkSource ws, boolean isUnoptimized) {
+        try {
+            mBatteryStats.noteBleScanStarted(ws, isUnoptimized);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Indicates that an ongoing Bluetooth LE scan has stopped.
+     *
+     * @param ws worksource (to be used for battery blaming).
+     * @param isUnoptimized whether or not the scan has a filter.
+     */
+    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    public void reportBleScanStopped(@NonNull WorkSource ws, boolean isUnoptimized) {
+        try {
+            mBatteryStats.noteBleScanStopped(ws, isUnoptimized);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Indicates that Bluetooth LE has been reset.
+     */
+    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    public void reportBleScanReset() {
+        try {
+            mBatteryStats.noteBleScanReset();
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Indicates that Bluetooth LE scan has received new results.
+     *
+     * @param ws worksource (to be used for battery blaming).
+     * @param numNewResults number of results received since last update.
+     */
+    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    public void reportBleScanResults(@NonNull WorkSource ws, int numNewResults) {
+        try {
+            mBatteryStats.noteBleScanResults(ws, numNewResults);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    private static int getDataConnectionPowerState(boolean isActive) {
+        // TODO: DataConnectionRealTimeInfo is under telephony package but the constants are used
+        // for both Wifi and mobile. It would make more sense to separate the constants to a
+        // generic class or move it to generic package.
+        return isActive ? DataConnectionRealTimeInfo.DC_POWER_STATE_HIGH
+                : DataConnectionRealTimeInfo.DC_POWER_STATE_LOW;
+    }
+
+    /**
+     * Sets battery AC charger to enabled/disabled, and freezes the battery state.
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.DEVICE_POWER)
+    public void setChargerAcOnline(boolean online, boolean forceUpdate) {
+        try {
+            mBatteryStats.setChargerAcOnline(online, forceUpdate);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Sets battery level, and freezes the battery state.
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.DEVICE_POWER)
+    public void setBatteryLevel(int level, boolean forceUpdate) {
+        try {
+            mBatteryStats.setBatteryLevel(level, forceUpdate);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Unplugs battery, and freezes the battery state.
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.DEVICE_POWER)
+    public void unplugBattery(boolean forceUpdate) {
+        try {
+            mBatteryStats.unplugBattery(forceUpdate);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Unfreezes battery state, returning to current hardware values.
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.DEVICE_POWER)
+    public void resetBattery(boolean forceUpdate) {
+        try {
+            mBatteryStats.resetBattery(forceUpdate);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Suspend charging even if plugged in.
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.DEVICE_POWER)
+    public void suspendBatteryInput() {
+        try {
+            mBatteryStats.suspendBatteryInput();
         } catch (RemoteException e) {
             e.rethrowFromSystemServer();
         }

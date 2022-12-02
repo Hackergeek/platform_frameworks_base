@@ -17,24 +17,35 @@
 package com.android.systemui.qs.tiles
 
 import android.content.Context
+import android.os.Handler
 import android.testing.AndroidTestingRunner
 import android.testing.TestableLooper
 import android.testing.TestableLooper.RunWithLooper
+import android.view.View
 import androidx.test.filters.SmallTest
-import com.android.systemui.Dependency
+import com.android.internal.logging.MetricsLogger
 import com.android.systemui.SysuiTestCase
+import com.android.systemui.classifier.FalsingManagerFake
+import com.android.systemui.plugins.ActivityStarter
+import com.android.systemui.plugins.statusbar.StatusBarStateController
 import com.android.systemui.qs.QSHost
+import com.android.systemui.qs.logging.QSLogger
 import com.android.systemui.statusbar.policy.BatteryController
+import com.android.systemui.util.settings.FakeSettings
+import com.android.systemui.util.settings.SecureSettings
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mock
 import org.mockito.Mockito.`when`
+import org.mockito.Mockito.clearInvocations
+import org.mockito.Mockito.never
+import org.mockito.Mockito.verify
 import org.mockito.MockitoAnnotations
 
 @RunWith(AndroidTestingRunner::class)
-@RunWithLooper
+@RunWithLooper(setAsMainLooper = true)
 @SmallTest
 class BatterySaverTileTest : SysuiTestCase() {
 
@@ -47,7 +58,18 @@ class BatterySaverTileTest : SysuiTestCase() {
     @Mock
     private lateinit var qsHost: QSHost
     @Mock
+    private lateinit var metricsLogger: MetricsLogger
+    @Mock
+    private lateinit var statusBarStateController: StatusBarStateController
+    @Mock
+    private lateinit var activityStarter: ActivityStarter
+    @Mock
+    private lateinit var qsLogger: QSLogger
+    @Mock
     private lateinit var batteryController: BatteryController
+    @Mock
+    private lateinit var view: View
+    private lateinit var secureSettings: SecureSettings
     private lateinit var testableLooper: TestableLooper
     private lateinit var tile: BatterySaverTile
 
@@ -55,11 +77,25 @@ class BatterySaverTileTest : SysuiTestCase() {
     fun setUp() {
         MockitoAnnotations.initMocks(this)
         testableLooper = TestableLooper.get(this)
-        mDependency.injectTestDependency(Dependency.BG_LOOPER, testableLooper.looper)
         `when`(qsHost.userContext).thenReturn(userContext)
         `when`(userContext.userId).thenReturn(USER)
 
-        tile = BatterySaverTile(qsHost, batteryController)
+        secureSettings = FakeSettings()
+
+        tile = BatterySaverTile(
+                qsHost,
+                testableLooper.looper,
+                Handler(testableLooper.looper),
+                FalsingManagerFake(),
+                metricsLogger,
+                statusBarStateController,
+                activityStarter,
+                qsLogger,
+                batteryController,
+                secureSettings)
+
+        tile.initialize()
+        testableLooper.processAllMessages()
     }
 
     @Test
@@ -74,5 +110,27 @@ class BatterySaverTileTest : SysuiTestCase() {
         testableLooper.processAllMessages()
 
         assertEquals(USER + 1, tile.mSetting.currentUser)
+    }
+
+    @Test
+    fun testClickingPowerSavePassesView() {
+        tile.onPowerSaveChanged(true)
+        tile.handleClick(view)
+
+        tile.onPowerSaveChanged(false)
+        tile.handleClick(view)
+
+        verify(batteryController).setPowerSaveMode(true, view)
+        verify(batteryController).setPowerSaveMode(false, view)
+    }
+
+    @Test
+    fun testStopListeningClearsViewInController() {
+        clearInvocations(batteryController)
+        tile.handleSetListening(true)
+        verify(batteryController, never()).clearLastPowerSaverStartView()
+
+        tile.handleSetListening(false)
+        verify(batteryController).clearLastPowerSaverStartView()
     }
 }

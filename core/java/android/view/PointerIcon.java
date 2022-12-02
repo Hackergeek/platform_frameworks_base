@@ -17,6 +17,7 @@
 package android.view;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.annotation.XmlRes;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
@@ -152,17 +153,17 @@ public final class PointerIcon implements Parcelable {
     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
     private final int mType;
     private int mSystemIconResourceId;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private Bitmap mBitmap;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private float mHotSpotX;
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private float mHotSpotY;
     // The bitmaps for the additional frame of animated pointer icon. Note that the first frame
     // will be stored in mBitmap.
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private Bitmap mBitmapFrames[];
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private int mDurationPerFrame;
 
     /**
@@ -183,7 +184,7 @@ public final class PointerIcon implements Parcelable {
      * @see #TYPE_NULL
      * @hide
      */
-    public static PointerIcon getNullIcon() {
+    public static @NonNull PointerIcon getNullIcon() {
         return gNullIcon;
     }
 
@@ -196,7 +197,7 @@ public final class PointerIcon implements Parcelable {
      * @throws IllegalArgumentException if context is null.
      * @hide
      */
-    public static PointerIcon getDefaultIcon(@NonNull Context context) {
+    public static @NonNull PointerIcon getDefaultIcon(@NonNull Context context) {
         return getSystemIcon(context, TYPE_DEFAULT);
     }
 
@@ -210,7 +211,7 @@ public final class PointerIcon implements Parcelable {
      *
      * @throws IllegalArgumentException if context is null.
      */
-    public static PointerIcon getSystemIcon(@NonNull Context context, int type) {
+    public static @NonNull PointerIcon getSystemIcon(@NonNull Context context, int type) {
         if (context == null) {
             throw new IllegalArgumentException("context must not be null");
         }
@@ -286,7 +287,8 @@ public final class PointerIcon implements Parcelable {
      * @throws IllegalArgumentException if bitmap is null, or if the x/y hotspot
      *         parameters are invalid.
      */
-    public static PointerIcon create(@NonNull Bitmap bitmap, float hotSpotX, float hotSpotY) {
+    public static @NonNull PointerIcon create(@NonNull Bitmap bitmap, float hotSpotX,
+            float hotSpotY) {
         if (bitmap == null) {
             throw new IllegalArgumentException("bitmap must not be null");
         }
@@ -320,7 +322,7 @@ public final class PointerIcon implements Parcelable {
      * @throws Resources.NotFoundException if the resource was not found or the drawable
      * linked in the resource was not found.
      */
-    public static PointerIcon load(@NonNull Resources resources, @XmlRes int resourceId) {
+    public static @NonNull PointerIcon load(@NonNull Resources resources, @XmlRes int resourceId) {
         if (resources == null) {
             throw new IllegalArgumentException("resources must not be null");
         }
@@ -341,7 +343,7 @@ public final class PointerIcon implements Parcelable {
      * @hide
      */
     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
-    public PointerIcon load(@NonNull Context context) {
+    public @NonNull PointerIcon load(@NonNull Context context) {
         if (context == null) {
             throw new IllegalArgumentException("context must not be null");
         }
@@ -361,7 +363,7 @@ public final class PointerIcon implements Parcelable {
         return mType;
     }
 
-    public static final @android.annotation.NonNull Parcelable.Creator<PointerIcon> CREATOR
+    public static final @NonNull Parcelable.Creator<PointerIcon> CREATOR
             = new Parcelable.Creator<PointerIcon>() {
         public PointerIcon createFromParcel(Parcel in) {
             int type = in.readInt();
@@ -405,7 +407,7 @@ public final class PointerIcon implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object other) {
+    public boolean equals(@Nullable Object other) {
         if (this == other) {
             return true;
         }

@@ -78,6 +78,8 @@ StringPiece to_string(ResourceType type) {
       return "interpolator";
     case ResourceType::kLayout:
       return "layout";
+    case ResourceType::kMacro:
+      return "macro";
     case ResourceType::kMenu:
       return "menu";
     case ResourceType::kMipmap:
@@ -119,6 +121,7 @@ static const std::map<StringPiece, ResourceType> sResourceTypeMap{
     {"integer", ResourceType::kInteger},
     {"interpolator", ResourceType::kInterpolator},
     {"layout", ResourceType::kLayout},
+    {"macro", ResourceType::kMacro},
     {"menu", ResourceType::kMenu},
     {"mipmap", ResourceType::kMipmap},
     {"navigation", ResourceType::kNavigation},
@@ -130,6 +133,24 @@ static const std::map<StringPiece, ResourceType> sResourceTypeMap{
     {"transition", ResourceType::kTransition},
     {"xml", ResourceType::kXml},
 };
+
+ResourceNamedTypeRef ResourceNamedTypeWithDefaultName(ResourceType t) {
+  return {to_string(t), t};
+}
+
+std::optional<ResourceNamedTypeRef> ParseResourceNamedType(const android::StringPiece& s) {
+  auto colon = std::find(s.begin(), s.end(), ':');
+  const ResourceType* parsedType;
+  if (colon != s.end() && colon != std::prev(s.end())) {
+    parsedType = ParseResourceType(s.substr(s.begin(), colon));
+  } else {
+    parsedType = ParseResourceType(s);
+  }
+  if (parsedType == nullptr) {
+    return std::nullopt;
+  }
+  return ResourceNamedTypeRef(s, *parsedType);
+}
 
 const ResourceType* ParseResourceType(const StringPiece& str) {
   auto iter = sResourceTypeMap.find(str);

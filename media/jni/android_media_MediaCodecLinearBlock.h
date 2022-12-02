@@ -25,6 +25,8 @@
 namespace android {
 
 struct JMediaCodecLinearBlock {
+    std::vector<std::string> mCodecNames;
+
     std::shared_ptr<C2Buffer> mBuffer;
     std::shared_ptr<C2ReadView> mReadonlyMapping;
 
@@ -40,7 +42,7 @@ struct JMediaCodecLinearBlock {
 
     std::once_flag mCopyWarningFlag;
 
-    std::shared_ptr<C2Buffer> toC2Buffer(size_t offset, size_t size) {
+    std::shared_ptr<C2Buffer> toC2Buffer(size_t offset, size_t size) const {
         if (mBuffer) {
             if (mBuffer->data().type() != C2BufferData::LINEAR) {
                 return nullptr;
@@ -49,7 +51,14 @@ struct JMediaCodecLinearBlock {
             if (offset == 0 && size == block.capacity()) {
                 return mBuffer;
             }
-            return C2Buffer::CreateLinearBuffer(block.subBlock(offset, size));
+
+            std::shared_ptr<C2Buffer> buffer =
+                C2Buffer::CreateLinearBuffer(block.subBlock(offset, size));
+            for (const std::shared_ptr<const C2Info> &info : mBuffer->info()) {
+                std::shared_ptr<C2Param> param = std::move(C2Param::Copy(*info));
+                buffer->setInfo(std::static_pointer_cast<C2Info>(param));
+            }
+            return buffer;
         }
         if (mBlock) {
             return C2Buffer::CreateLinearBuffer(mBlock->share(offset, size, C2Fence{}));
@@ -57,11 +66,21 @@ struct JMediaCodecLinearBlock {
         return nullptr;
     }
 
-    sp<hardware::HidlMemory> toHidlMemory() {
+    sp<hardware::HidlMemory> toHidlMemory() const {
         if (mHidlMemory) {
             return mHidlMemory;
         }
         return nullptr;
+    }
+
+    size_t capacity() const {
+        if (mBlock) {
+            return mBlock->capacity();
+        }
+        if (mMemory) {
+            return mMemory->size();
+        }
+        return 0;
     }
 };
 

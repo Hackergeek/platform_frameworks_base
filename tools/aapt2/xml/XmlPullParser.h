@@ -33,7 +33,6 @@
 #include "Resource.h"
 #include "io/Io.h"
 #include "process/IResourceTableConsumer.h"
-#include "util/Maybe.h"
 #include "xml/XmlUtil.h"
 
 namespace aapt {
@@ -121,7 +120,15 @@ class XmlPullParser : public IPackageDeclStack {
    * If xmlns:app="http://schemas.android.com/apk/res-auto", then
    * 'package' will be set to 'defaultPackage'.
    */
-  Maybe<ExtractedPackage> TransformPackageAlias(const android::StringPiece& alias) const override;
+  std::optional<ExtractedPackage> TransformPackageAlias(
+      const android::StringPiece& alias) const override;
+
+  struct PackageDecl {
+    std::string prefix;
+    ExtractedPackage package;
+  };
+
+  const std::vector<PackageDecl>& package_decls() const;
 
   //
   // Remaining methods are for retrieving information about attributes
@@ -180,27 +187,22 @@ class XmlPullParser : public IPackageDeclStack {
   const std::string empty_;
   size_t depth_;
   std::stack<std::string> namespace_uris_;
-
-  struct PackageDecl {
-    std::string prefix;
-    ExtractedPackage package;
-  };
   std::vector<PackageDecl> package_aliases_;
 };
 
 /**
  * Finds the attribute in the current element within the global namespace.
  */
-Maybe<android::StringPiece> FindAttribute(const XmlPullParser* parser,
-                                          const android::StringPiece& name);
+std::optional<android::StringPiece> FindAttribute(const XmlPullParser* parser,
+                                                  const android::StringPiece& name);
 
 /**
  * Finds the attribute in the current element within the global namespace. The
  * attribute's value
  * must not be the empty string.
  */
-Maybe<android::StringPiece> FindNonEmptyAttribute(const XmlPullParser* parser,
-                                                  const android::StringPiece& name);
+std::optional<android::StringPiece> FindNonEmptyAttribute(const XmlPullParser* parser,
+                                                          const android::StringPiece& name);
 
 //
 // Implementation

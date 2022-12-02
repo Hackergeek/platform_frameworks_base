@@ -18,7 +18,6 @@ package android.hardware.hdmi;
 import android.annotation.CallbackExecutor;
 import android.annotation.NonNull;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.hardware.hdmi.HdmiControlManager.ControlCallbackResult;
 import android.os.Binder;
 import android.os.RemoteException;
@@ -39,7 +38,6 @@ import java.util.concurrent.Executor;
  * @hide
  */
 @SystemApi
-@TestApi
 public class HdmiSwitchClient extends HdmiClient {
 
     private static final String TAG = "HdmiSwitchClient";
@@ -87,7 +85,6 @@ public class HdmiSwitchClient extends HdmiClient {
      * @see {@link android.media.tv.TvInputHardwareInfo#getHdmiPortId()}
      *     to get portId of a specific TV Input.
      * @param listener listener to get the result with
-     *
      * @hide
      */
     @SystemApi
@@ -105,12 +102,11 @@ public class HdmiSwitchClient extends HdmiClient {
      * Selects a CEC logical device to be a new active source.
      *
      * @param logicalAddress logical address of the device to select
-     * @param executor executor to allow the develper to specify the thread upon which the listeners
-     *     will be invoked
-     * @param listener listener to get the result with
-     *
+     * @param listener       listener to get the result with
+     * @deprecated Please use {@link HdmiClient#selectDevice} instead.
      * @hide
      */
+    @Deprecated
     public void selectDevice(
             int logicalAddress,
             @NonNull @CallbackExecutor Executor executor,
@@ -135,11 +131,8 @@ public class HdmiSwitchClient extends HdmiClient {
     /**
      * Selects a HDMI port to be a new route path.
      *
-     * @param portId HDMI port to select
-     * @param executor executor to allow the develper to specify the thread upon which the listeners
-     *     will be invoked
+     * @param portId   HDMI port to select
      * @param listener listener to get the result with
-     *
      * @hide
      */
     @SystemApi
@@ -173,7 +166,9 @@ public class HdmiSwitchClient extends HdmiClient {
      *     there is none.
      *
      * @hide
+     * @deprecated Please use {@link HdmiControlManager#getConnectedDevices()} instead.
      */
+    @Deprecated
     public List<HdmiDeviceInfo> getDeviceList() {
         try {
             return mService.getDeviceList();

@@ -128,17 +128,18 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
         }
     }
 
-    @Test
-    public void testSelectAllSecureViaProviderApi() throws Exception {
-        setSettingViaProviderApiAndAssertSuccessfulChange(SETTING_TYPE_SECURE,
-                FAKE_SETTING_NAME, FAKE_SETTING_VALUE, false);
-        try {
-            queryAllSettingsViaProviderApiSettingAndAssertSettingPresent(SETTING_TYPE_SECURE,
-                    FAKE_SETTING_NAME);
-        } finally {
-            deleteStringViaProviderApi(SETTING_TYPE_SECURE, FAKE_SETTING_NAME);
-        }
-    }
+    // TODO(b/142206242): make this less flaky and re-enable it
+//    @Test
+//    public void testSelectAllSecureViaProviderApi() throws Exception {
+//        setSettingViaProviderApiAndAssertSuccessfulChange(SETTING_TYPE_SECURE,
+//                FAKE_SETTING_NAME, FAKE_SETTING_VALUE, false);
+//        try {
+//            queryAllSettingsViaProviderApiSettingAndAssertSettingPresent(SETTING_TYPE_SECURE,
+//                    FAKE_SETTING_NAME);
+//        } finally {
+//            deleteStringViaProviderApi(SETTING_TYPE_SECURE, FAKE_SETTING_NAME);
+//        }
+//    }
 
     @Test
     public void testSelectAllSystemViaProviderApi() throws Exception {
@@ -187,7 +188,6 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
         int insertedCount = 0;
         try {
             for (; insertedCount < 1200; insertedCount++) {
-                Log.w(LOG_TAG, "Adding app specific setting: " + insertedCount);
                 insertStringViaProviderApi(SETTING_TYPE_SYSTEM,
                         String.valueOf(insertedCount), FAKE_SETTING_VALUE, false);
             }
@@ -196,7 +196,6 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
             // expected
         } finally {
             for (; insertedCount >= 0; insertedCount--) {
-                Log.w(LOG_TAG, "Removing app specific setting: " + insertedCount);
                 deleteStringViaProviderApi(SETTING_TYPE_SYSTEM,
                         String.valueOf(insertedCount));
             }
@@ -381,10 +380,11 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
         }
     }
 
-    @Test
-    public void testResetModeUntrustedClearGlobal() throws Exception {
-        testResetModeUntrustedClearCommon(SETTING_TYPE_GLOBAL);
-    }
+    // TODO(b/142206242): make this less flaky and re-enable it
+//    @Test
+//    public void testResetModeUntrustedClearGlobal() throws Exception {
+//        testResetModeUntrustedClearCommon(SETTING_TYPE_GLOBAL);
+//    }
 
     @Test
     public void testResetModeUntrustedClearSecure() throws Exception {
@@ -422,10 +422,11 @@ public class SettingsProviderTest extends BaseSettingsProviderTest {
         }
     }
 
-    @Test
-    public void testResetModeTrustedDefaultsGlobal() throws Exception {
-        testResetModeTrustedDefaultsCommon(SETTING_TYPE_GLOBAL);
-    }
+    // TODO(b/142206242): make this less flaky and re-enable it
+//    @Test
+//    public void testResetModeTrustedDefaultsGlobal() throws Exception {
+//        testResetModeTrustedDefaultsCommon(SETTING_TYPE_GLOBAL);
+//    }
 
     @Test
     public void testResetModeTrustedDefaultsSecure() throws Exception {

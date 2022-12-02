@@ -17,10 +17,15 @@
 package com.android.server.pm.parsing
 
 import android.content.pm.PackageManager
-import android.content.pm.PackageParser
+import com.android.server.pm.pkg.parsing.ParsingPackageUtils
 import android.platform.test.annotations.Postsubmit
+import com.android.server.pm.PackageManagerException
 import com.android.server.pm.PackageManagerService
+import com.android.server.pm.PackageManagerServiceUtils
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.File
 
 /**
  * This test parses all the system APKs on the device image to ensure that they succeed.
@@ -34,27 +39,54 @@ import org.junit.Test
 @Postsubmit
 class SystemPartitionParseTest {
 
-    private val APKS = PackageManagerService.SYSTEM_PARTITIONS
-            .flatMap { listOfNotNull(it.appFolder, it.privAppFolder, it.overlayFolder) }
-            .flatMap {
-                it.walkTopDown()
-                        .filter { it.name.endsWith(".apk") }
-                        .toList()
-            }
-            .distinct()
-
     private val parser = PackageParser2.forParsingFileWithDefaults()
+
+    @get:Rule
+    val tempFolder = TemporaryFolder()
+
+    private fun buildApks(): List<File> {
+        val files = PackageManagerService.SYSTEM_PARTITIONS
+                .flatMap { listOfNotNull(it.appFolder, it.privAppFolder, it.overlayFolder) }
+                .flatMap {
+                    it.listFiles()
+                            ?.toList()
+                            ?: emptyList()
+                }
+                .distinct()
+                .toMutableList()
+
+        val compressedFiles = mutableListOf<File>()
+
+        files.removeAll { it ->
+            it.listFiles()?.toList().orEmpty()
+                    .filter { it.name.endsWith(PackageManagerService.COMPRESSED_EXTENSION) }
+                    .also { compressedFiles.addAll(it) }
+                    .isNotEmpty()
+        }
+
+        compressedFiles.mapTo(files) { input ->
+            tempFolder.newFolder()
+                    .also {
+                        // Decompress to an APK file inside the temp folder which can be tested.
+                        it.resolve(input.nameWithoutExtension + ".apk")
+                            .apply { PackageManagerServiceUtils.decompressFile(input, this) }
+                    }
+        }
+
+        return files
+    }
 
     @Test
     fun verify() {
-        val exceptions = APKS
+        val exceptions = buildApks()
                 .map {
                     runCatching {
-                        parser.parsePackage(it, PackageParser.PARSE_IS_SYSTEM_DIR, false)
+                        parser.parsePackage(
+                                it, ParsingPackageUtils.PARSE_IS_SYSTEM_DIR, false /*useCaches*/)
                     }
                 }
                 .mapNotNull { it.exceptionOrNull() }
-                .filterNot { (it as? PackageParser.PackageParserException)?.error ==
+                .filterNot { (it as? PackageManagerException)?.error ==
                         PackageManager.INSTALL_PARSE_FAILED_SKIPPED }
 
         if (exceptions.isEmpty()) return

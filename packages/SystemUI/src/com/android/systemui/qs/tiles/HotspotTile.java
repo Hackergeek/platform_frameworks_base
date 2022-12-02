@@ -16,18 +16,30 @@
 
 package com.android.systemui.qs.tiles;
 
-import android.annotation.Nullable;
 import android.content.Intent;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.UserManager;
 import android.provider.Settings;
 import android.service.quicksettings.Tile;
 import android.util.Log;
+import android.view.View;
 import android.widget.Switch;
 
+import androidx.annotation.Nullable;
+
+import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
+import com.android.settingslib.wifi.WifiEnterpriseRestrictionUtils;
 import com.android.systemui.R;
+import com.android.systemui.dagger.qualifiers.Background;
+import com.android.systemui.dagger.qualifiers.Main;
+import com.android.systemui.plugins.ActivityStarter;
+import com.android.systemui.plugins.FalsingManager;
 import com.android.systemui.plugins.qs.QSTile.BooleanState;
+import com.android.systemui.plugins.statusbar.StatusBarStateController;
 import com.android.systemui.qs.QSHost;
+import com.android.systemui.qs.logging.QSLogger;
 import com.android.systemui.qs.tileimpl.QSTileImpl;
 import com.android.systemui.statusbar.policy.DataSaverController;
 import com.android.systemui.statusbar.policy.HotspotController;
@@ -36,6 +48,7 @@ import javax.inject.Inject;
 
 /** Quick settings tile: Hotspot **/
 public class HotspotTile extends QSTileImpl<BooleanState> {
+
     private final Icon mEnabledStatic = ResourceIcon.get(R.drawable.ic_hotspot);
 
     private final HotspotController mHotspotController;
@@ -45,9 +58,20 @@ public class HotspotTile extends QSTileImpl<BooleanState> {
     private boolean mListening;
 
     @Inject
-    public HotspotTile(QSHost host, HotspotController hotspotController,
-            DataSaverController dataSaverController) {
-        super(host);
+    public HotspotTile(
+            QSHost host,
+            @Background Looper backgroundLooper,
+            @Main Handler mainHandler,
+            FalsingManager falsingManager,
+            MetricsLogger metricsLogger,
+            StatusBarStateController statusBarStateController,
+            ActivityStarter activityStarter,
+            QSLogger qsLogger,
+            HotspotController hotspotController,
+            DataSaverController dataSaverController
+    ) {
+        super(host, backgroundLooper, mainHandler, falsingManager, metricsLogger,
+                statusBarStateController, activityStarter, qsLogger);
         mHotspotController = hotspotController;
         mDataSaverController = dataSaverController;
         mHotspotController.observe(this, mCallbacks);
@@ -76,7 +100,7 @@ public class HotspotTile extends QSTileImpl<BooleanState> {
 
     @Override
     public Intent getLongClickIntent() {
-        return new Intent(Settings.ACTION_TETHER_SETTINGS);
+        return new Intent(Settings.ACTION_WIFI_TETHER_SETTING);
     }
 
     @Override
@@ -85,7 +109,7 @@ public class HotspotTile extends QSTileImpl<BooleanState> {
     }
 
     @Override
-    protected void handleClick() {
+    protected void handleClick(@Nullable View view) {
         final boolean isEnabled = mState.value;
         if (!isEnabled && mDataSaverController.isDataSaverEnabled()) {
             return;
@@ -135,7 +159,9 @@ public class HotspotTile extends QSTileImpl<BooleanState> {
         state.expandedAccessibilityClassName = Switch.class.getName();
         state.contentDescription = state.label;
 
-        final boolean isTileUnavailable = isDataSaverEnabled;
+        final boolean isWifiTetheringAllowed =
+                WifiEnterpriseRestrictionUtils.isWifiTetheringAllowed(mHost.getUserContext());
+        final boolean isTileUnavailable = isDataSaverEnabled || !isWifiTetheringAllowed;
         final boolean isTileActive = (state.value || state.isTransient);
 
         if (isTileUnavailable) {
@@ -144,15 +170,17 @@ public class HotspotTile extends QSTileImpl<BooleanState> {
             state.state = isTileActive ? Tile.STATE_ACTIVE : Tile.STATE_INACTIVE;
         }
 
-        state.secondaryLabel = getSecondaryLabel(
-                isTileActive, isTransient, isDataSaverEnabled, numConnectedDevices);
+        state.secondaryLabel = getSecondaryLabel(isTileActive, isTransient, isDataSaverEnabled,
+                numConnectedDevices, isWifiTetheringAllowed);
         state.stateDescription = state.secondaryLabel;
     }
 
     @Nullable
     private String getSecondaryLabel(boolean isActive, boolean isTransient,
-            boolean isDataSaverEnabled, int numConnectedDevices) {
-        if (isTransient) {
+            boolean isDataSaverEnabled, int numConnectedDevices, boolean isWifiTetheringAllowed) {
+        if (!isWifiTetheringAllowed) {
+            return mContext.getString(R.string.wifitrackerlib_admin_restricted_network);
+        } else if (isTransient) {
             return mContext.getString(R.string.quick_settings_hotspot_secondary_label_transient);
         } else if (isDataSaverEnabled) {
             return mContext.getString(
@@ -170,15 +198,6 @@ public class HotspotTile extends QSTileImpl<BooleanState> {
     @Override
     public int getMetricsCategory() {
         return MetricsEvent.QS_HOTSPOT;
-    }
-
-    @Override
-    protected String composeChangeAnnouncement() {
-        if (mState.value) {
-            return mContext.getString(R.string.accessibility_quick_settings_hotspot_changed_on);
-        } else {
-            return mContext.getString(R.string.accessibility_quick_settings_hotspot_changed_off);
-        }
     }
 
     /**

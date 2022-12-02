@@ -19,6 +19,7 @@ package android.content;
 import static android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
 import static android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC;
 import static android.view.Display.DEFAULT_DISPLAY;
+import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
 
 import static com.google.common.truth.Truth.assertThat;
 
@@ -31,9 +32,9 @@ import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
-import android.inputmethodservice.InputMethodService;
 import android.media.ImageReader;
 import android.os.UserHandle;
+import android.platform.test.annotations.Presubmit;
 import android.view.Display;
 
 import androidx.test.core.app.ApplicationProvider;
@@ -48,6 +49,7 @@ import org.junit.runner.RunWith;
  *  Build/Install/Run:
  *   atest FrameworksCoreTests:ContextTest
  */
+@Presubmit
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class ContextTest {
@@ -139,13 +141,6 @@ public class ContextTest {
     }
 
     @Test
-    public void testIsUiContext_InputMethodService_returnsTrue() {
-        final InputMethodService ims = new InputMethodService();
-
-        assertTrue(ims.isUiContext());
-    }
-
-    @Test
     public void testGetDisplayFromDisplayContextDerivedContextOnPrimaryDisplay() {
         verifyGetDisplayFromDisplayContextDerivedContext(false /* onSecondaryDisplay */);
     }
@@ -188,19 +183,38 @@ public class ContextTest {
 
         assertFalse(wrapper.isUiContext());
 
-        wrapper = new ContextWrapper(new TestUiContext());
+        wrapper = new ContextWrapper(createUiContext());
 
         assertTrue(wrapper.isUiContext());
     }
 
-    private static class TestUiContext extends ContextWrapper {
-        TestUiContext() {
-            super(null /* base */);
-        }
+    @Test
+    public void testIsUiContext_UiContextDerivedContext() {
+        final Context uiContext = createUiContext();
+        Context context = uiContext.createAttributionContext(null /* attributionTag */);
 
-        @Override
-        public boolean isUiContext() {
-            return true;
-        }
+        assertTrue(context.isUiContext());
+
+        context = uiContext.createConfigurationContext(new Configuration());
+
+        assertTrue(context.isUiContext());
+    }
+
+    @Test
+    public void testIsUiContext_UiContextDerivedDisplayContext() {
+        final Context uiContext = createUiContext();
+        final Display secondaryDisplay =
+                getSecondaryDisplay(uiContext.getSystemService(DisplayManager.class));
+        final Context context = uiContext.createDisplayContext(secondaryDisplay);
+
+        assertFalse(context.isUiContext());
+    }
+
+    private Context createUiContext() {
+        final Context appContext = ApplicationProvider.getApplicationContext();
+        final DisplayManager displayManager = appContext.getSystemService(DisplayManager.class);
+        final Display display = displayManager.getDisplay(DEFAULT_DISPLAY);
+        return appContext.createDisplayContext(display)
+                .createWindowContext(TYPE_APPLICATION_OVERLAY, null /* options */);
     }
 }

@@ -16,29 +16,46 @@
 
 package com.android.systemui.statusbar.phone
 
+import android.annotation.IntDef
 import android.content.Context
 import android.content.pm.PackageManager
 import android.hardware.biometrics.BiometricSourceType
 import android.provider.Settings
 import com.android.systemui.Dumpable
+import com.android.systemui.R
+import com.android.systemui.dagger.SysUISingleton
 import com.android.systemui.dump.DumpManager
 import com.android.systemui.plugins.statusbar.StatusBarStateController
 import com.android.systemui.statusbar.NotificationLockscreenUserManager
 import com.android.systemui.statusbar.StatusBarState
+import com.android.systemui.statusbar.notification.stack.StackScrollAlgorithm
 import com.android.systemui.statusbar.policy.KeyguardStateController
 import com.android.systemui.tuner.TunerService
-import java.io.FileDescriptor
 import java.io.PrintWriter
 import javax.inject.Inject
-import javax.inject.Singleton
 
-@Singleton
-open class KeyguardBypassController : Dumpable {
+@SysUISingleton
+open class KeyguardBypassController : Dumpable, StackScrollAlgorithm.BypassController {
 
     private val mKeyguardStateController: KeyguardStateController
     private val statusBarStateController: StatusBarStateController
+    @BypassOverride private val bypassOverride: Int
     private var hasFaceFeature: Boolean
     private var pendingUnlock: PendingUnlock? = null
+    private val listeners = mutableListOf<OnBypassStateChangedListener>()
+    var userHasDeviceEntryIntent: Boolean = false // ie: attempted udfps auth
+
+    private val faceAuthEnabledChangedCallback = object : KeyguardStateController.Callback {
+        override fun onFaceAuthEnabledChanged() = notifyListeners()
+    }
+
+    @IntDef(
+        FACE_UNLOCK_BYPASS_NO_OVERRIDE,
+        FACE_UNLOCK_BYPASS_ALWAYS,
+        FACE_UNLOCK_BYPASS_NEVER
+    )
+    @Retention(AnnotationRetention.SOURCE)
+    private annotation class BypassOverride
 
     /**
      * Pending unlock info:
@@ -56,14 +73,28 @@ open class KeyguardBypassController : Dumpable {
     lateinit var unlockController: BiometricUnlockController
     var isPulseExpanding = false
 
+    /** delegates to [bypassEnabled] but conforms to [StackScrollAlgorithm.BypassController] */
+    override fun isBypassEnabled() = bypassEnabled
+
     /**
      * If face unlock dismisses the lock screen or keeps user on keyguard for the current user.
      */
     var bypassEnabled: Boolean = false
-        get() = field && mKeyguardStateController.isFaceAuthEnabled
-        private set
+        get() {
+            val enabled = when (bypassOverride) {
+                FACE_UNLOCK_BYPASS_ALWAYS -> true
+                FACE_UNLOCK_BYPASS_NEVER -> false
+                else -> field
+            }
+            return enabled && mKeyguardStateController.isFaceAuthEnabled
+        }
+        private set(value) {
+            field = value
+            notifyListeners()
+        }
 
     var bouncerShowing: Boolean = false
+    var altBouncerShowing: Boolean = false
     var launchingAffordance: Boolean = false
     var qSExpanded = false
         set(value) {
@@ -85,6 +116,8 @@ open class KeyguardBypassController : Dumpable {
     ) {
         this.mKeyguardStateController = keyguardStateController
         this.statusBarStateController = statusBarStateController
+
+        bypassOverride = context.resources.getInteger(R.integer.config_face_unlock_bypass_override)
 
         hasFaceFeature = context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_FACE)
         if (!hasFaceFeature) {
@@ -115,6 +148,8 @@ open class KeyguardBypassController : Dumpable {
                 })
     }
 
+    private fun notifyListeners() = listeners.forEach { it.onBypassStateChanged(bypassEnabled) }
+
     /**
      * Notify that the biometric unlock has happened.
      *
@@ -124,7 +159,7 @@ open class KeyguardBypassController : Dumpable {
         biometricSourceType: BiometricSourceType,
         isStrongBiometric: Boolean
     ): Boolean {
-        if (bypassEnabled) {
+        if (biometricSourceType == BiometricSourceType.FACE && bypassEnabled) {
             val can = canBypass()
             if (!can && (isPulseExpanding || qSExpanded)) {
                 pendingUnlock = PendingUnlock(biometricSourceType, isStrongBiometric)
@@ -152,6 +187,7 @@ open class KeyguardBypassController : Dumpable {
         if (bypassEnabled) {
             return when {
                 bouncerShowing -> true
+                altBouncerShowing -> true
                 statusBarStateController.state != StatusBarState.KEYGUARD -> false
                 launchingAffordance -> false
                 isPulseExpanding || qSExpanded -> false
@@ -179,7 +215,7 @@ open class KeyguardBypassController : Dumpable {
         pendingUnlock = null
     }
 
-    override fun dump(fd: FileDescriptor, pw: PrintWriter, args: Array<out String>) {
+    override fun dump(pw: PrintWriter, args: Array<out String>) {
         pw.println("KeyguardBypassController:")
         if (pendingUnlock != null) {
             pw.println("  mPendingUnlock.pendingUnlockType: ${pendingUnlock!!.pendingUnlockType}")
@@ -190,13 +226,45 @@ open class KeyguardBypassController : Dumpable {
         pw.println("  bypassEnabled: $bypassEnabled")
         pw.println("  canBypass: ${canBypass()}")
         pw.println("  bouncerShowing: $bouncerShowing")
+        pw.println("  altBouncerShowing: $altBouncerShowing")
         pw.println("  isPulseExpanding: $isPulseExpanding")
         pw.println("  launchingAffordance: $launchingAffordance")
         pw.println("  qSExpanded: $qSExpanded")
         pw.println("  hasFaceFeature: $hasFaceFeature")
+        pw.println("  userHasDeviceEntryIntent: $userHasDeviceEntryIntent")
+    }
+
+    /** Registers a listener for bypass state changes. */
+    fun registerOnBypassStateChangedListener(listener: OnBypassStateChangedListener) {
+        val start = listeners.isEmpty()
+        listeners.add(listener)
+        if (start) {
+            mKeyguardStateController.addCallback(faceAuthEnabledChangedCallback)
+        }
+    }
+
+    /**
+     * Unregisters a listener for bypass state changes, previous registered with
+     * [registerOnBypassStateChangedListener]
+     */
+    fun unregisterOnBypassStateChangedListener(listener: OnBypassStateChangedListener) {
+        listeners.remove(listener)
+        if (listeners.isEmpty()) {
+            mKeyguardStateController.removeCallback(faceAuthEnabledChangedCallback)
+        }
+    }
+
+    /** Listener for bypass state change events.  */
+    interface OnBypassStateChangedListener {
+        /** Invoked when bypass becomes enabled or disabled. */
+        fun onBypassStateChanged(isEnabled: Boolean)
     }
 
     companion object {
-        const val BYPASS_PANEL_FADE_DURATION = 67
+        const val BYPASS_FADE_DURATION = 67
+
+        private const val FACE_UNLOCK_BYPASS_NO_OVERRIDE = 0
+        private const val FACE_UNLOCK_BYPASS_ALWAYS = 1
+        private const val FACE_UNLOCK_BYPASS_NEVER = 2
     }
 }

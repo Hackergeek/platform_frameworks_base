@@ -47,6 +47,13 @@ public class CollectionUtils {
     private CollectionUtils() { /* cannot be instantiated */ }
 
     /**
+     * @see Collection#contains(Object)
+     */
+    public static <T> boolean contains(@Nullable Collection<T> collection, T element) {
+        return collection != null && collection.contains(element);
+    }
+
+    /**
      * Returns a list of items from the provided list that match the given condition.
      *
      * This is similar to {@link Stream#filter} but without the overhead of creating an intermediate
@@ -216,6 +223,13 @@ public class CollectionUtils {
      * Returns whether the given collection {@link Collection#isEmpty is empty} or {@code null}
      */
     public static boolean isEmpty(@Nullable Collection<?> cur) {
+        return size(cur) == 0;
+    }
+
+    /**
+     * Returns whether the given map {@link Map#isEmpty is empty} or {@code null}
+     */
+    public static boolean isEmpty(@Nullable Map<?, ?> cur) {
         return size(cur) == 0;
     }
 

@@ -34,13 +34,6 @@ using ::android::StringPiece;
 namespace aapt {
 namespace test {
 
-ResourceTableBuilder& ResourceTableBuilder::SetPackageId(const StringPiece& package_name,
-                                                         uint8_t id) {
-  ResourceTablePackage* package = table_->CreatePackage(package_name, id);
-  CHECK(package != nullptr);
-  return *this;
-}
-
 ResourceTableBuilder& ResourceTableBuilder::AddSimple(const StringPiece& name,
                                                       const ResourceId& id) {
   return AddValue(name, id, util::make_unique<Id>());
@@ -118,8 +111,13 @@ ResourceTableBuilder& ResourceTableBuilder::AddValue(const StringPiece& name,
                                                      const ResourceId& id,
                                                      std::unique_ptr<Value> value) {
   ResourceName res_name = ParseNameOrDie(name);
-  CHECK(table_->AddResourceWithIdMangled(res_name, id, config, {}, std::move(value),
-                                         GetDiagnostics()));
+  NewResourceBuilder builder(res_name);
+  builder.SetValue(std::move(value), config).SetAllowMangled(true);
+  if (id.id != 0U) {
+    builder.SetId(id);
+  }
+
+  CHECK(table_->AddResource(builder.Build(), GetDiagnostics()));
   return *this;
 }
 
@@ -128,10 +126,13 @@ ResourceTableBuilder& ResourceTableBuilder::SetSymbolState(const StringPiece& na
                                                            Visibility::Level level,
                                                            bool allow_new) {
   ResourceName res_name = ParseNameOrDie(name);
-  Visibility visibility;
-  visibility.level = level;
-  CHECK(table_->SetVisibilityWithIdMangled(res_name, visibility, id, GetDiagnostics()));
-  CHECK(table_->SetAllowNewMangled(res_name, AllowNew{}, GetDiagnostics()));
+  NewResourceBuilder builder(res_name);
+  builder.SetVisibility({level}).SetAllowNew({}).SetAllowMangled(true);
+  if (id.id != 0U) {
+    builder.SetId(id);
+  }
+
+  CHECK(table_->AddResource(builder.Build(), GetDiagnostics()));
   return *this;
 }
 
@@ -139,7 +140,14 @@ ResourceTableBuilder& ResourceTableBuilder::SetOverlayable(const StringPiece& na
                                                            const OverlayableItem& overlayable) {
 
   ResourceName res_name = ParseNameOrDie(name);
-  CHECK(table_->SetOverlayable(res_name, overlayable, GetDiagnostics()));
+  CHECK(table_->AddResource(
+      NewResourceBuilder(res_name).SetOverlayable(overlayable).SetAllowMangled(true).Build(),
+      GetDiagnostics()));
+  return *this;
+}
+
+ResourceTableBuilder& ResourceTableBuilder::Add(NewResource&& res) {
+  CHECK(table_->AddResource(std::move(res), GetDiagnostics()));
   return *this;
 }
 
@@ -151,7 +159,8 @@ std::unique_ptr<ResourceTable> ResourceTableBuilder::Build() {
   return std::move(table_);
 }
 
-std::unique_ptr<Reference> BuildReference(const StringPiece& ref, const Maybe<ResourceId>& id) {
+std::unique_ptr<Reference> BuildReference(const StringPiece& ref,
+                                          const std::optional<ResourceId>& id) {
   std::unique_ptr<Reference> reference = util::make_unique<Reference>(ParseNameOrDie(ref));
   reference->id = id;
   return reference;
@@ -210,7 +219,8 @@ std::unique_ptr<Style> StyleBuilder::Build() {
   return std::move(style_);
 }
 
-StyleableBuilder& StyleableBuilder::AddItem(const StringPiece& str, const Maybe<ResourceId>& id) {
+StyleableBuilder& StyleableBuilder::AddItem(const StringPiece& str,
+                                            const std::optional<ResourceId>& id) {
   styleable_->entries.push_back(Reference(ParseNameOrDie(str)));
   styleable_->entries.back().id = id;
   return *this;

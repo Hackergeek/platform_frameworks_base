@@ -21,11 +21,13 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import android.annotation.Nullable;
+import android.content.Context;
 import android.hardware.hdmi.HdmiDeviceInfo;
 import android.hardware.tv.cec.V1_0.SendMessageResult;
 import android.media.AudioManager;
 import android.os.Looper;
 import android.os.test.TestLooper;
+import android.platform.test.annotations.Presubmit;
 
 import androidx.test.InstrumentationRegistry;
 import androidx.test.filters.SmallTest;
@@ -36,12 +38,16 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
+import java.util.Collections;
+
 /** Tests for {@link SystemAudioInitiationActionFromAvr} */
 @SmallTest
+@Presubmit
 @RunWith(JUnit4.class)
 public class SystemAudioInitiationActionFromAvrTest {
 
     private HdmiCecLocalDeviceAudioSystem mHdmiCecLocalDeviceAudioSystem;
+    private FakePowerManagerWrapper mPowerManager;
     private TestLooper mTestLooper = new TestLooper();
 
     private boolean mShouldDispatchActiveSource;
@@ -58,10 +64,12 @@ public class SystemAudioInitiationActionFromAvrTest {
 
     @Before
     public void SetUp() {
-        mDeviceInfoForTests = new HdmiDeviceInfo(1001, 1234);
-        HdmiControlService hdmiControlService =
-                new HdmiControlService(InstrumentationRegistry.getTargetContext()) {
+        mDeviceInfoForTests = HdmiDeviceInfo.hardwarePort(1001, 1234);
 
+        Context context = InstrumentationRegistry.getTargetContext();
+
+        HdmiControlService hdmiControlService = new HdmiControlService(context,
+                Collections.emptyList(), new FakeAudioDeviceVolumeManagerWrapper()) {
                     @Override
                     void sendCecCommand(
                             HdmiCecMessage command, @Nullable SendMessageCallback callback) {
@@ -88,8 +96,6 @@ public class SystemAudioInitiationActionFromAvrTest {
                                 break;
                             case Constants.MESSAGE_INITIATE_ARC:
                                 break;
-                            default:
-                                throw new IllegalArgumentException("Unexpected message");
                         }
                     }
 
@@ -134,7 +140,8 @@ public class SystemAudioInitiationActionFromAvrTest {
                     }
 
                     @Override
-                    void wakeUp() {}
+                    protected void writeStringSystemProperty(String key, String value) {
+                    }
 
                     @Override
                     int getPhysicalAddress() {
@@ -148,7 +155,7 @@ public class SystemAudioInitiationActionFromAvrTest {
 
                     @Override
                     public void setAndBroadcastActiveSourceFromOneDeviceType(
-                            int sourceAddress, int physicalAddress) {
+                            int sourceAddress, int physicalAddress, String caller) {
                         mBroadcastActiveSource = true;
                     }
 
@@ -157,6 +164,17 @@ public class SystemAudioInitiationActionFromAvrTest {
                         return -1;
                     }
                 };
+
+        Looper looper = mTestLooper.getLooper();
+        hdmiControlService.setIoLooper(looper);
+        hdmiControlService.setHdmiCecConfig(new FakeHdmiCecConfig(context));
+        HdmiCecController.NativeWrapper nativeWrapper = new FakeNativeWrapper();
+        HdmiCecController hdmiCecController = HdmiCecController.createWithNativeWrapper(
+                hdmiControlService, nativeWrapper, hdmiControlService.getAtomWriter());
+        hdmiControlService.setCecController(hdmiCecController);
+        hdmiControlService.initService();
+        mPowerManager = new FakePowerManagerWrapper(context);
+        hdmiControlService.setPowerManager(mPowerManager);
         mHdmiCecLocalDeviceAudioSystem =
                 new HdmiCecLocalDeviceAudioSystem(hdmiControlService) {
                     @Override
@@ -179,8 +197,7 @@ public class SystemAudioInitiationActionFromAvrTest {
                     }
                 };
         mHdmiCecLocalDeviceAudioSystem.init();
-        Looper looper = mTestLooper.getLooper();
-        hdmiControlService.setIoLooper(looper);
+        mHdmiCecLocalDeviceAudioSystem.setDeviceInfo(mDeviceInfoForTests);
     }
 
     @Test

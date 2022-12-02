@@ -28,8 +28,11 @@ import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
 import com.android.systemui.plugins.statusbar.NotificationMenuRowPlugin;
 import com.android.systemui.statusbar.notification.NotificationEntryManager;
+import com.android.systemui.statusbar.notification.collection.NotificationEntry;
+import com.android.systemui.statusbar.notification.collection.render.GroupMembershipManager;
 import com.android.systemui.statusbar.notification.dagger.NotificationsModule;
 import com.android.systemui.statusbar.notification.logging.NotificationCounters;
+import com.android.systemui.util.Compile;
 
 import java.util.Collections;
 import java.util.HashSet;
@@ -41,13 +44,15 @@ import java.util.Set;
  */
 public class NotificationBlockingHelperManager {
     /** Enables debug logging and always makes the blocking helper show up after a dismiss. */
-    private static final boolean DEBUG = false;
     private static final String TAG = "BlockingHelper";
+    private static final boolean DEBUG = Compile.IS_DEBUG && Log.isLoggable(TAG, Log.DEBUG);
+    private static final boolean DEBUG_ALWAYS_SHOW = false;
 
     private final Context mContext;
     private final NotificationGutsManager mNotificationGutsManager;
     private final NotificationEntryManager mNotificationEntryManager;
     private final MetricsLogger mMetricsLogger;
+    private final GroupMembershipManager mGroupMembershipManager;
     /** Row that the blocking helper will be shown in (via {@link NotificationGuts}. */
     private ExpandableNotificationRow mBlockingHelperRow;
     private Set<String> mNonBlockablePkgs;
@@ -65,7 +70,8 @@ public class NotificationBlockingHelperManager {
             Context context,
             NotificationGutsManager notificationGutsManager,
             NotificationEntryManager notificationEntryManager,
-            MetricsLogger metricsLogger) {
+            MetricsLogger metricsLogger,
+            GroupMembershipManager groupMembershipManager) {
         mContext = context;
         mNotificationGutsManager = notificationGutsManager;
         mNotificationEntryManager = notificationEntryManager;
@@ -73,6 +79,7 @@ public class NotificationBlockingHelperManager {
         mNonBlockablePkgs = new HashSet<>();
         Collections.addAll(mNonBlockablePkgs, mContext.getResources().getStringArray(
                 com.android.internal.R.array.config_nonBlockableNotificationPackages));
+        mGroupMembershipManager = groupMembershipManager;
     }
 
     /**
@@ -92,11 +99,12 @@ public class NotificationBlockingHelperManager {
         // - The row is blockable (i.e. not non-blockable)
         // - The dismissed row is a valid group (>1 or 0 children from the same channel)
         // or the only child in the group
-        if ((row.getEntry().getUserSentiment() == USER_SENTIMENT_NEGATIVE || DEBUG)
+        final NotificationEntry entry = row.getEntry();
+        if ((entry.getUserSentiment() == USER_SENTIMENT_NEGATIVE || DEBUG_ALWAYS_SHOW)
                 && mIsShadeExpanded
                 && !row.getIsNonblockable()
-                && ((!row.isChildInGroup() || row.isOnlyChildInGroup())
-                        && row.getNumUniqueChannels() <= 1)) {
+                && ((!row.isChildInGroup() || mGroupMembershipManager.isOnlyChildInGroup(entry))
+                    && row.getNumUniqueChannels() <= 1)) {
             // Dismiss any current blocking helper before continuing forward (only one can be shown
             // at a given time).
             dismissCurrentBlockingHelper();

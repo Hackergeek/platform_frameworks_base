@@ -17,29 +17,32 @@
 package com.android.server.job.restrictions;
 
 import android.app.job.JobInfo;
+import android.app.job.JobParameters;
+import android.util.IndentingPrintWriter;
 import android.util.proto.ProtoOutputStream;
 
-import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.job.JobSchedulerService;
 import com.android.server.job.controllers.JobStatus;
 
 /**
  * Used by {@link JobSchedulerService} to impose additional restrictions regarding whether jobs
  * should be scheduled or not based on the state of the system/device.
- * Every restriction is associated with exactly one reason (from {@link
- * android.app.job.JobParameters#JOB_STOP_REASON_CODES}), which could be retrieved using {@link
- * #getReason()}.
- * Note, that this is not taken into account for the jobs that have priority
- * {@link JobInfo#PRIORITY_FOREGROUND_APP} or higher.
+ * Every restriction is associated with exactly one stop reason, which could be retrieved using
+ * {@link #getReason()} (and the internal reason via {@link #getInternalReason()}).
+ * Note, that this is not taken into account for the jobs that have
+ * {@link JobInfo#BIAS_FOREGROUND_SERVICE} bias or higher.
  */
 public abstract class JobRestriction {
 
     final JobSchedulerService mService;
     private final int mReason;
+    private final int mInternalReason;
 
-    JobRestriction(JobSchedulerService service, int reason) {
+    JobRestriction(JobSchedulerService service, @JobParameters.StopReason int reason,
+            int internalReason) {
         mService = service;
         mReason = reason;
+        mInternalReason = internalReason;
     }
 
     /**
@@ -51,7 +54,8 @@ public abstract class JobRestriction {
 
     /**
      * Called by {@link JobSchedulerService} to check if it may proceed with scheduling the job (in
-     * case all constraints are satisfied and all other {@link JobRestriction}s are fine with it)
+     * case all constraints are satisfied and all other {@link JobRestriction JobRestrictions} are
+     * fine with it).
      *
      * @param job to be checked
      * @return false if the {@link JobSchedulerService} should not schedule this job at the moment,
@@ -63,10 +67,16 @@ public abstract class JobRestriction {
     public abstract void dumpConstants(IndentingPrintWriter pw);
 
     /** Dump any internal constants the Restriction may have. */
-    public abstract void dumpConstants(ProtoOutputStream proto);
+    public void dumpConstants(ProtoOutputStream proto) {
+    }
 
     /** @return reason code for the Restriction. */
+    @JobParameters.StopReason
     public final int getReason() {
         return mReason;
+    }
+
+    public final int getInternalReason() {
+        return mInternalReason;
     }
 }

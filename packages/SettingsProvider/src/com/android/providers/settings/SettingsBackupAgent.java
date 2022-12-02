@@ -24,6 +24,7 @@ import android.app.backup.FullBackupDataOutput;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.NetworkPolicy;
 import android.net.NetworkPolicyManager;
@@ -42,6 +43,7 @@ import android.provider.settings.validators.GlobalSettingsValidators;
 import android.provider.settings.validators.SecureSettingsValidators;
 import android.provider.settings.validators.SystemSettingsValidators;
 import android.provider.settings.validators.Validator;
+import android.telephony.SubscriptionManager;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.BackupUtils;
@@ -95,10 +97,15 @@ public class SettingsBackupAgent extends BackupAgentHelper {
     private static final String KEY_NETWORK_POLICIES = "network_policies";
     private static final String KEY_WIFI_NEW_CONFIG = "wifi_new_config";
     private static final String KEY_DEVICE_SPECIFIC_CONFIG = "device_specific_config";
+    private static final String KEY_SIM_SPECIFIC_SETTINGS = "sim_specific_settings";
+    // Restoring sim-specific data backed up from newer Android version to Android 12 was causing a
+    // fatal crash. Creating a backup with a different key will prevent Android 12 versions from
+    // restoring this data.
+    private static final String KEY_SIM_SPECIFIC_SETTINGS_2 = "sim_specific_settings_2";
 
     // Versioning of the state file.  Increment this version
     // number any time the set of state items is altered.
-    private static final int STATE_VERSION = 8;
+    private static final int STATE_VERSION = 9;
 
     // Versioning of the Network Policies backup payload.
     private static final int NETWORK_POLICIES_BACKUP_VERSION = 1;
@@ -106,19 +113,20 @@ public class SettingsBackupAgent extends BackupAgentHelper {
 
     // Slots in the checksum array.  Never insert new items in the middle
     // of this array; new slots must be appended.
-    private static final int STATE_SYSTEM           = 0;
-    private static final int STATE_SECURE           = 1;
-    private static final int STATE_LOCALE           = 2;
-    private static final int STATE_WIFI_SUPPLICANT  = 3;
-    private static final int STATE_WIFI_CONFIG      = 4;
-    private static final int STATE_GLOBAL           = 5;
-    private static final int STATE_LOCK_SETTINGS    = 6;
-    private static final int STATE_SOFTAP_CONFIG    = 7;
-    private static final int STATE_NETWORK_POLICIES = 8;
-    private static final int STATE_WIFI_NEW_CONFIG  = 9;
-    private static final int STATE_DEVICE_CONFIG    = 10;
+    private static final int STATE_SYSTEM                = 0;
+    private static final int STATE_SECURE                = 1;
+    private static final int STATE_LOCALE                = 2;
+    private static final int STATE_WIFI_SUPPLICANT       = 3;
+    private static final int STATE_WIFI_CONFIG           = 4;
+    private static final int STATE_GLOBAL                = 5;
+    private static final int STATE_LOCK_SETTINGS         = 6;
+    private static final int STATE_SOFTAP_CONFIG         = 7;
+    private static final int STATE_NETWORK_POLICIES      = 8;
+    private static final int STATE_WIFI_NEW_CONFIG       = 9;
+    private static final int STATE_DEVICE_CONFIG         = 10;
+    private static final int STATE_SIM_SPECIFIC_SETTINGS = 11;
 
-    private static final int STATE_SIZE             = 11; // The current number of state items
+    private static final int STATE_SIZE                  = 12; // The current number of state items
 
     // Number of entries in the checksum array at various version numbers
     private static final int STATE_SIZES[] = {
@@ -130,7 +138,8 @@ public class SettingsBackupAgent extends BackupAgentHelper {
             8,              // version 5 added STATE_SOFTAP_CONFIG
             9,              // version 6 added STATE_NETWORK_POLICIES
             10,             // version 7 added STATE_WIFI_NEW_CONFIG
-            STATE_SIZE      // version 8 added STATE_DEVICE_CONFIG
+            11,             // version 8 added STATE_DEVICE_CONFIG
+            STATE_SIZE      // version 9 added STATE_SIM_SPECIFIC_SETTINGS
     };
 
     private static final int FULL_BACKUP_ADDED_GLOBAL = 2;  // added the "global" entry
@@ -208,7 +217,6 @@ public class SettingsBackupAgent extends BackupAgentHelper {
     @Override
     public void onBackup(ParcelFileDescriptor oldState, BackupDataOutput data,
             ParcelFileDescriptor newState) throws IOException {
-
         byte[] systemSettingsData = getSystemSettings();
         byte[] secureSettingsData = getSecureSettings();
         byte[] globalSettingsData = getGlobalSettings();
@@ -218,6 +226,7 @@ public class SettingsBackupAgent extends BackupAgentHelper {
         byte[] netPoliciesData = getNetworkPolicies();
         byte[] wifiFullConfigData = getNewWifiConfigData();
         byte[] deviceSpecificInformation = getDeviceSpecificConfiguration();
+        byte[] simSpecificSettingsData = getSimSpecificSettingsData();
 
         long[] stateChecksums = readOldChecksums(oldState);
 
@@ -246,6 +255,9 @@ public class SettingsBackupAgent extends BackupAgentHelper {
         stateChecksums[STATE_DEVICE_CONFIG] =
                 writeIfChanged(stateChecksums[STATE_DEVICE_CONFIG], KEY_DEVICE_SPECIFIC_CONFIG,
                         deviceSpecificInformation, data);
+        stateChecksums[STATE_SIM_SPECIFIC_SETTINGS] =
+                writeIfChanged(stateChecksums[STATE_SIM_SPECIFIC_SETTINGS],
+                        KEY_SIM_SPECIFIC_SETTINGS_2, simSpecificSettingsData, data);
 
         writeNewChecksums(stateChecksums, newState);
     }
@@ -276,10 +288,9 @@ public class SettingsBackupAgent extends BackupAgentHelper {
         // versionCode of com.android.providers.settings corresponds to SDK_INT
         mRestoredFromSdkInt = (int) appVersionCode;
 
-        HashSet<String> movedToGlobal = new HashSet<String>();
-        Settings.System.getMovedToGlobalSettings(movedToGlobal);
-        Settings.Secure.getMovedToGlobalSettings(movedToGlobal);
+        Set<String> movedToGlobal = getMovedToGlobalSettings();
         Set<String> movedToSecure = getMovedToSecureSettings();
+        Set<String> movedToSystem = getMovedToSystemSettings();
 
         Set<String> preservedGlobalSettings = getSettingsToPreserveInRestore(
                 Settings.Global.CONTENT_URI);
@@ -310,32 +321,23 @@ public class SettingsBackupAgent extends BackupAgentHelper {
             switch (key) {
                 case KEY_SYSTEM :
                     restoreSettings(data, Settings.System.CONTENT_URI, movedToGlobal,
-                            movedToSecure, R.array.restore_blocked_system_settings,
-                            dynamicBlockList,
+                            movedToSecure, /* movedToSystem= */ null,
+                            R.array.restore_blocked_system_settings, dynamicBlockList,
                             preservedSystemSettings);
                     mSettingsHelper.applyAudioSettings();
                     break;
 
                 case KEY_SECURE :
-                    restoreSettings(
-                            data,
-                            Settings.Secure.CONTENT_URI,
-                            movedToGlobal,
-                            null,
-                            R.array.restore_blocked_secure_settings,
-                            dynamicBlockList,
+                    restoreSettings(data, Settings.Secure.CONTENT_URI, movedToGlobal,
+                            /* movedToSecure= */ null, movedToSystem,
+                            R.array.restore_blocked_secure_settings, dynamicBlockList,
                             preservedSecureSettings);
                     break;
 
                 case KEY_GLOBAL :
-                    restoreSettings(
-                            data,
-                            Settings.Global.CONTENT_URI,
-                            null,
-                            movedToSecure,
-                            R.array.restore_blocked_global_settings,
-                            dynamicBlockList,
-                            preservedGlobalSettings);
+                    restoreSettings(data, Settings.Global.CONTENT_URI, /* movedToGlobal= */ null,
+                            movedToSecure, movedToSystem, R.array.restore_blocked_global_settings,
+                            dynamicBlockList, preservedGlobalSettings);
                     break;
 
                 case KEY_WIFI_SUPPLICANT :
@@ -386,6 +388,15 @@ public class SettingsBackupAgent extends BackupAgentHelper {
                             preservedSettings);
                     break;
 
+                case KEY_SIM_SPECIFIC_SETTINGS:
+                    // Intentional fall through so that sim-specific backups from Android 12 will
+                    // also be restored on newer Android versions.
+                case KEY_SIM_SPECIFIC_SETTINGS_2:
+                    byte[] restoredSimSpecificSettings = new byte[size];
+                    data.readEntityData(restoredSimSpecificSettings, 0, size);
+                    restoreSimSpecificSettings(restoredSimSpecificSettings);
+                    break;
+
                 default :
                     data.skipEntityData();
 
@@ -421,10 +432,9 @@ public class SettingsBackupAgent extends BackupAgentHelper {
         if (DEBUG_BACKUP) Log.d(TAG, "Flattened data version " + version);
         if (version <= FULL_BACKUP_VERSION) {
             // Generate the moved-to-global lookup table
-            HashSet<String> movedToGlobal = new HashSet<String>();
-            Settings.System.getMovedToGlobalSettings(movedToGlobal);
-            Settings.Secure.getMovedToGlobalSettings(movedToGlobal);
+            Set<String> movedToGlobal = getMovedToGlobalSettings();
             Set<String> movedToSecure = getMovedToSecureSettings();
+            Set<String> movedToSystem = getMovedToSystemSettings();
 
             // system settings data first
             int nBytes = in.readInt();
@@ -432,22 +442,19 @@ public class SettingsBackupAgent extends BackupAgentHelper {
             byte[] buffer = new byte[nBytes];
             in.readFully(buffer, 0, nBytes);
             restoreSettings(buffer, nBytes, Settings.System.CONTENT_URI, movedToGlobal,
-                    movedToSecure, R.array.restore_blocked_system_settings,
-                    Collections.emptySet(), Collections.emptySet());
+                    movedToSecure, /* movedToSystem= */ null,
+                    R.array.restore_blocked_system_settings, Collections.emptySet(),
+                    Collections.emptySet());
 
             // secure settings
             nBytes = in.readInt();
             if (DEBUG_BACKUP) Log.d(TAG, nBytes + " bytes of secure settings data");
             if (nBytes > buffer.length) buffer = new byte[nBytes];
             in.readFully(buffer, 0, nBytes);
-            restoreSettings(
-                    buffer,
-                    nBytes,
-                    Settings.Secure.CONTENT_URI,
-                    movedToGlobal,
-                    null,
-                    R.array.restore_blocked_secure_settings,
-                    Collections.emptySet(), Collections.emptySet());
+            restoreSettings(buffer, nBytes, Settings.Secure.CONTENT_URI, movedToGlobal,
+                    /* movedToSecure= */ null, movedToSystem,
+                    R.array.restore_blocked_secure_settings, Collections.emptySet(),
+                    Collections.emptySet());
 
             // Global only if sufficiently new
             if (version >= FULL_BACKUP_ADDED_GLOBAL) {
@@ -455,10 +462,10 @@ public class SettingsBackupAgent extends BackupAgentHelper {
                 if (DEBUG_BACKUP) Log.d(TAG, nBytes + " bytes of global settings data");
                 if (nBytes > buffer.length) buffer = new byte[nBytes];
                 in.readFully(buffer, 0, nBytes);
-                movedToGlobal.clear();  // no redirection; this *is* the global namespace
-                restoreSettings(buffer, nBytes, Settings.Global.CONTENT_URI, movedToGlobal,
-                        movedToSecure, R.array.restore_blocked_global_settings,
-                        Collections.emptySet(), Collections.emptySet());
+                restoreSettings(buffer, nBytes, Settings.Global.CONTENT_URI,
+                        /* movedToGlobal= */ null, movedToSecure, movedToSystem,
+                        R.array.restore_blocked_global_settings, Collections.emptySet(),
+                        Collections.emptySet());
             }
 
             // locale
@@ -529,11 +536,25 @@ public class SettingsBackupAgent extends BackupAgentHelper {
         }
     }
 
+    private Set<String> getMovedToGlobalSettings() {
+        HashSet<String> movedToGlobalSettings = new HashSet<String>();
+        Settings.System.getMovedToGlobalSettings(movedToGlobalSettings);
+        Settings.Secure.getMovedToGlobalSettings(movedToGlobalSettings);
+        return movedToGlobalSettings;
+    }
+
     private Set<String> getMovedToSecureSettings() {
         Set<String> movedToSecureSettings = new HashSet<>();
         Settings.Global.getMovedToSecureSettings(movedToSecureSettings);
         Settings.System.getMovedToSecureSettings(movedToSecureSettings);
         return movedToSecureSettings;
+    }
+
+    private Set<String> getMovedToSystemSettings() {
+        Set<String> movedToSystemSettings = new HashSet<>();
+        Settings.Global.getMovedToSystemSettings(movedToSystemSettings);
+        Settings.Secure.getMovedToSystemSettings(movedToSystemSettings);
+        return movedToSystemSettings;
     }
 
     private long[] readOldChecksums(ParcelFileDescriptor oldState) throws IOException {
@@ -631,29 +652,31 @@ public class SettingsBackupAgent extends BackupAgentHelper {
             return Collections.emptySet();
         }
 
-        Cursor cursor = getContentResolver().query(settingsUri, new String[] {
-                Settings.NameValueTable.NAME, Settings.NameValueTable.IS_PRESERVED_IN_RESTORE },
-                /* selection */ null, /* selectionArgs */ null, /* sortOrder */ null);
+        try (Cursor cursor = getContentResolver().query(settingsUri, new String[]{
+                        Settings.NameValueTable.NAME,
+                        Settings.NameValueTable.IS_PRESERVED_IN_RESTORE},
+                /* selection */ null, /* selectionArgs */ null, /* sortOrder */ null)) {
 
-        if (!cursor.moveToFirst()) {
-            Slog.i(TAG, "No settings to be preserved in restore");
-            return Collections.emptySet();
-        }
-
-        int nameIndex = cursor.getColumnIndex(Settings.NameValueTable.NAME);
-        int isPreservedIndex = cursor.getColumnIndex(
-                Settings.NameValueTable.IS_PRESERVED_IN_RESTORE);
-
-        Set<String> preservedSettings = new HashSet<>();
-        while (!cursor.isAfterLast()) {
-            if (Boolean.parseBoolean(cursor.getString(isPreservedIndex))) {
-                preservedSettings.add(getQualifiedKeyForSetting(cursor.getString(nameIndex),
-                        settingsUri));
+            if (!cursor.moveToFirst()) {
+                Slog.i(TAG, "No settings to be preserved in restore");
+                return Collections.emptySet();
             }
-            cursor.moveToNext();
-        }
 
-        return preservedSettings;
+            int nameIndex = cursor.getColumnIndex(Settings.NameValueTable.NAME);
+            int isPreservedIndex = cursor.getColumnIndex(
+                    Settings.NameValueTable.IS_PRESERVED_IN_RESTORE);
+
+            Set<String> preservedSettings = new HashSet<>();
+            while (!cursor.isAfterLast()) {
+                if (Boolean.parseBoolean(cursor.getString(isPreservedIndex))) {
+                    preservedSettings.add(getQualifiedKeyForSetting(cursor.getString(nameIndex),
+                            settingsUri));
+                }
+                cursor.moveToNext();
+            }
+
+            return preservedSettings;
+        }
     }
 
     /**
@@ -696,8 +719,9 @@ public class SettingsBackupAgent extends BackupAgentHelper {
     private void restoreSettings(
             BackupDataInput data,
             Uri contentUri,
-            HashSet<String> movedToGlobal,
+            Set<String> movedToGlobal,
             Set<String> movedToSecure,
+            Set<String> movedToSystem,
             int blockedSettingsArrayId,
             Set<String> dynamicBlockList,
             Set<String> settingsToPreserve) {
@@ -714,6 +738,7 @@ public class SettingsBackupAgent extends BackupAgentHelper {
                 contentUri,
                 movedToGlobal,
                 movedToSecure,
+                movedToSystem,
                 blockedSettingsArrayId,
                 dynamicBlockList,
                 settingsToPreserve);
@@ -723,8 +748,9 @@ public class SettingsBackupAgent extends BackupAgentHelper {
             byte[] settings,
             int bytes,
             Uri contentUri,
-            HashSet<String> movedToGlobal,
+            Set<String> movedToGlobal,
             Set<String> movedToSecure,
+            Set<String> movedToSystem,
             int blockedSettingsArrayId,
             Set<String> dynamicBlockList,
             Set<String> settingsToPreserve) {
@@ -735,6 +761,7 @@ public class SettingsBackupAgent extends BackupAgentHelper {
                 contentUri,
                 movedToGlobal,
                 movedToSecure,
+                movedToSystem,
                 blockedSettingsArrayId,
                 dynamicBlockList,
                 settingsToPreserve);
@@ -746,8 +773,9 @@ public class SettingsBackupAgent extends BackupAgentHelper {
             int pos,
             int bytes,
             Uri contentUri,
-            HashSet<String> movedToGlobal,
+            Set<String> movedToGlobal,
             Set<String> movedToSecure,
+            Set<String> movedToSystem,
             int blockedSettingsArrayId,
             Set<String> dynamicBlockList,
             Set<String> settingsToPreserve) {
@@ -828,15 +856,15 @@ public class SettingsBackupAgent extends BackupAgentHelper {
                 destination = Settings.Global.CONTENT_URI;
             } else if (movedToSecure != null && movedToSecure.contains(key)) {
                 destination = Settings.Secure.CONTENT_URI;
+            } else if (movedToSystem != null && movedToSystem.contains(key)) {
+                destination = Settings.System.CONTENT_URI;
             } else {
                 destination = contentUri;
             }
             settingsHelper.restoreValue(this, cr, contentValues, destination, key, value,
                     mRestoredFromSdkInt);
 
-            if (DEBUG) {
-                Log.d(TAG, "Restored setting: " + destination + " : " + key + "=" + value);
-            }
+            Log.d(TAG, "Restored setting: " + destination + " : " + key + "=" + value);
         }
     }
 
@@ -1046,11 +1074,61 @@ public class SettingsBackupAgent extends BackupAgentHelper {
             if (DEBUG) Log.d(TAG, "Successfully unMarshaled SoftApConfiguration ");
             // Depending on device hardware, we may need to notify the user of a setting change
             SoftApConfiguration storedConfig = mWifiManager.getSoftApConfiguration();
-            if (!storedConfig.equals(configInCloud)) {
+
+            if (isNeedToNotifyUserConfigurationHasChanged(configInCloud, storedConfig)) {
                 Log.d(TAG, "restored ap configuration requires a conversion, notify the user");
                 WifiSoftApConfigChangedNotifier.notifyUserOfConfigConversion(this);
             }
         }
+    }
+
+    private boolean isNeedToNotifyUserConfigurationHasChanged(SoftApConfiguration configInCloud,
+            SoftApConfiguration storedConfig) {
+        // Check if the cloud configuration was modified when restored to the device.
+        // All elements of the configuration are compared except:
+        // 1. Persistent randomized MAC address (which is per device)
+        // 2. The flag indicating whether the configuration is "user modified"
+        return !(Objects.equals(configInCloud.getWifiSsid(), storedConfig.getWifiSsid())
+                && Objects.equals(configInCloud.getBssid(), storedConfig.getBssid())
+                && Objects.equals(configInCloud.getPassphrase(), storedConfig.getPassphrase())
+                && configInCloud.isHiddenSsid() == storedConfig.isHiddenSsid()
+                && configInCloud.getChannels().toString().equals(
+                        storedConfig.getChannels().toString())
+                && configInCloud.getSecurityType() == storedConfig.getSecurityType()
+                && configInCloud.getMaxNumberOfClients() == storedConfig.getMaxNumberOfClients()
+                && configInCloud.isAutoShutdownEnabled() == storedConfig.isAutoShutdownEnabled()
+                && configInCloud.getShutdownTimeoutMillis()
+                        == storedConfig.getShutdownTimeoutMillis()
+                && configInCloud.isClientControlByUserEnabled()
+                        == storedConfig.isClientControlByUserEnabled()
+                && Objects.equals(configInCloud.getBlockedClientList(),
+                        storedConfig.getBlockedClientList())
+                && Objects.equals(configInCloud.getAllowedClientList(),
+                        storedConfig.getAllowedClientList())
+                && configInCloud.getMacRandomizationSetting()
+                        == storedConfig.getMacRandomizationSetting()
+                && configInCloud.isBridgedModeOpportunisticShutdownEnabled()
+                        == storedConfig.isBridgedModeOpportunisticShutdownEnabled()
+                && configInCloud.isIeee80211axEnabled() == storedConfig.isIeee80211axEnabled()
+                && configInCloud.isIeee80211beEnabled() == storedConfig.isIeee80211beEnabled()
+                && configInCloud.getBridgedModeOpportunisticShutdownTimeoutMillis()
+                        == storedConfig.getBridgedModeOpportunisticShutdownTimeoutMillis()
+                && Objects.equals(configInCloud.getVendorElements(),
+                        storedConfig.getVendorElements())
+                && (configInCloud.getPersistentRandomizedMacAddress() != null
+                        ? Objects.equals(configInCloud.getPersistentRandomizedMacAddress(),
+                        storedConfig.getPersistentRandomizedMacAddress()) : true)
+                && Arrays.equals(configInCloud.getAllowedAcsChannels(
+                        SoftApConfiguration.BAND_2GHZ),
+                        storedConfig.getAllowedAcsChannels(SoftApConfiguration.BAND_2GHZ))
+                && Arrays.equals(configInCloud.getAllowedAcsChannels(
+                        SoftApConfiguration.BAND_5GHZ),
+                        storedConfig.getAllowedAcsChannels(SoftApConfiguration.BAND_5GHZ))
+                && Arrays.equals(configInCloud.getAllowedAcsChannels(
+                        SoftApConfiguration.BAND_6GHZ),
+                        storedConfig.getAllowedAcsChannels(SoftApConfiguration.BAND_6GHZ))
+                && configInCloud.getMaxChannelBandwidth() == storedConfig.getMaxChannelBandwidth()
+                        );
     }
 
     private byte[] getNetworkPolicies() {
@@ -1180,6 +1258,7 @@ public class SettingsBackupAgent extends BackupAgentHelper {
                 Settings.Secure.CONTENT_URI,
                 null,
                 null,
+                null,
                 blockedSettingsArrayId,
                 dynamicBlocklist,
                 preservedSettings);
@@ -1187,6 +1266,28 @@ public class SettingsBackupAgent extends BackupAgentHelper {
         updateWindowManagerIfNeeded(originalDensity);
 
         return true;
+    }
+
+    private byte[] getSimSpecificSettingsData() {
+        byte[] simSpecificData = new byte[0];
+        PackageManager packageManager = getBaseContext().getPackageManager();
+        if (packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)) {
+            SubscriptionManager subManager = SubscriptionManager.from(getBaseContext());
+            simSpecificData = subManager.getAllSimSpecificSettingsForBackup();
+            Log.i(TAG, "sim specific data of length + " + simSpecificData.length
+                + " successfully retrieved");
+        }
+
+        return simSpecificData;
+    }
+
+    private void restoreSimSpecificSettings(byte[] data) {
+        PackageManager packageManager = getBaseContext().getPackageManager();
+        boolean hasTelephony = packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY);
+        if (hasTelephony) {
+            SubscriptionManager subManager = SubscriptionManager.from(getBaseContext());
+            subManager.restoreAllSimSpecificSettingsFromBackup(data);
+        }
     }
 
     private void updateWindowManagerIfNeeded(Integer previousDensity) {

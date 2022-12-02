@@ -17,6 +17,9 @@ package com.android.server.devicepolicy;
 
 import static com.android.server.devicepolicy.NetworkLoggingHandler.LOG_NETWORK_EVENT_MSG;
 
+import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
+
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.spy;
@@ -24,11 +27,11 @@ import static org.mockito.Mockito.verify;
 
 import android.app.admin.ConnectEvent;
 import android.app.admin.DeviceAdminReceiver;
-import android.app.admin.DevicePolicyManagerInternal;
 import android.app.admin.DnsEvent;
 import android.app.admin.NetworkEvent;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.IpcDataCache;
 import android.os.Message;
 import android.os.Parcel;
 import android.os.SystemClock;
@@ -36,9 +39,8 @@ import android.os.UserHandle;
 import android.os.test.TestLooper;
 import android.test.suitebuilder.annotation.SmallTest;
 
-import com.android.server.LocalServices;
-import com.android.server.SystemService;
-
+import org.junit.Before;
+import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -50,20 +52,23 @@ public class NetworkEventTest extends DpmTestBase {
     private DpmMockContext mSpiedDpmMockContext;
     private DevicePolicyManagerServiceTestable mDpmTestable;
 
-    @Override
-    protected void setUp() throws Exception {
-        super.setUp();
+    @Before
+    public void setUp() throws Exception {
+        // Disable caches in this test process. This must happen early, since some of the
+        // following initialization steps invalidate caches.
+        IpcDataCache.disableForTestMode();
+
         mSpiedDpmMockContext = spy(mMockContext);
         mSpiedDpmMockContext.callerPermissions.add(
                 android.Manifest.permission.MANAGE_DEVICE_ADMINS);
         doNothing().when(mSpiedDpmMockContext).sendBroadcastAsUser(any(Intent.class),
                 any(UserHandle.class));
-        LocalServices.removeServiceForTest(DevicePolicyManagerInternal.class);
         mDpmTestable = new DevicePolicyManagerServiceTestable(getServices(), mSpiedDpmMockContext);
         setUpPackageManagerForAdmin(admin1, DpmMockContext.CALLER_UID);
         mDpmTestable.setActiveAdmin(admin1, true, DpmMockContext.CALLER_USER_HANDLE);
     }
 
+    @Test
     public void testNetworkEventId_monotonicallyIncreasing() throws Exception {
         // GIVEN the handler has not processed any events.
         long startingId = 0;
@@ -72,17 +77,20 @@ public class NetworkEventTest extends DpmTestBase {
         List<NetworkEvent> events = fillHandlerWithFullBatchOfEvents(startingId);
 
         // THEN the events are in a batch.
-        assertTrue("Batch not at the returned token.",
-                events != null && events.size() == MAX_EVENTS_PER_BATCH);
+        assertWithMessage("Batch not at the returned token.").that(events).isNotNull();
+        assertWithMessage("Batch not at the returned token.").that(events)
+                .hasSize(MAX_EVENTS_PER_BATCH);
+
         // THEN event ids are monotonically increasing.
         long expectedId = startingId;
         for (int i = 0; i < MAX_EVENTS_PER_BATCH; i++) {
-            assertEquals("At index " + i + ", the event has the wrong id.", expectedId,
-                    events.get(i).getId());
+            assertWithMessage("At index %s, the event has the wrong id.", i)
+                    .that(events.get(i).getId()).isEqualTo(expectedId);
             expectedId++;
         }
     }
 
+    @Test
     public void testNetworkEventId_wrapsAround() throws Exception {
         // GIVEN the handler has almost processed Long.MAX_VALUE events.
         int gap = 5;
@@ -92,24 +100,25 @@ public class NetworkEventTest extends DpmTestBase {
         List<NetworkEvent> events = fillHandlerWithFullBatchOfEvents(startingId);
 
         // THEN the events are in a batch.
-        assertTrue("Batch not at the returned token.",
-                events != null && events.size() == MAX_EVENTS_PER_BATCH);
+        assertWithMessage("Batch not at the returned token.").that(events).isNotNull();
+        assertWithMessage("Batch not at the returned token.").that(events)
+                .hasSize(MAX_EVENTS_PER_BATCH);
         // THEN event ids are monotonically increasing.
         long expectedId = startingId;
         for (int i = 0; i < gap; i++) {
-            assertEquals("At index " + i + ", the event has the wrong id.", expectedId,
-                    events.get(i).getId());
+            assertWithMessage("At index %s, the event has the wrong id.", i)
+                    .that(events.get(i).getId()).isEqualTo(expectedId);
             expectedId++;
         }
         // THEN event ids are reset when the id reaches the maximum possible value.
-        assertEquals("Event was not assigned the maximum id value.", Long.MAX_VALUE,
-                events.get(gap).getId());
-        assertEquals("Event id was not reset.", 0, events.get(gap + 1).getId());
+        assertWithMessage("Event was not assigned the maximum id value.")
+                .that(events.get(gap).getId()).isEqualTo(Long.MAX_VALUE);
+        assertWithMessage("Event id was not reset.").that(events.get(gap + 1).getId()).isEqualTo(0);
         // THEN event ids are monotonically increasing.
         expectedId = 0;
         for (int i = gap + 1; i < MAX_EVENTS_PER_BATCH; i++) {
-            assertEquals("At index " + i + ", the event has the wrong id.", expectedId,
-                    events.get(i).getId());
+            assertWithMessage("At index %s, the event has the wrong id.", i)
+                    .that(events.get(i).getId()).isEqualTo(expectedId);
             expectedId++;
         }
     }
@@ -117,7 +126,7 @@ public class NetworkEventTest extends DpmTestBase {
     private List<NetworkEvent> fillHandlerWithFullBatchOfEvents(long startingId) throws Exception {
         // GIVEN a handler with events
         NetworkLoggingHandler handler = new NetworkLoggingHandler(new TestLooper().getLooper(),
-                mDpmTestable, startingId);
+                mDpmTestable, startingId, DpmMockContext.CALLER_USER_HANDLE);
         // GIVEN network events are sent to the handler.
         for (int i = 0; i < MAX_EVENTS_PER_BATCH; i++) {
             ConnectEvent event = new ConnectEvent("some_ip_address", 800, "com.google.foo",
@@ -134,8 +143,8 @@ public class NetworkEventTest extends DpmTestBase {
         ArgumentCaptor<Intent> intentCaptor = ArgumentCaptor.forClass(Intent.class);
         verify(mSpiedDpmMockContext).sendBroadcastAsUser(intentCaptor.capture(),
                 any(UserHandle.class));
-        assertEquals(intentCaptor.getValue().getAction(),
-                DeviceAdminReceiver.ACTION_NETWORK_LOGS_AVAILABLE);
+        assertThat(DeviceAdminReceiver.ACTION_NETWORK_LOGS_AVAILABLE)
+                .isEqualTo(intentCaptor.getValue().getAction());
         long token = intentCaptor.getValue().getExtras().getLong(
                 DeviceAdminReceiver.EXTRA_NETWORK_LOGS_TOKEN, 0);
         return handler.retrieveFullLogBatch(token);
@@ -144,6 +153,7 @@ public class NetworkEventTest extends DpmTestBase {
     /**
      * Test parceling and unparceling of a ConnectEvent.
      */
+    @Test
     public void testConnectEventParceling() {
         ConnectEvent event = new ConnectEvent("127.0.0.1", 80, "com.android.whateverdude", 100000);
         event.setId(5L);
@@ -152,16 +162,17 @@ public class NetworkEventTest extends DpmTestBase {
         p.setDataPosition(0);
         ConnectEvent unparceledEvent = p.readParcelable(NetworkEventTest.class.getClassLoader());
         p.recycle();
-        assertEquals(event.getInetAddress(), unparceledEvent.getInetAddress());
-        assertEquals(event.getPort(), unparceledEvent.getPort());
-        assertEquals(event.getPackageName(), unparceledEvent.getPackageName());
-        assertEquals(event.getTimestamp(), unparceledEvent.getTimestamp());
-        assertEquals(event.getId(), unparceledEvent.getId());
+        assertThat(unparceledEvent.getInetAddress()).isEqualTo(event.getInetAddress());
+        assertThat(unparceledEvent.getPort()).isEqualTo(event.getPort());
+        assertThat(unparceledEvent.getPackageName()).isEqualTo(event.getPackageName());
+        assertThat(unparceledEvent.getTimestamp()).isEqualTo(event.getTimestamp());
+        assertThat(unparceledEvent.getId()).isEqualTo(event.getId());
     }
 
     /**
      * Test parceling and unparceling of a DnsEvent.
      */
+    @Test
     public void testDnsEventParceling() {
         DnsEvent event = new DnsEvent("d.android.com", new String[]{"192.168.0.1", "127.0.0.1"}, 2,
                 "com.android.whateverdude", 100000);
@@ -171,13 +182,15 @@ public class NetworkEventTest extends DpmTestBase {
         p.setDataPosition(0);
         DnsEvent unparceledEvent = p.readParcelable(NetworkEventTest.class.getClassLoader());
         p.recycle();
-        assertEquals(event.getHostname(), unparceledEvent.getHostname());
-        assertEquals(event.getInetAddresses().get(0), unparceledEvent.getInetAddresses().get(0));
-        assertEquals(event.getInetAddresses().get(1), unparceledEvent.getInetAddresses().get(1));
-        assertEquals(event.getTotalResolvedAddressCount(),
-                unparceledEvent.getTotalResolvedAddressCount());
-        assertEquals(event.getPackageName(), unparceledEvent.getPackageName());
-        assertEquals(event.getTimestamp(), unparceledEvent.getTimestamp());
-        assertEquals(event.getId(), unparceledEvent.getId());
+        assertThat(unparceledEvent.getHostname()).isEqualTo(event.getHostname());
+        assertThat(unparceledEvent.getInetAddresses().get(0))
+                .isEqualTo(event.getInetAddresses().get(0));
+        assertThat(unparceledEvent.getInetAddresses().get(1))
+                .isEqualTo(event.getInetAddresses().get(1));
+        assertThat(unparceledEvent.getTotalResolvedAddressCount())
+                .isEqualTo(event.getTotalResolvedAddressCount());
+        assertThat(unparceledEvent.getPackageName()).isEqualTo(event.getPackageName());
+        assertThat(unparceledEvent.getTimestamp()).isEqualTo(event.getTimestamp());
+        assertThat(unparceledEvent.getId()).isEqualTo(event.getId());
     }
 }

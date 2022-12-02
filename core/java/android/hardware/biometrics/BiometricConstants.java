@@ -18,7 +18,12 @@ package android.hardware.biometrics;
 
 import static android.hardware.biometrics.BiometricManager.Authenticators;
 
+import android.annotation.IntDef;
 import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 
 /**
  * Interface containing all of the biometric modality agnostic constants.
@@ -140,6 +145,18 @@ public interface BiometricConstants {
     int BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED = 15;
 
     /**
+     * Authentication cannot proceed because re-enrollment is required.
+     * @hide
+     */
+    int BIOMETRIC_ERROR_RE_ENROLL = 16;
+
+    /**
+     * The privacy setting has been enabled and will block use of the sensor.
+     * @hide
+     */
+    int BIOMETRIC_ERROR_SENSOR_PRIVACY_ENABLED = 18;
+
+    /**
      * This constant is only used by SystemUI. It notifies SystemUI that authentication was paused
      * because the authentication attempt was unsuccessful.
      * @hide
@@ -149,12 +166,45 @@ public interface BiometricConstants {
     /**
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     int BIOMETRIC_ERROR_VENDOR_BASE = 1000;
+
+    @IntDef({BIOMETRIC_SUCCESS,
+            BIOMETRIC_ERROR_HW_UNAVAILABLE,
+            BIOMETRIC_ERROR_UNABLE_TO_PROCESS,
+            BIOMETRIC_ERROR_TIMEOUT,
+            BIOMETRIC_ERROR_NO_SPACE,
+            BIOMETRIC_ERROR_CANCELED,
+            BIOMETRIC_ERROR_UNABLE_TO_REMOVE,
+            BIOMETRIC_ERROR_LOCKOUT,
+            BIOMETRIC_ERROR_VENDOR,
+            BIOMETRIC_ERROR_LOCKOUT_PERMANENT,
+            BIOMETRIC_ERROR_USER_CANCELED,
+            BIOMETRIC_ERROR_NO_BIOMETRICS,
+            BIOMETRIC_ERROR_HW_NOT_PRESENT,
+            BIOMETRIC_ERROR_NEGATIVE_BUTTON,
+            BIOMETRIC_ERROR_NO_DEVICE_CREDENTIAL,
+            BIOMETRIC_ERROR_SECURITY_UPDATE_REQUIRED,
+            BIOMETRIC_PAUSED_REJECTED})
+    @Retention(RetentionPolicy.SOURCE)
+    @interface Errors {}
 
     //
     // Image acquisition messages.
     //
+
+    /**
+     * @hide
+     */
+    @IntDef({BIOMETRIC_ACQUIRED_GOOD,
+            BIOMETRIC_ACQUIRED_PARTIAL,
+            BIOMETRIC_ACQUIRED_INSUFFICIENT,
+            BIOMETRIC_ACQUIRED_IMAGER_DIRTY,
+            BIOMETRIC_ACQUIRED_TOO_SLOW,
+            BIOMETRIC_ACQUIRED_TOO_FAST,
+            BIOMETRIC_ACQUIRED_VENDOR})
+    @Retention(RetentionPolicy.SOURCE)
+    @interface Acquired {}
 
     /**
      * The image acquired was good.
@@ -218,4 +268,27 @@ public interface BiometricConstants {
      */
     int BIOMETRIC_SYSTEM_EVENT_EARLY_USER_CANCEL = 1;
 
+    /**
+     * No lockout.
+     * @hide
+     */
+    int BIOMETRIC_LOCKOUT_NONE = 0;
+    /**
+     * The biometric is in a temporary lockout state that will expire after some time.
+     * @hide
+     */
+    int BIOMETRIC_LOCKOUT_TIMED = 1;
+    /**
+     * The biometric is locked out until a reset occurs. Resets are typically triggered by
+     * successfully authenticating via a stronger method than the one that is locked out.
+     * @hide
+     */
+    int BIOMETRIC_LOCKOUT_PERMANENT = 2;
+
+    /**
+     * @hide
+     */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef({BIOMETRIC_LOCKOUT_NONE, BIOMETRIC_LOCKOUT_TIMED, BIOMETRIC_LOCKOUT_PERMANENT})
+    @interface LockoutMode {}
 }

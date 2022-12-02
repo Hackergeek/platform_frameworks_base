@@ -16,6 +16,8 @@
 
 package android.app;
 
+import android.app.IOnProjectionStateChangedListener;
+
 /**
  * Interface used to control special UI modes.
  * @hide
@@ -46,18 +48,52 @@ interface IUiModeManager {
     
     /**
      * Sets the night mode.
+     * <p>
      * The mode can be one of:
-     *   1 - notnight mode
-     *   2 - night mode
-     *   3 - automatic mode switching
+     * <ol>notnight mode</ol>
+     * <ol>night mode</ol>
+     * <ol>custom schedule mode switching</ol>
      */
     void setNightMode(int mode);
 
     /**
-     * Gets the currently configured night mode.  Return 1 for notnight,
-     * 2 for night, and 3 for automatic mode switching.
+     * Gets the currently configured night mode.
+     * <p>
+     * Returns
+     * <ol>notnight mode</ol>
+     * <ol>night mode</ol>
+     * <ol>custom schedule mode switching</ol>
      */
     int getNightMode();
+
+    /**
+     * Sets the current night mode to {@link #MODE_NIGHT_CUSTOM} with the custom night mode type
+     * {@code nightModeCustomType}.
+     *
+     * @param nightModeCustomType
+     * @hide
+     */
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.MODIFY_DAY_NIGHT_MODE)")
+    void setNightModeCustomType(int nightModeCustomType);
+
+    /**
+     * Returns the custom night mode type.
+     * <p>
+     * If the current night mode is not {@link #MODE_NIGHT_CUSTOM}, returns
+     * {@link #MODE_NIGHT_CUSTOM_TYPE_UNKNOWN}.
+     * @hide
+     */
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.MODIFY_DAY_NIGHT_MODE)")
+    int getNightModeCustomType();
+
+    /**
+     * Sets the dark mode for the given application. This setting is persisted and will override the
+     * system configuration for this application.
+     *   1 - notnight mode
+     *   2 - night mode
+     *   3 - automatic mode switching
+     */
+    void setApplicationNightMode(in int mode);
 
     /**
      * Tells if UI mode is locked or not.
@@ -70,8 +106,22 @@ interface IUiModeManager {
     boolean isNightModeLocked();
 
     /**
-    * [De]Activates night mode
-    */
+     * [De]activating night mode for the current user if the current night mode is custom and the
+     * custom type matches {@code nightModeCustomType}.
+     *
+     * @param nightModeCustomType the specify type of custom mode
+     * @param active {@code true} to activate night mode. Otherwise, deactivate night mode
+     * @return {@code true} if night mode has successfully activated for the requested
+     *         {@code nightModeCustomType}.
+     * @hide
+     */
+    @JavaPassthrough(annotation="@android.annotation.RequiresPermission(android.Manifest.permission.MODIFY_DAY_NIGHT_MODE)")
+    boolean setNightModeActivatedForCustomMode(int nightModeCustom, boolean active);
+
+    /**
+     * [De]Activates night mode.
+     * @hide
+     */
     boolean setNightModeActivated(boolean active);
 
     /**
@@ -93,4 +143,34 @@ interface IUiModeManager {
     * Sets custom end clock time
     */
     void setCustomNightModeEnd(long time);
+
+    /**
+    * Sets projection state for the caller for the given projection type.
+    */
+    boolean requestProjection(in IBinder binder, int projectionType, String callingPackage);
+
+    /**
+    * Releases projection state for the caller for the given projection type.
+    */
+    boolean releaseProjection(int projectionType, String callingPackage);
+
+    /**
+    * Registers a listener for changes to projection state.
+    */
+    void addOnProjectionStateChangedListener(in IOnProjectionStateChangedListener listener, int projectionType);
+
+    /**
+    * Unregisters a listener for changes to projection state.
+    */
+    void removeOnProjectionStateChangedListener(in IOnProjectionStateChangedListener listener);
+
+    /**
+    * Returns packages that have currently set the given projection type.
+    */
+    List<String> getProjectingPackages(int projectionType);
+
+    /**
+    * Returns currently set projection types.
+    */
+    int getActiveProjectionTypes();
 }

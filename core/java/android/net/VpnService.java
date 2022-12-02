@@ -41,6 +41,8 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.UserHandle;
 
+import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.net.NetworkUtilsInternal;
 import com.android.internal.net.VpnConfig;
 
 import java.net.DatagramSocket;
@@ -49,6 +51,7 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
@@ -170,12 +173,11 @@ public class VpnService extends Service {
             "android.net.VpnService.SUPPORTS_ALWAYS_ON";
 
     /**
-     * Use IConnectivityManager since those methods are hidden and not
-     * available in ConnectivityManager.
+     * Use IVpnManager since those methods are hidden and not available in VpnManager.
      */
-    private static IConnectivityManager getService() {
-        return IConnectivityManager.Stub.asInterface(
-                ServiceManager.getService(Context.CONNECTIVITY_SERVICE));
+    private static IVpnManager getService() {
+        return IVpnManager.Stub.asInterface(
+                ServiceManager.getService(Context.VPN_MANAGEMENT_SERVICE));
     }
 
     /**
@@ -226,15 +228,15 @@ public class VpnService extends Service {
     @SystemApi
     @RequiresPermission(android.Manifest.permission.CONTROL_VPN)
     public static void prepareAndAuthorize(Context context) {
-        IConnectivityManager cm = getService();
+        IVpnManager vm = getService();
         String packageName = context.getPackageName();
         try {
             // Only prepare if we're not already prepared.
             int userId = context.getUserId();
-            if (!cm.prepareVpn(packageName, null, userId)) {
-                cm.prepareVpn(null, packageName, userId);
+            if (!vm.prepareVpn(packageName, null, userId)) {
+                vm.prepareVpn(null, packageName, userId);
             }
-            cm.setVpnPackageAuthorization(packageName, userId, VpnManager.TYPE_VPN_SERVICE);
+            vm.setVpnPackageAuthorization(packageName, userId, VpnManager.TYPE_VPN_SERVICE);
         } catch (RemoteException e) {
             // ignore
         }
@@ -255,7 +257,7 @@ public class VpnService extends Service {
      * @return {@code true} on success.
      */
     public boolean protect(int socket) {
-        return NetworkUtils.protectFromVpn(socket);
+        return NetworkUtilsInternal.protectFromVpn(socket);
     }
 
     /**
@@ -471,6 +473,13 @@ public class VpnService extends Service {
         }
     }
 
+    private static void checkNonPrefixBytes(@NonNull InetAddress address, int prefixLength) {
+        final IpPrefix prefix = new IpPrefix(address, prefixLength);
+        if (!prefix.getAddress().equals(address)) {
+            throw new IllegalArgumentException("Bad address");
+        }
+    }
+
     /**
      * Helper class to create a VPN interface. This class should be always
      * used within the scope of the outer {@link VpnService}.
@@ -481,9 +490,9 @@ public class VpnService extends Service {
 
         private final VpnConfig mConfig = new VpnConfig();
         @UnsupportedAppUsage
-        private final List<LinkAddress> mAddresses = new ArrayList<LinkAddress>();
+        private final List<LinkAddress> mAddresses = new ArrayList<>();
         @UnsupportedAppUsage
-        private final List<RouteInfo> mRoutes = new ArrayList<RouteInfo>();
+        private final List<RouteInfo> mRoutes = new ArrayList<>();
 
         public Builder() {
             mConfig.user = VpnService.this.getClass().getName();
@@ -529,7 +538,7 @@ public class VpnService extends Service {
 
         /**
          * Sets an HTTP proxy for the VPN network. This proxy is only a recommendation
-         * and it is possible that some apps will ignore it.
+         * and it is possible that some apps will ignore it. PAC proxies are not supported.
          */
         @NonNull
         public Builder setHttpProxy(@NonNull ProxyInfo proxyInfo) {
@@ -555,7 +564,6 @@ public class VpnService extends Service {
                 throw new IllegalArgumentException("Bad address");
             }
             mAddresses.add(new LinkAddress(address, prefixLength));
-            mConfig.updateAllowedFamilies(address);
             return this;
         }
 
@@ -579,27 +587,68 @@ public class VpnService extends Service {
          * Add a network route to the VPN interface. Both IPv4 and IPv6
          * routes are supported.
          *
+         * If a route with the same destination is already present, its type will be updated.
+         *
+         * @throws IllegalArgumentException if the route is invalid.
+         */
+        @NonNull
+        private Builder addRoute(@NonNull IpPrefix prefix, int type) {
+            check(prefix.getAddress(), prefix.getPrefixLength());
+
+            final RouteInfo newRoute = new RouteInfo(prefix, /* gateway */
+                    null, /* interface */ null, type);
+
+            final int index = findRouteIndexByDestination(newRoute);
+
+            if (index == -1) {
+                mRoutes.add(newRoute);
+            } else {
+                mRoutes.set(index, newRoute);
+            }
+
+            return this;
+        }
+
+        /**
+         * Add a network route to the VPN interface. Both IPv4 and IPv6
+         * routes are supported.
+         *
          * Adding a route implicitly allows traffic from that address family
          * (i.e., IPv4 or IPv6) to be routed over the VPN. @see #allowFamily
+         *
+         * Calling this method overrides previous calls to {@link #excludeRoute} for the same
+         * destination.
+         *
+         * If multiple routes match the packet destination, route with the longest prefix takes
+         * precedence.
          *
          * @throws IllegalArgumentException if the route is invalid.
          */
         @NonNull
         public Builder addRoute(@NonNull InetAddress address, int prefixLength) {
-            check(address, prefixLength);
+            checkNonPrefixBytes(address, prefixLength);
 
-            int offset = prefixLength / 8;
-            byte[] bytes = address.getAddress();
-            if (offset < bytes.length) {
-                for (bytes[offset] <<= prefixLength % 8; offset < bytes.length; ++offset) {
-                    if (bytes[offset] != 0) {
-                        throw new IllegalArgumentException("Bad address");
-                    }
-                }
-            }
-            mRoutes.add(new RouteInfo(new IpPrefix(address, prefixLength), null));
-            mConfig.updateAllowedFamilies(address);
-            return this;
+            return addRoute(new IpPrefix(address, prefixLength), RouteInfo.RTN_UNICAST);
+        }
+
+        /**
+         * Add a network route to the VPN interface. Both IPv4 and IPv6
+         * routes are supported.
+         *
+         * Adding a route implicitly allows traffic from that address family
+         * (i.e., IPv4 or IPv6) to be routed over the VPN. @see #allowFamily
+         *
+         * Calling this method overrides previous calls to {@link #excludeRoute} for the same
+         * destination.
+         *
+         * If multiple routes match the packet destination, route with the longest prefix takes
+         * precedence.
+         *
+         * @throws IllegalArgumentException if the route is invalid.
+         */
+        @NonNull
+        public Builder addRoute(@NonNull IpPrefix prefix) {
+            return addRoute(prefix, RouteInfo.RTN_UNICAST);
         }
 
         /**
@@ -610,12 +659,35 @@ public class VpnService extends Service {
          * Adding a route implicitly allows traffic from that address family
          * (i.e., IPv4 or IPv6) to be routed over the VPN. @see #allowFamily
          *
+         * Calling this method overrides previous calls to {@link #excludeRoute} for the same
+         * destination.
+         *
+         * If multiple routes match the packet destination, route with the longest prefix takes
+         * precedence.
+         *
          * @throws IllegalArgumentException if the route is invalid.
          * @see #addRoute(InetAddress, int)
          */
         @NonNull
         public Builder addRoute(@NonNull String address, int prefixLength) {
             return addRoute(InetAddress.parseNumericAddress(address), prefixLength);
+        }
+
+        /**
+         * Exclude a network route from the VPN interface. Both IPv4 and IPv6
+         * routes are supported.
+         *
+         * Calling this method overrides previous calls to {@link #addRoute} for the same
+         * destination.
+         *
+         * If multiple routes match the packet destination, route with the longest prefix takes
+         * precedence.
+         *
+         * @throws IllegalArgumentException if the route is invalid.
+         */
+        @NonNull
+        public Builder excludeRoute(@NonNull IpPrefix prefix) {
+            return addRoute(prefix, RouteInfo.RTN_THROW);
         }
 
         /**
@@ -898,6 +970,24 @@ public class VpnService extends Service {
             } catch (RemoteException e) {
                 throw new IllegalStateException(e);
             }
+        }
+
+        private int findRouteIndexByDestination(RouteInfo route) {
+            for (int i = 0; i < mRoutes.size(); i++) {
+                if (mRoutes.get(i).getDestination().equals(route.getDestination())) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        /**
+         * Method for testing, to observe mRoutes while builder is being used.
+         * @hide
+         */
+        @VisibleForTesting
+        public List<RouteInfo> routes() {
+            return Collections.unmodifiableList(mRoutes);
         }
     }
 }

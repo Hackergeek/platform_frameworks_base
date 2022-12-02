@@ -44,6 +44,9 @@ TEST(ProguardRulesTest, ManifestRuleDefaultConstructorOnly) {
             android:name="com.foo.BarApplication"
             android:zygotePreloadName="com.foo.BarZygotePreload"
             >
+          <processes>
+            <process android:process=":sub" android:name="com.foo.BazApplication" />
+          </processes>
           <activity android:name="com.foo.BarActivity"/>
           <service android:name="com.foo.BarService"/>
           <receiver android:name="com.foo.BarReceiver"/>
@@ -59,6 +62,7 @@ TEST(ProguardRulesTest, ManifestRuleDefaultConstructorOnly) {
   EXPECT_THAT(actual, HasSubstr("-keep class com.foo.BarAppComponentFactory { <init>(); }"));
   EXPECT_THAT(actual, HasSubstr("-keep class com.foo.BarBackupAgent { <init>(); }"));
   EXPECT_THAT(actual, HasSubstr("-keep class com.foo.BarApplication { <init>(); }"));
+  EXPECT_THAT(actual, HasSubstr("-keep class com.foo.BazApplication { <init>(); }"));
   EXPECT_THAT(actual, HasSubstr("-keep class com.foo.BarActivity { <init>(); }"));
   EXPECT_THAT(actual, HasSubstr("-keep class com.foo.BarService { <init>(); }"));
   EXPECT_THAT(actual, HasSubstr("-keep class com.foo.BarReceiver { <init>(); }"));
@@ -247,8 +251,10 @@ TEST(ProguardRulesTest, IncludedLayoutRulesAreConditional) {
 
   ResourceTable table;
   StdErrDiagnostics errDiagnostics;
-  table.AddResource(bar_layout->file.name, ConfigDescription::DefaultConfig(), "",
-                    util::make_unique<FileReference>(), &errDiagnostics);
+  table.AddResource(NewResourceBuilder(bar_layout->file.name)
+                        .SetValue(util::make_unique<FileReference>())
+                        .Build(),
+                    &errDiagnostics);
 
   std::unique_ptr<IAaptContext> context =
       test::ContextBuilder()
@@ -262,7 +268,7 @@ TEST(ProguardRulesTest, IncludedLayoutRulesAreConditional) {
       </View>)");
   foo_layout->file.name = test::ParseNameOrDie("com.foo:layout/foo");
 
-  XmlReferenceLinker xml_linker;
+  XmlReferenceLinker xml_linker(nullptr);
   ASSERT_TRUE(xml_linker.Consume(context.get(), bar_layout.get()));
   ASSERT_TRUE(xml_linker.Consume(context.get(), foo_layout.get()));
 

@@ -318,7 +318,8 @@ public final class TextClassification implements Parcelable {
     public static PendingIntent createPendingIntent(
             @NonNull final Context context, @NonNull final Intent intent, int requestCode) {
         return PendingIntent.getActivity(
-                context, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT);
+                context, requestCode, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
     /**
@@ -712,12 +713,12 @@ public final class TextClassification implements Parcelable {
             final CharSequence text = in.readCharSequence();
             final int startIndex = in.readInt();
             final int endIndex = in.readInt();
-            final LocaleList defaultLocales = in.readParcelable(null);
+            final LocaleList defaultLocales = in.readParcelable(null, android.os.LocaleList.class);
             final String referenceTimeString = in.readString();
             final ZonedDateTime referenceTime = referenceTimeString == null
                     ? null : ZonedDateTime.parse(referenceTimeString);
             final Bundle extras = in.readBundle();
-            final SystemTextClassifierMetadata systemTcMetadata = in.readParcelable(null);
+            final SystemTextClassifierMetadata systemTcMetadata = in.readParcelable(null, android.view.textclassifier.SystemTextClassifierMetadata.class);
 
             final Request request = new Request(text, startIndex, endIndex,
                     defaultLocales, referenceTime, extras);

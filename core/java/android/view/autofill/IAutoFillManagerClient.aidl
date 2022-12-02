@@ -18,6 +18,7 @@ package android.view.autofill;
 
 import java.util.List;
 
+import android.content.ClipData;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.IntentSender;
@@ -46,6 +47,11 @@ oneway interface IAutoFillManagerClient {
       */
     void autofill(int sessionId, in List<AutofillId> ids, in List<AutofillValue> values,
             boolean hideHighlight);
+
+    /**
+     * Autofills the activity with rich content data (e.g. an image) from a dataset.
+     */
+    void autofillContent(int sessionId, in AutofillId id, in ClipData content);
 
     /**
       * Authenticates a fill response or a data set.
@@ -134,4 +140,9 @@ oneway interface IAutoFillManagerClient {
     * Requests to show the soft input method if the focus is on the given id.
     */
    void requestShowSoftInput(in AutofillId id);
+
+    /**
+     * Notifies autofill ids that require to show the fill dialog.
+     */
+    void notifyFillDialogTriggerIds(in List<AutofillId> ids);
 }

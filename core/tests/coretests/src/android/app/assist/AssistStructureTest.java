@@ -23,11 +23,15 @@ import static android.view.View.IMPORTANT_FOR_AUTOFILL_YES;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.app.assist.AssistStructure.ViewNode;
+import android.app.assist.AssistStructure.ViewNodeBuilder;
+import android.app.assist.AssistStructure.ViewNodeParcelable;
 import android.content.Context;
+import android.os.LocaleList;
 import android.os.Parcel;
 import android.os.SystemClock;
 import android.text.InputFilter;
 import android.util.Log;
+import android.view.View;
 import android.view.autofill.AutofillId;
 import android.widget.EditText;
 import android.widget.FrameLayout;
@@ -219,6 +223,56 @@ public class AssistStructureTest {
         }
     }
 
+    @Test
+    public void testViewNodeParcelableForAutofill() {
+        Log.d(TAG, "Adding view with " + BIG_VIEW_SIZE + " chars");
+
+        View view = newBigView();
+        mActivity.addView(view);
+        waitUntilViewsAreLaidOff();
+
+        assertThat(view.getViewRootImpl()).isNotNull();
+        ViewNodeBuilder viewStructure = new ViewNodeBuilder();
+        viewStructure.setAutofillId(view.getAutofillId());
+        view.onProvideAutofillStructure(viewStructure, /* flags= */ 0);
+        ViewNodeParcelable viewNodeParcelable = new ViewNodeParcelable(viewStructure.getViewNode());
+
+        // Check properties on "original" view node.
+        assertBigView(viewNodeParcelable.getViewNode());
+
+        // Check properties on "cloned" view node.
+        ViewNodeParcelable clone = cloneThroughParcel(viewNodeParcelable);
+        assertBigView(clone.getViewNode());
+    }
+
+    @Test
+    public void testViewNodeParcelableControlFlags() {
+        View view = newBigView();
+        mActivity.addView(view);
+        waitUntilViewsAreLaidOff();
+
+        assertThat(view.getViewRootImpl()).isNotNull();
+        ViewNodeBuilder viewStructure = new ViewNodeBuilder();
+        viewStructure.setAutofillId(view.getAutofillId());
+        view.onProvideAutofillStructure(viewStructure, /* flags= */ 0);
+
+        // Set highest and lowest control flags
+        viewStructure.setReceiveContentMimeTypes(new String[] {});
+        viewStructure.setLocaleList(new LocaleList());
+
+        ViewNodeParcelable viewNodeParcelable = new ViewNodeParcelable(viewStructure.getViewNode());
+
+        // Check properties on "original" view node.
+        assertBigView(viewNodeParcelable.getViewNode());
+        assertControlFlags(viewNodeParcelable.getViewNode());
+
+        // Check properties on "cloned" view node.
+        ViewNodeParcelable clone = cloneThroughParcel(viewNodeParcelable);
+        assertBigView(clone.getViewNode());
+        assertControlFlags(clone.getViewNode());
+
+    }
+
     private EditText newSmallView() {
         EditText view = new EditText(mContext);
         view.setText("I AM GROOT");
@@ -270,6 +324,38 @@ public class AssistStructureTest {
         assertThat(hint.length()).isEqualTo(BIG_VIEW_SIZE);
         assertThat(hint.charAt(0)).isEqualTo(BIG_VIEW_CHAR);
         assertThat(hint.charAt(BIG_VIEW_SIZE - 1)).isEqualTo(BIG_VIEW_CHAR);
+    }
+
+    /**
+     * Assert the lowest and highest bit control flags.
+     *
+     * The lowest and highest flags are {@link ViewNode#FLAGS_HAS_LOCALE_LIST} and
+     * {@link ViewNode#FLAGS_HAS_MIME_TYPES} respectively, so we check these two during parceling to
+     * make sure the entire range of control flags are copied.
+     *
+     * TODO: Need to change this test if the flag bits are added/changed in the future.
+     */
+    private void assertControlFlags(ViewNode view) {
+        assertThat(view.getReceiveContentMimeTypes()).isNotNull();
+        assertThat(view.getLocaleList()).isNotNull();
+    }
+
+    private ViewNodeParcelable cloneThroughParcel(ViewNodeParcelable viewNodeParcelable) {
+        Parcel parcel = Parcel.obtain();
+
+        try {
+            // Write to parcel
+            parcel.setDataPosition(0); // Validity Check
+            viewNodeParcelable.writeToParcel(parcel, NO_FLAGS);
+
+            // Read from parcel
+            parcel.setDataPosition(0);
+            ViewNodeParcelable clone = ViewNodeParcelable.CREATOR.createFromParcel(parcel);
+            assertThat(clone).isNotNull();
+            return clone;
+        } finally {
+            parcel.recycle();
+        }
     }
 
     private AssistStructure cloneThroughParcel(AssistStructure structure) {

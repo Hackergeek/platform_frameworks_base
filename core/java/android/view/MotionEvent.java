@@ -16,11 +16,13 @@
 
 package android.view;
 
+import static android.os.IInputConstants.INPUT_EVENT_FLAG_IS_ACCESSIBILITY_EVENT;
 import static android.view.Display.DEFAULT_DISPLAY;
 
 import static java.lang.annotation.RetentionPolicy.SOURCE;
 
 import android.annotation.IntDef;
+import android.annotation.Nullable;
 import android.annotation.TestApi;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.graphics.Matrix;
@@ -432,8 +434,8 @@ public final class MotionEvent extends InputEvent implements Parcelable {
 
     /**
      * This flag indicates that the window that received this motion event is partly
-     * or wholly obscured by another visible window above it. This flag is set to true
-     * if the event directly passed through the obscured area.
+     * or wholly obscured by another visible window above it and the event directly passed through
+     * the obscured area.
      *
      * A security sensitive application can check this flag to identify situations in which
      * a malicious application may have covered up part of its content for the purpose
@@ -445,8 +447,8 @@ public final class MotionEvent extends InputEvent implements Parcelable {
 
     /**
      * This flag indicates that the window that received this motion event is partly
-     * or wholly obscured by another visible window above it. This flag is set to true
-     * even if the event did not directly pass through the obscured area.
+     * or wholly obscured by another visible window above it and the event did not directly pass
+     * through the obscured area.
      *
      * A security sensitive application can check this flag to identify situations in which
      * a malicious application may have covered up part of its content for the purpose
@@ -454,7 +456,7 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      * to drop the suspect touches or to take additional precautions to confirm the user's
      * actual intent.
      *
-     * Unlike FLAG_WINDOW_IS_OBSCURED, this is true even if the window that received this event is
+     * Unlike FLAG_WINDOW_IS_OBSCURED, this is only true if the window that received this event is
      * obstructed in areas other than the touched location.
      */
     public static final int FLAG_WINDOW_IS_PARTIALLY_OBSCURED = 0x2;
@@ -474,6 +476,36 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      * @hide
      */
     public static final int FLAG_IS_GENERATED_GESTURE = 0x8;
+
+    /**
+     * This flag is only set for events with {@link #ACTION_POINTER_UP} and {@link #ACTION_CANCEL}.
+     * It indicates that the pointer going up was an unintentional user touch. When FLAG_CANCELED
+     * is set, the typical actions that occur in response for a pointer going up (such as click
+     * handlers, end of drawing) should be aborted. This flag is typically set when the user was
+     * accidentally touching the screen, such as by gripping the device, or placing the palm on the
+     * screen.
+     *
+     * @see #ACTION_POINTER_UP
+     * @see #ACTION_CANCEL
+     */
+    public static final int FLAG_CANCELED = 0x20;
+
+    /**
+     * This flag indicates that the event will not cause a focus change if it is directed to an
+     * unfocused window, even if it an {@link #ACTION_DOWN}. This is typically used with pointer
+     * gestures to allow the user to direct gestures to an unfocused window without bringing the
+     * window into focus.
+     * @hide
+     */
+    public static final int FLAG_NO_FOCUS_CHANGE = 0x40;
+
+    /**
+     * This flag indicates that this event was modified by or generated from an accessibility
+     * service. Value = 0x800
+     * @hide
+     */
+    @TestApi
+    public static final int FLAG_IS_ACCESSIBILITY_EVENT = INPUT_EVENT_FLAG_IS_ACCESSIBILITY_EVENT;
 
     /**
      * Private flag that indicates when the system has detected that this motion event
@@ -1468,6 +1500,15 @@ public final class MotionEvent extends InputEvent implements Parcelable {
      */
     public static final int TOOL_TYPE_ERASER = 4;
 
+    /**
+     * Tool type constant: The tool is a palm and should be rejected.
+     *
+     * @see #getToolType
+     *
+     * @hide
+     */
+    public static final int TOOL_TYPE_PALM = 5;
+
     // NOTE: If you add a new tool type here you must also add it to:
     //  native/include/android/input.h
 
@@ -1483,7 +1524,7 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     // Private value for history pos that obtains the current sample.
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private static final int HISTORY_CURRENT = -0x80000000;
 
     // This is essentially the same as native AMOTION_EVENT_INVALID_CURSOR_POSITION as they're all
@@ -1558,6 +1599,8 @@ public final class MotionEvent extends InputEvent implements Parcelable {
             int axis, int pointerIndex, int historyPos);
     @FastNative
     private static native void nativeTransform(long nativePtr, Matrix matrix);
+    @FastNative
+    private static native void nativeApplyTransform(long nativePtr, Matrix matrix);
 
     // -------------- @CriticalNative ----------------------
 
@@ -1633,6 +1676,9 @@ public final class MotionEvent extends InputEvent implements Parcelable {
 
     @CriticalNative
     private static native void nativeScale(long nativePtr, float scale);
+
+    @CriticalNative
+    private static native int nativeGetSurfaceRotation(long nativePtr);
 
     private MotionEvent() {
     }
@@ -1831,7 +1877,7 @@ public final class MotionEvent extends InputEvent implements Parcelable {
             float x, float y, float pressure, float size, int metaState,
             float xPrecision, float yPrecision, int deviceId, int edgeFlags) {
         return obtain(downTime, eventTime, action, x, y, pressure, size, metaState,
-                xPrecision, yPrecision, deviceId, edgeFlags, InputDevice.SOURCE_UNKNOWN,
+                xPrecision, yPrecision, deviceId, edgeFlags, InputDevice.SOURCE_CLASS_POINTER,
                 DEFAULT_DISPLAY);
     }
 
@@ -2234,8 +2280,11 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * {@link #getX(int)} for the first pointer index (may be an
-     * arbitrary pointer identifier).
+     * Equivalent to {@link #getX(int)} for pointer index 0 (regardless of the
+     * pointer identifier).
+     *
+     * @return The X coordinate of the first pointer index in the coordinate
+     *      space of the view that received this motion event.
      *
      * @see #AXIS_X
      */
@@ -2244,8 +2293,11 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * {@link #getY(int)} for the first pointer index (may be an
-     * arbitrary pointer identifier).
+     * Equivalent to {@link #getY(int)} for pointer index 0 (regardless of the
+     * pointer identifier).
+     *
+     * @return The Y coordinate of the first pointer index in the coordinate
+     *      space of the view that received this motion event.
      *
      * @see #AXIS_Y
      */
@@ -2387,13 +2439,20 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * Returns the X coordinate of this event for the given pointer
-     * <em>index</em> (use {@link #getPointerId(int)} to find the pointer
-     * identifier for this index).
-     * Whole numbers are pixels; the
-     * value may have a fraction for input devices that are sub-pixel precise.
-     * @param pointerIndex Raw index of pointer to retrieve.  Value may be from 0
-     * (the first pointer that is down) to {@link #getPointerCount()}-1.
+     * Returns the X coordinate of the pointer referenced by
+     * {@code pointerIndex} for this motion event. The coordinate is in the
+     * coordinate space of the view that received this motion event.
+     *
+     * <p>Use {@link #getPointerId(int)} to get the pointer identifier for the
+     * pointer referenced by {@code pointerIndex}.
+     *
+     * @param pointerIndex Index of the pointer for which the X coordinate is
+     *      returned. May be a value in the range of 0 (the first pointer that
+     *      is down) to {@link #getPointerCount()} - 1.
+     * @return The X coordinate of the pointer referenced by
+     *      {@code pointerIndex} for this motion event. The unit is pixels. The
+     *      value may contain a fractional portion for devices that are subpixel
+     *      precise.
      *
      * @see #AXIS_X
      */
@@ -2402,13 +2461,20 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * Returns the Y coordinate of this event for the given pointer
-     * <em>index</em> (use {@link #getPointerId(int)} to find the pointer
-     * identifier for this index).
-     * Whole numbers are pixels; the
-     * value may have a fraction for input devices that are sub-pixel precise.
-     * @param pointerIndex Raw index of pointer to retrieve.  Value may be from 0
-     * (the first pointer that is down) to {@link #getPointerCount()}-1.
+     * Returns the Y coordinate of the pointer referenced by
+     * {@code pointerIndex} for this motion event. The coordinate is in the
+     * coordinate space of the view that received this motion event.
+     *
+     * <p>Use {@link #getPointerId(int)} to get the pointer identifier for the
+     * pointer referenced by {@code pointerIndex}.
+     *
+     * @param pointerIndex Index of the pointer for which the Y coordinate is
+     *      returned. May be a value in the range of 0 (the first pointer that
+     *      is down) to {@link #getPointerCount()} - 1.
+     * @return The Y coordinate of the pointer referenced by
+     *      {@code pointerIndex} for this motion event. The unit is pixels. The
+     *      value may contain a fractional portion for devices that are subpixel
+     *      precise.
      *
      * @see #AXIS_Y
      */
@@ -2654,12 +2720,13 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * Returns the original raw X coordinate of this event.  For touch
-     * events on the screen, this is the original location of the event
-     * on the screen, before it had been adjusted for the containing window
-     * and views.
+     * Equivalent to {@link #getRawX(int)} for pointer index 0 (regardless of
+     * the pointer identifier).
      *
-     * @see #getX(int)
+     * @return The X coordinate of the first pointer index in the coordinate
+     *      space of the device display.
+     *
+     * @see #getX()
      * @see #AXIS_X
      */
     public final float getRawX() {
@@ -2667,12 +2734,13 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * Returns the original raw Y coordinate of this event.  For touch
-     * events on the screen, this is the original location of the event
-     * on the screen, before it had been adjusted for the containing window
-     * and views.
+     * Equivalent to {@link #getRawY(int)} for pointer index 0 (regardless of
+     * the pointer identifier).
      *
-     * @see #getY(int)
+     * @return The Y coordinate of the first pointer index in the coordinate
+     *      space of the device display.
+     *
+     * @see #getY()
      * @see #AXIS_Y
      */
     public final float getRawY() {
@@ -2680,13 +2748,38 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * Returns the original raw X coordinate of this event.  For touch
-     * events on the screen, this is the original location of the event
-     * on the screen, before it had been adjusted for the containing window
-     * and views.
+     * Returns the X coordinate of the pointer referenced by
+     * {@code pointerIndex} for this motion event. The coordinate is in the
+     * coordinate space of the device display, irrespective of system
+     * decorations and whether or not the system is in multi-window mode. If the
+     * app spans multiple screens in a multiple-screen environment, the
+     * coordinate space includes all of the spanned screens.
      *
-     * @param pointerIndex Raw index of pointer to retrieve.  Value may be from 0
-     * (the first pointer that is down) to {@link #getPointerCount()}-1.
+     * <p>In multi-window mode, the coordinate space extends beyond the bounds
+     * of the app window to encompass the entire display area. For example, if
+     * the motion event occurs in the right-hand window of split-screen mode in
+     * landscape orientation, the left edge of the screen&mdash;not the left
+     * edge of the window&mdash;is the origin from which the X coordinate is
+     * calculated.
+     *
+     * <p>In multiple-screen scenarios, the coordinate space can span screens.
+     * For example, if the app is spanning both screens of a dual-screen device,
+     * and the motion event occurs on the right-hand screen, the X coordinate is
+     * calculated from the left edge of the left-hand screen to the point of the
+     * motion event on the right-hand screen. When the app is restricted to a
+     * single screen in a multiple-screen environment, the coordinate space
+     * includes only the screen on which the app is running.
+     *
+     * <p>Use {@link #getPointerId(int)} to get the pointer identifier for the
+     * pointer referenced by {@code pointerIndex}.
+     *
+     * @param pointerIndex Index of the pointer for which the X coordinate is
+     *      returned. May be a value in the range of 0 (the first pointer that
+     *      is down) to {@link #getPointerCount()} - 1.
+     * @return The X coordinate of the pointer referenced by
+     *      {@code pointerIndex} for this motion event. The unit is pixels. The
+     *      value may contain a fractional portion for devices that are subpixel
+     *      precise.
      *
      * @see #getX(int)
      * @see #AXIS_X
@@ -2696,13 +2789,38 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
-     * Returns the original raw Y coordinate of this event.  For touch
-     * events on the screen, this is the original location of the event
-     * on the screen, before it had been adjusted for the containing window
-     * and views.
+     * Returns the Y coordinate of the pointer referenced by
+     * {@code pointerIndex} for this motion event. The coordinate is in the
+     * coordinate space of the device display, irrespective of system
+     * decorations and whether or not the system is in multi-window mode. If the
+     * app spans multiple screens in a multiple-screen environment, the
+     * coordinate space includes all of the spanned screens.
      *
-     * @param pointerIndex Raw index of pointer to retrieve.  Value may be from 0
-     * (the first pointer that is down) to {@link #getPointerCount()}-1.
+     * <p>In multi-window mode, the coordinate space extends beyond the bounds
+     * of the app window to encompass the entire device screen. For example, if
+     * the motion event occurs in the lower window of split-screen mode in
+     * portrait orientation, the top edge of the screen&mdash;not the top edge
+     * of the window&mdash;is the origin from which the Y coordinate is
+     * determined.
+     *
+     * <p>In multiple-screen scenarios, the coordinate space can span screens.
+     * For example, if the app is spanning both screens of a dual-screen device
+     * that's rotated 90 degrees, and the motion event occurs on the lower
+     * screen, the Y coordinate is calculated from the top edge of the upper
+     * screen to the point of the motion event on the lower screen. When the app
+     * is restricted to a single screen in a multiple-screen environment, the
+     * coordinate space includes only the screen on which the app is running.
+     *
+     * <p>Use {@link #getPointerId(int)} to get the pointer identifier for the
+     * pointer referenced by {@code pointerIndex}.
+     *
+     * @param pointerIndex Index of the pointer for which the Y coordinate is
+     *      returned. May be a value in the range of 0 (the first pointer that
+     *      is down) to {@link #getPointerCount()} - 1.
+     * @return The Y coordinate of the pointer referenced by
+     *      {@code pointerIndex} for this motion event. The unit is pixels. The
+     *      value may contain a fractional portion for devices that are subpixel
+     *      precise.
      *
      * @see #getY(int)
      * @see #AXIS_Y
@@ -3251,6 +3369,21 @@ public final class MotionEvent extends InputEvent implements Parcelable {
     }
 
     /**
+     * Transforms all of the points in the event directly instead of modifying the event's
+     * internal transform.
+     *
+     * @param matrix The transformation matrix to apply.
+     * @hide
+     */
+    public void applyTransform(Matrix matrix) {
+        if (matrix == null) {
+            throw new IllegalArgumentException("matrix must not be null");
+        }
+
+        nativeApplyTransform(mNativePtr, matrix);
+    }
+
+    /**
      * Add a new movement to the batch of movements in this event.  The event's
      * current location, position and size is updated to the new values.
      * The current values in the event are added to a list of historical values.
@@ -3476,7 +3609,8 @@ public final class MotionEvent extends InputEvent implements Parcelable {
                 } else if (newPointerCount == 1) {
                     // The first/last pointer went down/up.
                     newAction = oldActionMasked == ACTION_POINTER_DOWN
-                            ? ACTION_DOWN : ACTION_UP;
+                            ? ACTION_DOWN
+                            : (getFlags() & FLAG_CANCELED) == 0 ? ACTION_UP : ACTION_CANCEL;
                 } else {
                     // A secondary pointer went down/up.
                     newAction = oldActionMasked
@@ -3579,6 +3713,7 @@ public final class MotionEvent extends InputEvent implements Parcelable {
             msg.append(", deviceId=").append(getDeviceId());
             msg.append(", source=0x").append(Integer.toHexString(getSource()));
             msg.append(", displayId=").append(getDisplayId());
+            msg.append(", eventId=").append(getId());
         }
         msg.append(" }");
         return msg.toString();
@@ -3758,6 +3893,63 @@ public final class MotionEvent extends InputEvent implements Parcelable {
         return (getButtonState() & button) == button;
     }
 
+    /**
+     * Gets the rotation value of the transform for this MotionEvent.
+     *
+     * This MotionEvent's rotation can be changed by passing a rotation matrix to
+     * {@link #transform(Matrix)} to change the coordinate space of this event.
+     *
+     * @return the rotation value, or -1 if unknown or invalid.
+     * @see Surface.Rotation
+     * @see #createRotateMatrix(int, int, int)
+     *
+     * @hide
+     */
+    public @Surface.Rotation int getSurfaceRotation() {
+        return nativeGetSurfaceRotation(mNativePtr);
+    }
+
+    /**
+     * Gets a rotation matrix that (when applied to a MotionEvent) will rotate that motion event
+     * such that the result coordinates end up in the same physical location on a frame whose
+     * coordinates are rotated by `rotation`.
+     *
+     * For example, rotating (0,0) by 90 degrees will move a point from the physical top-left to
+     * the bottom-left of the 90-degree-rotated frame.
+     *
+     * @param rotation the surface rotation of the output matrix
+     * @param rotatedFrameWidth the width of the rotated frame
+     * @param rotatedFrameHeight the height of the rotated frame
+     *
+     * @see #transform(Matrix)
+     * @see #getSurfaceRotation()
+     * @hide
+     */
+    public static Matrix createRotateMatrix(
+            @Surface.Rotation int rotation, int rotatedFrameWidth, int rotatedFrameHeight) {
+        if (rotation == Surface.ROTATION_0) {
+            return new Matrix(Matrix.IDENTITY_MATRIX);
+        }
+        // values is row-major
+        float[] values = null;
+        if (rotation == Surface.ROTATION_90) {
+            values = new float[]{0, 1, 0,
+                    -1, 0, rotatedFrameHeight,
+                    0, 0, 1};
+        } else if (rotation == Surface.ROTATION_180) {
+            values = new float[]{-1, 0, rotatedFrameWidth,
+                    0, -1, rotatedFrameHeight,
+                    0, 0, 1};
+        } else if (rotation == Surface.ROTATION_270) {
+            values = new float[]{0, -1, rotatedFrameWidth,
+                    1, 0, 0,
+                    0, 0, 1};
+        }
+        Matrix toOrient = new Matrix();
+        toOrient.setValues(values);
+        return toOrient;
+    }
+
     public static final @android.annotation.NonNull Parcelable.Creator<MotionEvent> CREATOR
             = new Parcelable.Creator<MotionEvent>() {
         public MotionEvent createFromParcel(Parcel in) {
@@ -3927,6 +4119,22 @@ public final class MotionEvent extends InputEvent implements Parcelable {
         public float orientation;
 
         /**
+         * The movement of x position of a motion event.
+         *
+         * @see MotionEvent#AXIS_RELATIVE_X
+         * @hide
+         */
+        public float relativeX;
+
+        /**
+         * The movement of y position of a motion event.
+         *
+         * @see MotionEvent#AXIS_RELATIVE_Y
+         * @hide
+         */
+        public float relativeY;
+
+        /**
          * Clears the contents of this object.
          * Resets all axes to zero.
          */
@@ -3942,6 +4150,8 @@ public final class MotionEvent extends InputEvent implements Parcelable {
             toolMajor = 0;
             toolMinor = 0;
             orientation = 0;
+            relativeX = 0;
+            relativeY = 0;
         }
 
         /**
@@ -3972,6 +4182,8 @@ public final class MotionEvent extends InputEvent implements Parcelable {
             toolMajor = other.toolMajor;
             toolMinor = other.toolMinor;
             orientation = other.orientation;
+            relativeX = other.relativeX;
+            relativeY = other.relativeY;
         }
 
         /**
@@ -4003,6 +4215,10 @@ public final class MotionEvent extends InputEvent implements Parcelable {
                     return toolMinor;
                 case AXIS_ORIENTATION:
                     return orientation;
+                case AXIS_RELATIVE_X:
+                    return relativeX;
+                case AXIS_RELATIVE_Y:
+                    return relativeY;
                 default: {
                     if (axis < 0 || axis > 63) {
                         throw new IllegalArgumentException("Axis out of range.");
@@ -4055,6 +4271,12 @@ public final class MotionEvent extends InputEvent implements Parcelable {
                     break;
                 case AXIS_ORIENTATION:
                     orientation = value;
+                    break;
+                case AXIS_RELATIVE_X:
+                    relativeX = value;
+                    break;
+                case AXIS_RELATIVE_Y:
+                    relativeY = value;
                     break;
                 default: {
                     if (axis < 0 || axis > 63) {
@@ -4160,7 +4382,7 @@ public final class MotionEvent extends InputEvent implements Parcelable {
         }
 
         @Override
-        public boolean equals(Object other) {
+        public boolean equals(@Nullable Object other) {
             if (other instanceof PointerProperties) {
                 return equals((PointerProperties)other);
             }

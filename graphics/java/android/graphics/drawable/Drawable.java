@@ -21,7 +21,6 @@ import android.annotation.ColorInt;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.annotation.TestApi;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.pm.ActivityInfo.Config;
 import android.content.res.ColorStateList;
@@ -46,6 +45,7 @@ import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.graphics.Xfermode;
+import android.os.Build;
 import android.os.Trace;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
@@ -288,8 +288,7 @@ public abstract class Drawable {
      *
      * @return A copy of the drawable's bounds
      */
-    @NonNull
-    public final Rect copyBounds() {
+    public final @NonNull Rect copyBounds() {
         return new Rect(mBounds);
     }
 
@@ -308,8 +307,7 @@ public abstract class Drawable {
      * @see #copyBounds()
      * @see #copyBounds(android.graphics.Rect)
      */
-    @NonNull
-    public final Rect getBounds() {
+    public final @NonNull Rect getBounds() {
         if (mBounds == ZERO_BOUNDS_RECT) {
             mBounds = new Rect();
         }
@@ -327,8 +325,7 @@ public abstract class Drawable {
      *
      * @return The dirty bounds of this drawable
      */
-    @NonNull
-    public Rect getDirtyBounds() {
+    public @NonNull Rect getDirtyBounds() {
         return getBounds();
     }
 
@@ -457,8 +454,7 @@ public abstract class Drawable {
      *
      * @see #setCallback(android.graphics.drawable.Drawable.Callback)
      */
-    @Nullable
-    public Callback getCallback() {
+    public @Nullable Callback getCallback() {
         return mCallback != null ? mCallback.get() : null;
     }
 
@@ -569,8 +565,7 @@ public abstract class Drawable {
      * The default return value is 255 if the class does not override this method to return a value
      * specific to its use of alpha.
      */
-    @IntRange(from=0,to=255)
-    public int getAlpha() {
+    public @IntRange(from=0,to=255) int getAlpha() {
         return 0xFF;
     }
 
@@ -808,10 +803,7 @@ public abstract class Drawable {
      *
      * @return {@code true} if {@link android.R.attr#state_focused} is specified
      * for this drawable.
-     *
-     * @hide
      */
-    @TestApi
     public boolean hasFocusStateSpecified() {
         return false;
     }
@@ -1002,7 +994,8 @@ public abstract class Drawable {
      *
      * @see android.graphics.PixelFormat
      */
-    @Deprecated public abstract @PixelFormat.Opacity int getOpacity();
+    @Deprecated
+    public abstract @PixelFormat.Opacity int getOpacity();
 
     /**
      * Return the appropriate opacity value for two source opacities.  If
@@ -1062,7 +1055,7 @@ public abstract class Drawable {
      * if it looks the same and there is no need to redraw it since its
      * last state.
      */
-    protected boolean onStateChange(int[] state) {
+    protected boolean onStateChange(@NonNull int[] state) {
         return false;
     }
 
@@ -1081,7 +1074,7 @@ public abstract class Drawable {
      * Override this in your subclass to change appearance if you vary based on
      * the bounds.
      */
-    protected void onBoundsChange(Rect bounds) {
+    protected void onBoundsChange(@NonNull Rect bounds) {
         // Stub method.
     }
 
@@ -1212,7 +1205,8 @@ public abstract class Drawable {
     /**
      * Create a drawable from an inputstream
      */
-    public static Drawable createFromStream(InputStream is, String srcName) {
+    public static @Nullable Drawable createFromStream(@Nullable InputStream is,
+            @Nullable String srcName) {
         Trace.traceBegin(Trace.TRACE_TAG_RESOURCES, srcName != null ? srcName : "Unknown drawable");
         try {
             return createFromResourceStream(null, null, is, srcName);
@@ -1225,8 +1219,8 @@ public abstract class Drawable {
      * Create a drawable from an inputstream, using the given resources and
      * value to determine density information.
      */
-    public static Drawable createFromResourceStream(Resources res, TypedValue value,
-            InputStream is, String srcName) {
+    public static @Nullable Drawable createFromResourceStream(@Nullable Resources res,
+            @Nullable TypedValue value, @Nullable InputStream is, @Nullable String srcName) {
         Trace.traceBegin(Trace.TRACE_TAG_RESOURCES, srcName != null ? srcName : "Unknown drawable");
         try {
             return createFromResourceStream(res, value, is, srcName, null);
@@ -1241,8 +1235,7 @@ public abstract class Drawable {
      *
      * @deprecated Prefer the version without an Options object.
      */
-    @Nullable
-    public static Drawable createFromResourceStream(@Nullable Resources res,
+    public static @Nullable Drawable createFromResourceStream(@Nullable Resources res,
             @Nullable TypedValue value, @Nullable InputStream is, @Nullable String srcName,
             @Nullable BitmapFactory.Options opts) {
         if (is == null) {
@@ -1284,7 +1277,8 @@ public abstract class Drawable {
         return null;
     }
 
-    private static Drawable getBitmapDrawable(Resources res, TypedValue value, InputStream is) {
+    private static Drawable getBitmapDrawable(Resources res, @Nullable TypedValue value,
+            @NonNull InputStream is) {
         try {
             ImageDecoder.Source source = null;
             if (value != null) {
@@ -1372,9 +1366,9 @@ public abstract class Drawable {
      * a tag in an XML document, tries to create a Drawable from that tag.
      * Returns null if the tag is not a valid drawable.
      */
-    @NonNull
-    public static Drawable createFromXmlInner(@NonNull Resources r, @NonNull XmlPullParser parser,
-            @NonNull AttributeSet attrs) throws XmlPullParserException, IOException {
+    public static @NonNull Drawable createFromXmlInner(@NonNull Resources r,
+            @NonNull XmlPullParser parser, @NonNull AttributeSet attrs)
+            throws XmlPullParserException, IOException {
         return createFromXmlInner(r, parser, attrs, null);
     }
 
@@ -1384,9 +1378,8 @@ public abstract class Drawable {
      * document, tries to create a Drawable from that tag. Returns {@code null}
      * if the tag is not a valid drawable.
      */
-    @NonNull
-    public static Drawable createFromXmlInner(@NonNull Resources r, @NonNull XmlPullParser parser,
-            @NonNull AttributeSet attrs, @Nullable Theme theme)
+    public static @NonNull Drawable createFromXmlInner(@NonNull Resources r,
+            @NonNull XmlPullParser parser, @NonNull AttributeSet attrs, @Nullable Theme theme)
             throws XmlPullParserException, IOException {
         return createFromXmlInnerForDensity(r, parser, attrs, 0, theme);
     }
@@ -1395,8 +1388,7 @@ public abstract class Drawable {
      * Version of {@link #createFromXmlInner(Resources, XmlPullParser, AttributeSet, Theme)} that
      * accepts an override density.
      */
-    @NonNull
-    static Drawable createFromXmlInnerForDensity(@NonNull Resources r,
+    static @NonNull Drawable createFromXmlInnerForDensity(@NonNull Resources r,
             @NonNull XmlPullParser parser, @NonNull AttributeSet attrs, int density,
             @Nullable Theme theme) throws XmlPullParserException, IOException {
         return r.getDrawableInflater().inflateFromXmlForDensity(parser.getName(), parser, attrs,
@@ -1406,8 +1398,7 @@ public abstract class Drawable {
     /**
      * Create a drawable from file path name.
      */
-    @Nullable
-    public static Drawable createFromPath(String pathName) {
+    public static @Nullable Drawable createFromPath(String pathName) {
         if (pathName == null) {
             return null;
         }
@@ -1719,7 +1710,7 @@ public abstract class Drawable {
      *
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static BlendMode parseBlendMode(int value, BlendMode defaultMode) {
         switch (value) {
             case 3: return BlendMode.SRC_OVER;

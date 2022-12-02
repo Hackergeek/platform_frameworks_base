@@ -230,6 +230,13 @@ public class TileUtils {
     public static final String META_DATA_KEY_PROFILE = "com.android.settings.profile";
 
     /**
+     * Name of the meta-data item that should be set in the AndroidManifest.xml
+     * to specify whether the {@link android.app.Activity} should be launched in a separate task.
+     * This should be a boolean value {@code true} or {@code false}, set using {@code android:value}
+     */
+    public static final String META_DATA_NEW_TASK = "com.android.settings.new_task";
+
+    /**
      * Build a list of DashboardCategory.
      */
     public static List<DashboardCategory> getCategories(Context context,
@@ -339,6 +346,16 @@ public class TileUtils {
     private static void loadTile(UserHandle user, Map<Pair<String, String>, Tile> addedCache,
             String defaultCategory, List<Tile> outTiles, Intent intent, Bundle metaData,
             ComponentInfo componentInfo) {
+        // Skip loading tile if the component is tagged primary_profile_only but not running on
+        // the current user.
+        if (user.getIdentifier() != ActivityManager.getCurrentUser()
+                && Tile.isPrimaryProfileOnly(componentInfo.metaData)) {
+            Log.w(LOG_TAG, "Found " + componentInfo.name + " for intent "
+                    + intent + " is primary profile only, skip loading tile for uid "
+                    + user.getIdentifier());
+            return;
+        }
+
         String categoryKey = defaultCategory;
         // Load category
         if ((metaData == null || !metaData.containsKey(EXTRA_CATEGORY_KEY))
@@ -545,7 +562,7 @@ public class TileUtils {
             bundle.putString(META_DATA_PREFERENCE_KEYHINT, key);
         }
         try {
-            return provider.call(context.getPackageName(), context.getAttributionTag(),
+            return provider.call(context.getAttributionSource(),
                     uri.getAuthority(), method, uri.toString(), bundle);
         } catch (RemoteException e) {
             return null;

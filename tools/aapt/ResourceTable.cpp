@@ -2475,11 +2475,10 @@ void ResourceTable::reportError(void* accessorCookie, const char* fmt, ...)
 {
     if (accessorCookie != NULL && fmt != NULL) {
         AccessorCookie* ac = (AccessorCookie*)accessorCookie;
-        int retval=0;
         char buf[1024];
         va_list ap;
         va_start(ap, fmt);
-        retval = vsnprintf(buf, sizeof(buf), fmt, ap);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
         va_end(ap);
         ac->sourcePos.error("Error: %s (at '%s' with value '%s').\n",
                             buf, ac->attr.string(), ac->value.string());
@@ -2971,14 +2970,6 @@ status_t ResourceTable::flatten(Bundle* bundle, const sp<const ResourceFilter>& 
                     }
                     e->setNameIndex(keyStrings.add(e->getName(), true));
 
-                    // If this entry has no values for other configs,
-                    // and is the default config, then it is special.  Otherwise
-                    // we want to add it with the config info.
-                    ConfigDescription* valueConfig = NULL;
-                    if (N != 1 || config == nullConfig) {
-                        valueConfig = &config;
-                    }
-
                     status_t err = e->prepareFlatten(&valueStrings, this,
                             &configTypeName, &config);
                     if (err != NO_ERROR) {
@@ -3066,7 +3057,7 @@ status_t ResourceTable::flatten(Bundle* bundle, const sp<const ResourceFilter>& 
         for (size_t ti=0; ti<N; ti++) {
             // Retrieve them in the same order as the type string block.
             size_t len;
-            String16 typeName(p->getTypeStrings().stringAt(ti, &len));
+            String16 typeName(UnpackOptionalString(p->getTypeStrings().stringAt(ti), &len));
             sp<Type> t = p->getTypes().valueFor(typeName);
             LOG_ALWAYS_FATAL_IF(t == NULL && typeName != String16("<empty>"),
                                 "Type name %s not found",
@@ -4169,7 +4160,7 @@ status_t ResourceTable::Package::setStrings(const sp<AaptFile>& data,
         const size_t N = strings->size();
         for (size_t i=0; i<N; i++) {
             size_t len;
-            mappings->add(String16(strings->stringAt(i, &len)), i);
+            mappings->add(String16(UnpackOptionalString(strings->stringAt(i), &len)), i);
         }
     }
     return err;

@@ -91,7 +91,7 @@ TEST_F(XmlReferenceLinkerTest, LinkBasicAttributes) {
             nonAaptAttrRef="@id/id"
             class="hello" />)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   xml::Element* view_el = doc->root.get();
@@ -100,18 +100,18 @@ TEST_F(XmlReferenceLinkerTest, LinkBasicAttributes) {
   xml::Attribute* xml_attr = view_el->FindAttribute(xml::kSchemaAndroid, "layout_width");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x01010000)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x01010000), xml_attr->compiled_attribute.value().id);
   EXPECT_THAT(ValueCast<BinaryPrimitive>(xml_attr->compiled_value.get()), NotNull());
 
   xml_attr = view_el->FindAttribute(xml::kSchemaAndroid, "background");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x01010001)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x01010001), xml_attr->compiled_attribute.value().id);
   Reference* ref = ValueCast<Reference>(xml_attr->compiled_value.get());
   ASSERT_THAT(ref, NotNull());
-  EXPECT_EQ(make_value(test::ParseNameOrDie("color/green")), ref->name);  // Make sure the name
-                                                                          // didn't change.
-  EXPECT_EQ(make_value(ResourceId(0x7f020000)), ref->id);
+  EXPECT_EQ(test::ParseNameOrDie("color/green"), ref->name);  // Make sure the name
+                                                              // didn't change.
+  EXPECT_EQ(ResourceId(0x7f020000), ref->id);
 
   xml_attr = view_el->FindAttribute(xml::kSchemaAndroid, "text");
   ASSERT_THAT(xml_attr, NotNull());
@@ -144,7 +144,7 @@ TEST_F(XmlReferenceLinkerTest, PrivateSymbolsAreNotLinked) {
       <View xmlns:android="http://schemas.android.com/apk/res/android"
           android:colorAccent="@android:color/hidden" />)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_FALSE(linker.Consume(context_.get(), doc.get()));
 }
 
@@ -153,7 +153,7 @@ TEST_F(XmlReferenceLinkerTest, PrivateSymbolsAreLinkedWhenReferenceHasStarPrefix
     <View xmlns:android="http://schemas.android.com/apk/res/android"
           android:colorAccent="@*android:color/hidden" />)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 }
 
@@ -162,7 +162,7 @@ TEST_F(XmlReferenceLinkerTest, LinkMangledAttributes) {
       <View xmlns:support="http://schemas.android.com/apk/res/com.android.support"
           support:colorAccent="#ff0000" />)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   xml::Element* view_el = doc->root.get();
@@ -172,7 +172,7 @@ TEST_F(XmlReferenceLinkerTest, LinkMangledAttributes) {
       view_el->FindAttribute(xml::BuildPackageNamespace("com.android.support"), "colorAccent");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x7f010001)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x7f010001), xml_attr->compiled_attribute.value().id);
   EXPECT_THAT(ValueCast<BinaryPrimitive>(xml_attr->compiled_value.get()), NotNull());
 }
 
@@ -181,7 +181,7 @@ TEST_F(XmlReferenceLinkerTest, LinkAutoResReference) {
       <View xmlns:app="http://schemas.android.com/apk/res-auto"
           app:colorAccent="@app:color/red" />)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   xml::Element* view_el = doc->root.get();
@@ -190,11 +190,11 @@ TEST_F(XmlReferenceLinkerTest, LinkAutoResReference) {
   xml::Attribute* xml_attr = view_el->FindAttribute(xml::kSchemaAuto, "colorAccent");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x7f010000)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x7f010000), xml_attr->compiled_attribute.value().id);
   Reference* ref = ValueCast<Reference>(xml_attr->compiled_value.get());
   ASSERT_THAT(ref, NotNull());
   ASSERT_TRUE(ref->name);
-  EXPECT_EQ(make_value(ResourceId(0x7f020001)), ref->id);
+  EXPECT_EQ(ResourceId(0x7f020001), ref->id);
 }
 
 TEST_F(XmlReferenceLinkerTest, LinkViewWithShadowedPackageAlias) {
@@ -203,7 +203,7 @@ TEST_F(XmlReferenceLinkerTest, LinkViewWithShadowedPackageAlias) {
         <View xmlns:app="http://schemas.android.com/apk/res/com.app.test" app:attr="@app:id/id"/>
       </View>)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   xml::Element* view_el = doc->root.get();
@@ -214,10 +214,10 @@ TEST_F(XmlReferenceLinkerTest, LinkViewWithShadowedPackageAlias) {
   xml::Attribute* xml_attr = view_el->FindAttribute(xml::kSchemaAndroid, "attr");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x01010002)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x01010002), xml_attr->compiled_attribute.value().id);
   Reference* ref = ValueCast<Reference>(xml_attr->compiled_value.get());
   ASSERT_THAT(ref, NotNull());
-  EXPECT_EQ(make_value(ResourceId(0x01030000)), ref->id);
+  EXPECT_EQ(ResourceId(0x01030000), ref->id);
 
   ASSERT_FALSE(view_el->GetChildElements().empty());
   view_el = view_el->GetChildElements().front();
@@ -228,10 +228,10 @@ TEST_F(XmlReferenceLinkerTest, LinkViewWithShadowedPackageAlias) {
   xml_attr = view_el->FindAttribute(xml::BuildPackageNamespace("com.app.test"), "attr");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x7f010002)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x7f010002), xml_attr->compiled_attribute.value().id);
   ref = ValueCast<Reference>(xml_attr->compiled_value.get());
   ASSERT_THAT(ref, NotNull());
-  EXPECT_EQ(make_value(ResourceId(0x7f030000)), ref->id);
+  EXPECT_EQ(ResourceId(0x7f030000), ref->id);
 }
 
 TEST_F(XmlReferenceLinkerTest, LinkViewWithLocalPackageAndAliasOfTheSameName) {
@@ -239,7 +239,7 @@ TEST_F(XmlReferenceLinkerTest, LinkViewWithLocalPackageAndAliasOfTheSameName) {
       <View xmlns:android="http://schemas.android.com/apk/res/com.app.test"
           android:attr="@id/id"/>)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   xml::Element* view_el = doc->root.get();
@@ -250,10 +250,10 @@ TEST_F(XmlReferenceLinkerTest, LinkViewWithLocalPackageAndAliasOfTheSameName) {
   xml::Attribute* xml_attr = view_el->FindAttribute(xml::BuildPackageNamespace("com.app.test"), "attr");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x7f010002)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x7f010002), xml_attr->compiled_attribute.value().id);
   Reference* ref = ValueCast<Reference>(xml_attr->compiled_value.get());
   ASSERT_THAT(ref, NotNull());
-  EXPECT_EQ(make_value(ResourceId(0x7f030000)), ref->id);
+  EXPECT_EQ(ResourceId(0x7f030000), ref->id);
 }
 
 
@@ -261,7 +261,7 @@ TEST_F(XmlReferenceLinkerTest, AddAngleOnGradientForAndroidQ) {
   std::unique_ptr<xml::XmlResource> doc = test::BuildXmlDomForPackageName(context_.get(), R"(
     <gradient />)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   xml::Element* gradient_el = doc->root.get();
@@ -270,7 +270,7 @@ TEST_F(XmlReferenceLinkerTest, AddAngleOnGradientForAndroidQ) {
   xml::Attribute* xml_attr = gradient_el->FindAttribute(xml::kSchemaAndroid, "angle");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x01010004)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x01010004), xml_attr->compiled_attribute.value().id);
 
   BinaryPrimitive* value = ValueCast<BinaryPrimitive>(xml_attr->compiled_value.get());
   ASSERT_THAT(value, NotNull());
@@ -283,7 +283,7 @@ TEST_F(XmlReferenceLinkerTest, DoNotOverwriteAngleOnGradientForAndroidQ) {
   <gradient xmlns:android="http://schemas.android.com/apk/res/android"
       android:angle="90"/>)");
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   xml::Element* gradient_el = doc->root.get();
@@ -292,7 +292,7 @@ TEST_F(XmlReferenceLinkerTest, DoNotOverwriteAngleOnGradientForAndroidQ) {
   xml::Attribute* xml_attr = gradient_el->FindAttribute(xml::kSchemaAndroid, "angle");
   ASSERT_THAT(xml_attr, NotNull());
   ASSERT_TRUE(xml_attr->compiled_attribute);
-  EXPECT_EQ(make_value(ResourceId(0x01010004)), xml_attr->compiled_attribute.value().id);
+  EXPECT_EQ(ResourceId(0x01010004), xml_attr->compiled_attribute.value().id);
 
   BinaryPrimitive* value = ValueCast<BinaryPrimitive>(xml_attr->compiled_value.get());
   ASSERT_THAT(value, NotNull());
@@ -305,7 +305,7 @@ TEST_F(XmlReferenceLinkerTest, DoNotOverwriteAngleOnGradientForPostAndroidQ) {
   <gradient xmlns:android="http://schemas.android.com/apk/res/android" />)");
   context_->SetMinSdkVersion(30);
 
-  XmlReferenceLinker linker;
+  XmlReferenceLinker linker(nullptr);
   ASSERT_TRUE(linker.Consume(context_.get(), doc.get()));
 
   xml::Element* gradient_el = doc->root.get();

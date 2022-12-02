@@ -217,8 +217,10 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
      * frameworks/base/core/res/res/values/config.xml
      */
     public void addIgnoredSlot(String slotName) {
-        addIgnoredSlotInternal(slotName);
-        requestLayout();
+        boolean added = addIgnoredSlotInternal(slotName);
+        if (added) {
+            requestLayout();
+        }
     }
 
     /**
@@ -226,17 +228,27 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
      * @param slots names of the icons to ignore
      */
     public void addIgnoredSlots(List<String> slots) {
+        boolean willAddAny = false;
         for (String slot : slots) {
-            addIgnoredSlotInternal(slot);
+            willAddAny |= addIgnoredSlotInternal(slot);
         }
 
-        requestLayout();
+        if (willAddAny) {
+            requestLayout();
+        }
     }
 
-    private void addIgnoredSlotInternal(String slotName) {
-        if (!mIgnoredSlots.contains(slotName)) {
-            mIgnoredSlots.add(slotName);
+    /**
+     *
+     * @param slotName
+     * @return
+     */
+    private boolean addIgnoredSlotInternal(String slotName) {
+        if (mIgnoredSlots.contains(slotName)) {
+            return false;
         }
+        mIgnoredSlots.add(slotName);
+        return true;
     }
 
     /**
@@ -245,11 +257,26 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
      * @param slotName name of the icon slot to remove from the ignored list
      */
     public void removeIgnoredSlot(String slotName) {
-        if (mIgnoredSlots.contains(slotName)) {
-            mIgnoredSlots.remove(slotName);
+        boolean removed = mIgnoredSlots.remove(slotName);
+        if (removed) {
+            requestLayout();
+        }
+    }
+
+    /**
+     * Remove a list of slots from the list of ignored icon slots.
+     * It will then be shown when set to visible by the {@link StatusBarIconController}.
+     * @param slots name of the icon slots to remove from the ignored list
+     */
+    public void removeIgnoredSlots(List<String> slots) {
+        boolean removedAny = false;
+        for (String slot : slots) {
+            removedAny |= mIgnoredSlots.remove(slot);
         }
 
-        requestLayout();
+        if (removedAny) {
+            requestLayout();
+        }
     }
 
     /**
@@ -262,6 +289,25 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
     }
 
     /**
+     * Returns the view corresponding to a particular slot.
+     *
+     * Use it solely to manipulate how it is presented.
+     * @param slot name of the slot to find. Names are defined in
+     *            {@link com.android.internal.R.config_statusBarIcons}
+     * @return a view for the slot if this container has it, else {@code null}
+     */
+    public View getViewForSlot(String slot) {
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            if (child instanceof StatusIconDisplayable
+                    && ((StatusIconDisplayable) child).getSlot().equals(slot)) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Layout is happening from end -> start
      */
     private void calculateIconTranslations() {
@@ -271,7 +317,7 @@ public class StatusIconContainer extends AlphaOptimizedLinearLayout {
         float contentStart = getPaddingStart();
         int childCount = getChildCount();
         // Underflow === don't show content until that index
-        if (DEBUG) android.util.Log.d(TAG, "calculateIconTranslations: start=" + translationX
+        if (DEBUG) Log.d(TAG, "calculateIconTranslations: start=" + translationX
                 + " width=" + width + " underflow=" + mNeedsUnderflow);
 
         // Collect all of the states which want to be visible

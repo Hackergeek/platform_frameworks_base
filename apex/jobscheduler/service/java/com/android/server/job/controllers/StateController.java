@@ -18,11 +18,14 @@ package com.android.server.job.controllers;
 
 import static com.android.server.job.JobSchedulerService.DEBUG;
 
+import android.annotation.NonNull;
 import android.content.Context;
+import android.provider.DeviceConfig;
+import android.util.IndentingPrintWriter;
 import android.util.Slog;
 import android.util.proto.ProtoOutputStream;
 
-import com.android.internal.util.IndentingPrintWriter;
+import com.android.internal.annotations.GuardedBy;
 import com.android.server.job.JobSchedulerService;
 import com.android.server.job.JobSchedulerService.Constants;
 import com.android.server.job.StateChangedListener;
@@ -73,6 +76,12 @@ public abstract class StateController {
     }
 
     /**
+     * Optionally implement logic here for when a job that was about to be executed failed to start.
+     */
+    public void unprepareFromExecutionLocked(JobStatus jobStatus) {
+    }
+
+    /**
      * Remove task - this will happen if the task is cancelled, completed, etc.
      */
     public abstract void maybeStopTrackingJobLocked(JobStatus jobStatus, JobStatus incomingJob,
@@ -84,6 +93,13 @@ public abstract class StateController {
     public void rescheduleForFailureLocked(JobStatus newJob, JobStatus failureToReschedule) {
     }
 
+    /** Notice that updated configuration constants are about to be read. */
+    public void prepareForUpdatedConstantsLocked() {}
+
+    /** Process the specified constant and update internal constants if relevant. */
+    public void processConstantLocked(@NonNull DeviceConfig.Properties properties,
+            @NonNull String key) {}
+
     /**
      * Called when the JobScheduler.Constants are updated.
      */
@@ -92,6 +108,10 @@ public abstract class StateController {
 
     /** Called when a package is uninstalled from the device (not for an update). */
     public void onAppRemovedLocked(String packageName, int uid) {
+    }
+
+    /** Called when a user is added to the device. */
+    public void onUserAddedLocked(int userId) {
     }
 
     /** Called when a user is removed from the device. */
@@ -110,6 +130,21 @@ public abstract class StateController {
      * internal state tracking dependent on this UID.
      */
     public void reevaluateStateLocked(int uid) {
+    }
+
+    /**
+     * Called when the battery status changes.
+     */
+    @GuardedBy("mLock")
+    public void onBatteryStateChangedLocked() {
+    }
+
+    /**
+     * Called when a UID's base bias has changed. The more positive the bias, the more
+     * important the UID is.
+     */
+    @GuardedBy("mLock")
+    public void onUidBiasChangedLocked(int uid, int prevBias, int newBias) {
     }
 
     protected boolean wouldBeReadyWithConstraintLocked(JobStatus jobStatus, int constraint) {
@@ -132,8 +167,8 @@ public abstract class StateController {
 
     public abstract void dumpControllerStateLocked(IndentingPrintWriter pw,
             Predicate<JobStatus> predicate);
-    public abstract void dumpControllerStateLocked(ProtoOutputStream proto, long fieldId,
-            Predicate<JobStatus> predicate);
+    public void dumpControllerStateLocked(ProtoOutputStream proto, long fieldId,
+            Predicate<JobStatus> predicate) {}
 
     /** Dump any internal constants the Controller may have. */
     public void dumpConstants(IndentingPrintWriter pw) {

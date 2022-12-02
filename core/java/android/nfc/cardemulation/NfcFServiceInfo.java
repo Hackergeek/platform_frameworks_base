@@ -16,6 +16,7 @@
 
 package android.nfc.cardemulation;
 
+import android.annotation.Nullable;
 import android.content.ComponentName;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
@@ -236,6 +237,7 @@ public final class NfcFServiceInfo implements Parcelable {
     public String toString() {
         StringBuilder out = new StringBuilder("NfcFService: ");
         out.append(getComponent());
+        out.append(", UID: " + mUid);
         out.append(", description: " + mDescription);
         out.append(", System Code: " + mSystemCode);
         if (mDynamicSystemCode != null) {
@@ -250,12 +252,13 @@ public final class NfcFServiceInfo implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (this == o) return true;
         if (!(o instanceof NfcFServiceInfo)) return false;
         NfcFServiceInfo thatService = (NfcFServiceInfo) o;
 
         if (!thatService.getComponent().equals(this.getComponent())) return false;
+        if (thatService.getUid() != this.getUid()) return false;
         if (!thatService.mSystemCode.equalsIgnoreCase(this.mSystemCode)) return false;
         if (!thatService.mNfcid2.equalsIgnoreCase(this.mNfcid2)) return false;
         if (!thatService.mT3tPmm.equalsIgnoreCase(this.mT3tPmm)) return false;
@@ -320,8 +323,9 @@ public final class NfcFServiceInfo implements Parcelable {
     };
 
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
-        pw.println("    " + getComponent() +
-                " (Description: " + getDescription() + ")");
+        pw.println("    " + getComponent()
+                + " (Description: " + getDescription() + ")"
+                + " (UID: " + getUid() + ")");
         pw.println("    System Code: " + getSystemCode());
         pw.println("    NFCID2: " + getNfcid2());
         pw.println("    T3tPmm: " + getT3tPmm());

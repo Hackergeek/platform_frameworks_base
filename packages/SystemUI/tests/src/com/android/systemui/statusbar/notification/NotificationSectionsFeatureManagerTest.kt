@@ -18,14 +18,16 @@ package com.android.systemui.statusbar.notification
 
 import android.provider.DeviceConfig
 import android.provider.Settings
-import android.provider.Settings.Secure.NOTIFICATION_NEW_INTERRUPTION_MODEL
 import android.testing.AndroidTestingRunner
 
 import androidx.test.filters.SmallTest
+import com.android.dx.mockito.inline.extended.ExtendedMockito
 
 import com.android.internal.config.sysui.SystemUiDeviceConfigFlags.NOTIFICATIONS_USE_PEOPLE_FILTERING
 import com.android.systemui.SysuiTestCase
 import com.android.systemui.util.DeviceConfigProxyFake
+import com.android.systemui.util.Utils
+import com.android.systemui.util.mockito.any
 
 import org.junit.After
 import org.junit.Assert.assertFalse
@@ -33,29 +35,33 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.Mockito.`when`
+import org.mockito.MockitoSession
+import org.mockito.quality.Strictness
 
 @RunWith(AndroidTestingRunner::class)
 @SmallTest
 class NotificationSectionsFeatureManagerTest : SysuiTestCase() {
     var manager: NotificationSectionsFeatureManager? = null
     val proxyFake = DeviceConfigProxyFake()
-    var originalQsMediaPlayer: Int = 0
+    private lateinit var staticMockSession: MockitoSession
 
     @Before
     public fun setup() {
-        Settings.Secure.putInt(mContext.getContentResolver(),
-        NOTIFICATION_NEW_INTERRUPTION_MODEL, 1)
         manager = NotificationSectionsFeatureManager(proxyFake, mContext)
         manager!!.clearCache()
-        originalQsMediaPlayer = Settings.System.getInt(context.getContentResolver(),
-                "qs_media_player", 1)
-        Settings.Global.putInt(context.getContentResolver(), "qs_media_player", 0)
+        staticMockSession = ExtendedMockito.mockitoSession()
+            .mockStatic<Utils>(Utils::class.java)
+            .strictness(Strictness.LENIENT)
+            .startMocking()
+        `when`(Utils.useQsMediaPlayer(any())).thenReturn(false)
+        Settings.Global.putInt(context.getContentResolver(),
+                Settings.Global.SHOW_MEDIA_ON_QUICK_SETTINGS, 0)
     }
 
     @After
     public fun teardown() {
-        Settings.Global.putInt(context.getContentResolver(), "qs_media_player",
-                originalQsMediaPlayer)
+        staticMockSession.finishMocking()
     }
 
     @Test
@@ -64,8 +70,8 @@ class NotificationSectionsFeatureManagerTest : SysuiTestCase() {
                 DeviceConfig.NAMESPACE_SYSTEMUI, NOTIFICATIONS_USE_PEOPLE_FILTERING, "false", false)
 
         assertFalse("People filtering should be disabled", manager!!.isFilteringEnabled())
-        assertTrue("Expecting 5 buckets when people filtering is disabled",
-                manager!!.getNumberOfBuckets() == 5)
+        assertTrue("Expecting 2 buckets when people filtering is disabled",
+                manager!!.getNumberOfBuckets() == 2)
     }
 
     @Test
@@ -74,7 +80,7 @@ class NotificationSectionsFeatureManagerTest : SysuiTestCase() {
                 DeviceConfig.NAMESPACE_SYSTEMUI, NOTIFICATIONS_USE_PEOPLE_FILTERING, "true", false)
 
         assertTrue("People filtering should be enabled", manager!!.isFilteringEnabled())
-        assertTrue("Expecting 6 buckets when people filtering is enabled",
-                manager!!.getNumberOfBuckets() == 6)
+        assertTrue("Expecting 5 buckets when people filtering is enabled",
+                manager!!.getNumberOfBuckets() == 5)
     }
 }

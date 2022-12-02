@@ -155,10 +155,6 @@ public abstract class SliceProvider extends ContentProvider {
     /**
      * @hide
      */
-    public static final String EXTRA_PROVIDER_PKG = "provider_pkg";
-    /**
-     * @hide
-     */
     public static final String EXTRA_RESULT = "result";
 
     private static final boolean DEBUG = false;
@@ -303,7 +299,7 @@ public abstract class SliceProvider extends ContentProvider {
      * @see #getCallingPackage()
      */
     public @NonNull PendingIntent onCreatePermissionRequest(Uri sliceUri) {
-        return createPermissionIntent(getContext(), sliceUri, getCallingPackage());
+        return createPermissionPendingIntent(getContext(), sliceUri, getCallingPackage());
     }
 
     @Override
@@ -512,19 +508,27 @@ public abstract class SliceProvider extends ContentProvider {
     /**
      * @hide
      */
-    public static PendingIntent createPermissionIntent(Context context, Uri sliceUri,
+    public static PendingIntent createPermissionPendingIntent(Context context, Uri sliceUri,
+            String callingPackage) {
+        return PendingIntent.getActivity(context, 0,
+                createPermissionIntent(context, sliceUri, callingPackage),
+                PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    /**
+     * @hide
+     */
+    public static Intent createPermissionIntent(Context context, Uri sliceUri,
             String callingPackage) {
         Intent intent = new Intent(SliceManager.ACTION_REQUEST_SLICE_PERMISSION);
         intent.setComponent(ComponentName.unflattenFromString(context.getResources().getString(
                 com.android.internal.R.string.config_slicePermissionComponent)));
         intent.putExtra(EXTRA_BIND_URI, sliceUri);
         intent.putExtra(EXTRA_PKG, callingPackage);
-        intent.putExtra(EXTRA_PROVIDER_PKG, context.getPackageName());
         // Unique pending intent.
         intent.setData(sliceUri.buildUpon().appendQueryParameter("package", callingPackage)
                 .build());
-
-        return PendingIntent.getActivity(context, 0, intent, 0);
+        return intent;
     }
 
     /**

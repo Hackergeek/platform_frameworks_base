@@ -18,6 +18,8 @@ package android.media.tv;
 
 import android.graphics.Rect;
 import android.media.PlaybackParams;
+import android.media.tv.AdRequest;
+import android.media.tv.BroadcastInfoRequest;
 import android.media.tv.TvTrackInfo;
 import android.net.Uri;
 import android.os.Bundle;
@@ -40,6 +42,8 @@ oneway interface ITvInputSession {
     void setCaptionEnabled(boolean enabled);
     void selectTrack(int type, in String trackId);
 
+    void setInteractiveAppNotificationEnabled(boolean enable);
+
     void appPrivateCommand(in String action, in Bundle data);
 
     void createOverlayView(in IBinder windowToken, in Rect frame);
@@ -58,4 +62,13 @@ oneway interface ITvInputSession {
     // For the recording session
     void startRecording(in Uri programUri, in Bundle params);
     void stopRecording();
+    void pauseRecording(in Bundle params);
+    void resumeRecording(in Bundle params);
+
+    // For broadcast info
+    void requestBroadcastInfo(in BroadcastInfoRequest request);
+    void removeBroadcastInfo(int id);
+
+    // For ad request
+    void requestAd(in AdRequest request);
 }

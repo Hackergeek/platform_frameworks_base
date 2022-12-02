@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,6 @@ package android.view.inputmethod;
 import static org.junit.Assert.assertEquals;
 
 import android.graphics.Matrix;
-import android.view.inputmethod.CursorAnchorInfo.Builder;
 
 import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
@@ -34,7 +33,7 @@ public class CursorAnchorInfoTest {
     public void testCreateForAdditionalParentMatrix() {
         final Matrix originalMatrix = new Matrix();
         originalMatrix.setTranslate(10.0f, 20.0f);
-        final Builder builder = new Builder();
+        final CursorAnchorInfo.Builder builder = new CursorAnchorInfo.Builder();
         builder.setMatrix(originalMatrix);
 
         final CursorAnchorInfo originalInstance = builder.build();

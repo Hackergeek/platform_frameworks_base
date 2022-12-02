@@ -20,6 +20,7 @@ import android.app.ActivityManager;
 import android.graphics.Rect;
 import android.view.RemoteAnimationTarget;
 import android.view.IRecentsAnimationController;
+import android.window.TaskSnapshot;
 
 /**
  * Interface that is used to callback from window manager to the process that runs a recents
@@ -34,16 +35,17 @@ oneway interface IRecentsAnimationRunner {
      * wallpaper not drawing in time, or the handler not finishing the animation within a predefined
      * amount of time.
      *
-     * @param taskSnapshot If the snapshot is null, the animation will be cancelled and the leash
-     *                     will be inactive immediately. Otherwise, the contents of the task will be
-     *                     replaced with {@param taskSnapshot}, such that the runner's leash is
-     *                     still active. As soon as the runner doesn't need the leash anymore, it
-     *                     must call {@link IRecentsAnimationController#cleanupScreenshot).
+     * @param taskIds Indicates tasks with cancelling snapshot.
+     * @param taskSnapshots If the snapshots is null, the animation will be cancelled and the leash
+     *                      will be inactive immediately. Otherwise, the contents of the tasks will
+     *                      be replaced with {@param taskSnapshots}, such that the runner's leash is
+     *                      still active. As soon as the runner doesn't need the leash anymore, it
+     *                      must call {@link IRecentsAnimationController#cleanupScreenshot).
      *
      * @see {@link RecentsAnimationController#cleanupScreenshot}
      */
-    @UnsupportedAppUsage
-    void onAnimationCanceled(in @nullable ActivityManager.TaskSnapshot taskSnapshot) = 1;
+    void onAnimationCanceled(in @nullable int[] taskIds,
+            in @nullable TaskSnapshot[] taskSnapshots) = 1;
 
     /**
      * Called when the system is ready for the handler to start animating all the visible tasks.
@@ -52,7 +54,7 @@ oneway interface IRecentsAnimationRunner {
      * @param minimizedHomeBounds Specifies the bounds of the minimized home app, will be
      *                            {@code null} if the device is not currently in split screen
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     void onAnimationStart(in IRecentsAnimationController controller,
             in RemoteAnimationTarget[] apps, in RemoteAnimationTarget[] wallpapers,
             in Rect homeContentInsets, in Rect minimizedHomeBounds) = 2;
@@ -61,5 +63,5 @@ oneway interface IRecentsAnimationRunner {
      * Called when the task of an activity that has been started while the recents animation
      * was running becomes ready for control.
      */
-    void onTaskAppeared(in RemoteAnimationTarget app) = 3;
+    void onTasksAppeared(in RemoteAnimationTarget[] app) = 3;
 }

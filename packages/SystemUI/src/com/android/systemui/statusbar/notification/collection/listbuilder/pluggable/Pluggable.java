@@ -17,6 +17,7 @@
 package com.android.systemui.statusbar.notification.collection.listbuilder.pluggable;
 
 import android.annotation.Nullable;
+import android.os.Trace;
 
 import com.android.systemui.statusbar.notification.collection.NotifPipeline;
 
@@ -50,14 +51,22 @@ public abstract class Pluggable<This> {
      */
     public final void invalidateList() {
         if (mListener != null) {
+            Trace.beginSection("Pluggable<" + mName + ">.invalidateList");
             mListener.onPluggableInvalidated((This) this);
+            Trace.endSection();
         }
     }
 
     /** Set a listener to be notified when a pluggable is invalidated. */
-    public void setInvalidationListener(PluggableListener<This> listener) {
+    public final void setInvalidationListener(PluggableListener<This> listener) {
         mListener = listener;
     }
+
+    /**
+     * Called on the pluggable once at the end of every pipeline run. Override this method to
+     * perform any necessary cleanup.
+     */
+    public void onCleanup() { }
 
     /**
      * Listener interface for when pluggables are invalidated.

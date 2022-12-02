@@ -291,10 +291,10 @@ public class ContrastColorUtil {
      * Finds a suitable color such that there's enough contrast.
      *
      * @param color the color to start searching from.
-     * @param other the color to ensure contrast against. Assumed to be lighter than {@param color}
-     * @param findFg if true, we assume {@param color} is a foreground, otherwise a background.
+     * @param other the color to ensure contrast against. Assumed to be lighter than {@code color}
+     * @param findFg if true, we assume {@code color} is a foreground, otherwise a background.
      * @param minRatio the minimum contrast ratio required.
-     * @return a color with the same hue as {@param color}, potentially darkened to meet the
+     * @return a color with the same hue as {@code color}, potentially darkened to meet the
      *          contrast ratio.
      */
     public static int findContrastColor(int color, int other, boolean findFg, double minRatio) {
@@ -331,7 +331,7 @@ public class ContrastColorUtil {
      * @param color the color to start searching from.
      * @param backgroundColor the color to ensure contrast against.
      * @param minRatio the minimum contrast ratio required.
-     * @return the same color as {@param color} with potentially modified alpha to meet contrast
+     * @return the same color as {@code color} with potentially modified alpha to meet contrast
      */
     public static int findAlphaToMeetContrast(int color, int backgroundColor, double minRatio) {
         int fg = color;
@@ -361,10 +361,10 @@ public class ContrastColorUtil {
      * Finds a suitable color such that there's enough contrast.
      *
      * @param color the color to start searching from.
-     * @param other the color to ensure contrast against. Assumed to be darker than {@param color}
-     * @param findFg if true, we assume {@param color} is a foreground, otherwise a background.
+     * @param other the color to ensure contrast against. Assumed to be darker than {@code color}
+     * @param findFg if true, we assume {@code color} is a foreground, otherwise a background.
      * @param minRatio the minimum contrast ratio required.
-     * @return a color with the same hue as {@param color}, potentially darkened to meet the
+     * @return a color with the same hue as {@code color}, potentially lightened to meet the
      *          contrast ratio.
      */
     public static int findContrastColorAgainstDark(int color, int other, boolean findFg,
@@ -393,7 +393,8 @@ public class ContrastColorUtil {
                 low = l;
             }
         }
-        return findFg ? fg : bg;
+        hsl[2] = high;
+        return ColorUtilsFromCompat.HSLToColor(hsl);
     }
 
     public static int ensureTextContrastOnBlack(int color) {
@@ -452,7 +453,7 @@ public class ContrastColorUtil {
     }
 
     /**
-     * Resolves {@param color} to an actual color if it is {@link Notification#COLOR_DEFAULT}
+     * Resolves {@code color} to an actual color if it is {@link Notification#COLOR_DEFAULT}
      */
     public static int resolveColor(Context context, int color, boolean defaultBackgroundIsDark) {
         if (color == Notification.COLOR_DEFAULT) {
@@ -595,7 +596,9 @@ public class ContrastColorUtil {
         if (backgroundColor == Notification.COLOR_DEFAULT) {
             return !defaultBackgroundIsDark;
         }
-        return ColorUtilsFromCompat.calculateLuminance(backgroundColor) > 0.5;
+        // Color contrast ratio luminance midpoint, X: 1.05 / (X + 0.05) = (X + 0.05) / 0.05
+        // Solved as X = sqrt(.05 * 1.05) - 0.05 = 0.17912878474
+        return ColorUtilsFromCompat.calculateLuminance(backgroundColor) > 0.17912878474;
     }
 
     public static double calculateLuminance(int backgroundColor) {
@@ -619,11 +622,12 @@ public class ContrastColorUtil {
     }
 
     public static boolean isColorLight(int backgroundColor) {
+        // TODO(b/188947832): Use 0.17912878474 instead of 0.5 to ensure better contrast
         return calculateLuminance(backgroundColor) > 0.5f;
     }
 
     /**
-     * Framework copy of functions needed from android.support.v4.graphics.ColorUtils.
+     * Framework copy of functions needed from androidx.core.graphics.ColorUtils.
      */
     private static class ColorUtilsFromCompat {
         private static final double XYZ_WHITE_REFERENCE_X = 95.047;

@@ -28,7 +28,6 @@
 #include "utils/ByteOrder.h"
 
 #include "util/BigBuffer.h"
-#include "util/Maybe.h"
 
 #ifdef _WIN32
 // TODO(adamlesinski): remove once http://b/32447322 is resolved.
@@ -81,12 +80,22 @@ bool IsJavaPackageName(const android::StringPiece& str);
 // - First character of each component (separated by '.') must be an ASCII letter.
 // - Subsequent characters of a component can be ASCII alphanumeric or an underscore.
 // - Package must contain at least two components, unless it is 'android'.
+// - The maximum package name length is 223.
 bool IsAndroidPackageName(const android::StringPiece& str);
 
 // Tests that the string is a valid Android split name.
 // - First character of each component (separated by '.') must be an ASCII letter.
 // - Subsequent characters of a component can be ASCII alphanumeric or an underscore.
 bool IsAndroidSplitName(const android::StringPiece& str);
+
+// Tests that the string is a valid Android shared user id.
+// - First character of each component (separated by '.') must be an ASCII letter.
+// - Subsequent characters of a component can be ASCII alphanumeric or an underscore.
+// - Must contain at least two components, unless package name is 'android'.
+// - The maximum shared user id length is 223.
+// - Treat empty string as valid, it's the case of no shared user id.
+bool IsAndroidSharedUserId(const android::StringPiece& package_name,
+                           const android::StringPiece& shared_user_id);
 
 // Converts the class name to a fully qualified class name from the given
 // `package`. Ex:
@@ -95,8 +104,8 @@ bool IsAndroidSplitName(const android::StringPiece& str);
 // .asdf        --> package.asdf
 // .a.b         --> package.a.b
 // asdf.adsf    --> asdf.adsf
-Maybe<std::string> GetFullyQualifiedClassName(const android::StringPiece& package,
-                                              const android::StringPiece& class_name);
+std::optional<std::string> GetFullyQualifiedClassName(const android::StringPiece& package,
+                                                      const android::StringPiece& class_name);
 
 // Retrieves the formatted name of aapt2.
 const char* GetToolName();

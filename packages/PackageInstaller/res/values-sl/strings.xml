@@ -18,14 +18,14 @@
     xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="app_name" msgid="7488448184431507488">"Namest. program za paket"</string>
     <string name="install" msgid="711829760615509273">"Namesti"</string>
+    <string name="update" msgid="3932142540719227615">"Posodobi"</string>
     <string name="done" msgid="6632441120016885253">"Končano"</string>
     <string name="cancel" msgid="1018267193425558088">"Prekliči"</string>
     <string name="installing" msgid="4921993079741206516">"Nameščanje …"</string>
     <string name="installing_app" msgid="1165095864863849422">"Nameščanje aplikacije <xliff:g id="PACKAGE_LABEL">%1$s</xliff:g> …"</string>
     <string name="install_done" msgid="5987363587661783896">"Aplikacija je nameščena."</string>
-    <string name="install_confirm_question" msgid="8176284075816604590">"Ali želite namestiti to aplikacijo?"</string>
-    <string name="install_confirm_question_update" msgid="7942235418781274635">"Ali želite namestiti posodobitev te obstoječe aplikacije? Obstoječi podatki ne bodo izgubljeni."</string>
-    <string name="install_confirm_question_update_system" msgid="4713001702777910263">"Ali želite namestiti posodobitev te vgrajene aplikacije? Obstoječi podatki ne bodo izgubljeni."</string>
+    <string name="install_confirm_question" msgid="7663733664476363311">"Ali želite namestiti to aplikacijo?"</string>
+    <string name="install_confirm_question_update" msgid="3348888852318388584">"Ali želite posodobiti to aplikacijo?"</string>
     <string name="install_failed" msgid="5777824004474125469">"Aplikacija ni nameščena."</string>
     <string name="install_failed_blocked" msgid="8512284352994752094">"Namestitev paketa je bila blokirana."</string>
     <string name="install_failed_conflict" msgid="3493184212162521426">"Aplikacija ni bila nameščena, ker je paket v navzkrižju z obstoječim paketom."</string>
@@ -56,6 +56,7 @@
     <string name="uninstall_application_text" msgid="3816830743706143980">"Ali želite odmestiti to aplikacijo?"</string>
     <string name="uninstall_application_text_all_users" msgid="575491774380227119">"Ali želite odstraniti aplikacijo za "<b>"vse"</b>" uporabnike? Aplikacija in njeni podatki bodo odstranjeni iz "<b>"vseh"</b>" uporabnikov v napravi."</string>
     <string name="uninstall_application_text_user" msgid="498072714173920526">"Ali želite to aplikacijo odstraniti za uporabnika <xliff:g id="USERNAME">%1$s</xliff:g>?"</string>
+    <string name="uninstall_application_text_current_user_work_profile" msgid="8788387739022366193">"Ali želite to aplikacijo odmestiti iz delovnega profila?"</string>
     <string name="uninstall_update_text" msgid="863648314632448705">"Želite to aplikacijo nadomestiti s tovarniško različico? Odstranjeni bodo vsi podatki."</string>
     <string name="uninstall_update_text_multiuser" msgid="8992883151333057227">"Želite to aplikacijo nadomestiti s tovarniško različico? Odstranjeni bodo vsi podatki. To vpliva na vse uporabnike te naprave, vključno s tistimi z delovnimi profili."</string>
     <string name="uninstall_keep_data" msgid="7002379587465487550">"Obdrži <xliff:g id="SIZE">%1$s</xliff:g> podatkov aplikacije."</string>
@@ -64,7 +65,7 @@
     <string name="uninstalling" msgid="8709566347688966845">"Odstranjevanje …"</string>
     <string name="uninstalling_app" msgid="8866082646836981397">"Odmeščanje aplikacije <xliff:g id="PACKAGE_LABEL">%1$s</xliff:g> …"</string>
     <string name="uninstall_done" msgid="439354138387969269">"Odstranitev je končana."</string>
-    <string name="uninstall_done_app" msgid="4588850984473605768">"Aplikacija <xliff:g id="PACKAGE_LABEL">%1$s</xliff:g> je bila odstranjena"</string>
+    <string name="uninstall_done_app" msgid="4588850984473605768">"Aplikacija <xliff:g id="PACKAGE_LABEL">%1$s</xliff:g> je bila odstranjena."</string>
     <string name="uninstall_failed" msgid="1847750968168364332">"Odstranitev ni uspela."</string>
     <string name="uninstall_failed_app" msgid="5506028705017601412">"Odmeščanje aplikacije <xliff:g id="PACKAGE_LABEL">%1$s</xliff:g> ni uspelo."</string>
     <string name="uninstall_failed_device_policy_manager" msgid="785293813665540305">"Aktivne skrbniške aplikacije naprave ni mogoče odstraniti"</string>
@@ -80,9 +81,9 @@
     <string name="wear_not_allowed_dlg_text" msgid="704615521550939237">"Dejanja namestitve in odstranitve v sistemu Android Wear niso podprta."</string>
     <string name="message_staging" msgid="8032722385658438567">"Priprava aplikacije …"</string>
     <string name="app_name_unknown" msgid="6881210203354323926">"Neznano"</string>
-    <string name="untrusted_external_source_warning" product="tablet" msgid="6539403649459942547">"Vaš tablični računalnik zaradi varnosti nima dovoljenja za nameščanje neznanih aplikacij iz tega vira."</string>
-    <string name="untrusted_external_source_warning" product="tv" msgid="1206648674551321364">"Vaš televizor zaradi varnosti nima dovoljenja za nameščanje neznanih aplikacij iz tega vira."</string>
-    <string name="untrusted_external_source_warning" product="default" msgid="7279739265754475165">"Vaš telefon zaradi varnosti nima dovoljenja za nameščanje neznanih aplikacij iz tega vira."</string>
+    <string name="untrusted_external_source_warning" product="tablet" msgid="7067510047443133095">"Tablični računalnik zaradi varnosti trenutno nima dovoljenja za nameščanje neznanih aplikacij iz tega vira. To lahko spremenite v nastavitvah."</string>
+    <string name="untrusted_external_source_warning" product="tv" msgid="7057271609532508035">"Televizor zaradi varnosti trenutno nima dovoljenja za nameščanje neznanih aplikacij iz tega vira. To lahko spremenite v nastavitvah."</string>
+    <string name="untrusted_external_source_warning" product="default" msgid="8444191224459138919">"Telefon zaradi varnosti trenutno nima dovoljenja za nameščanje neznanih aplikacij iz tega vira. To lahko spremenite v nastavitvah."</string>
     <string name="anonymous_source_warning" product="default" msgid="2784902545920822500">"Neznane aplikacije lahko resno ogrozijo varnost telefona in osebnih podatkov. Z namestitvijo te aplikacije se strinjate, da ste sami odgovorni za morebitno škodo, nastalo v telefonu, ali izgubo podatkov, do katerih lahko pride zaradi uporabe te aplikacije."</string>
     <string name="anonymous_source_warning" product="tablet" msgid="3939101621438855516">"Neznane aplikacije lahko resno ogrozijo varnost tabličnega računalnika in osebnih podatkov. Z namestitvijo te aplikacije se strinjate, da ste sami odgovorni za morebitno škodo, nastalo v tabličnem računalniku, ali izgubo podatkov, do katerih lahko pride zaradi uporabe te aplikacije."</string>
     <string name="anonymous_source_warning" product="tv" msgid="5599483539528168566">"Neznane aplikacije lahko resno ogrozijo varnost televizorja in osebnih podatkov. Z namestitvijo te aplikacije se strinjate, da ste sami odgovorni za morebitno škodo, nastalo v televizorju, ali izgubo podatkov, do katerih lahko pride zaradi uporabe te aplikacije."</string>

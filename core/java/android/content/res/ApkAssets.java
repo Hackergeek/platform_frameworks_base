@@ -22,11 +22,13 @@ import android.compat.annotation.UnsupportedAppUsage;
 import android.content.om.OverlayableInfo;
 import android.content.res.loader.AssetsProvider;
 import android.content.res.loader.ResourcesProvider;
+import android.text.TextUtils;
 
 import com.android.internal.annotations.GuardedBy;
 
 import java.io.FileDescriptor;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.Objects;
@@ -68,6 +70,12 @@ public final class ApkAssets {
      */
     private static final int PROPERTY_OVERLAY = 1 << 3;
 
+    /**
+     * The apk assets is owned by the application running in this process and incremental crash
+     * protections for this APK must be disabled.
+     */
+    public static final int PROPERTY_DISABLE_INCREMENTAL_HARDENING = 1 << 4;
+
     /** Flags that change the behavior of loaded apk assets. */
     @IntDef(prefix = { "PROPERTY_" }, value = {
             PROPERTY_SYSTEM,
@@ -101,14 +109,11 @@ public final class ApkAssets {
     public @interface FormatType {}
 
     @GuardedBy("this")
-    private final long mNativePtr;
+    private long mNativePtr;  // final, except cleared in finalizer.
 
     @Nullable
     @GuardedBy("this")
-    private final StringBlock mStringBlock;
-
-    @GuardedBy("this")
-    private boolean mOpen = true;
+    private final StringBlock mStringBlock;  // null or closed if mNativePtr = 0.
 
     @PropertyFlags
     private final int mFlags;
@@ -325,17 +330,25 @@ public final class ApkAssets {
     @UnsupportedAppUsage
     public @NonNull String getAssetPath() {
         synchronized (this) {
-            return nativeGetAssetPath(mNativePtr);
+            return TextUtils.emptyIfNull(nativeGetAssetPath(mNativePtr));
         }
     }
 
+    /** @hide */
+    public @NonNull String getDebugName() {
+        synchronized (this) {
+            return nativeGetDebugName(mNativePtr);
+        }
+    }
+
+    @Nullable
     CharSequence getStringFromPool(int idx) {
         if (mStringBlock == null) {
             return null;
         }
 
         synchronized (this) {
-            return mStringBlock.get(idx);
+            return mStringBlock.getSequence(idx);
         }
     }
 
@@ -380,12 +393,16 @@ public final class ApkAssets {
     /** @hide */
     @Nullable
     public OverlayableInfo getOverlayableInfo(String overlayableName) throws IOException {
-        return nativeGetOverlayableInfo(mNativePtr, overlayableName);
+        synchronized (this) {
+            return nativeGetOverlayableInfo(mNativePtr, overlayableName);
+        }
     }
 
     /** @hide */
     public boolean definesOverlayable() throws IOException {
-        return nativeDefinesOverlayable(mNativePtr);
+        synchronized (this) {
+            return nativeDefinesOverlayable(mNativePtr);
+        }
     }
 
     /**
@@ -399,7 +416,7 @@ public final class ApkAssets {
 
     @Override
     public String toString() {
-        return "ApkAssets{path=" + getAssetPath() + "}";
+        return "ApkAssets{path=" + getDebugName() + "}";
     }
 
     @Override
@@ -412,14 +429,20 @@ public final class ApkAssets {
      */
     public void close() {
         synchronized (this) {
-            if (mOpen) {
-                mOpen = false;
+            if (mNativePtr != 0) {
                 if (mStringBlock != null) {
                     mStringBlock.close();
                 }
                 nativeDestroy(mNativePtr);
+                mNativePtr = 0;
             }
         }
+    }
+
+    void dump(PrintWriter pw, String prefix) {
+        pw.println(prefix + "class=" + getClass());
+        pw.println(prefix + "debugName=" + getDebugName());
+        pw.println(prefix + "assetPath=" + getAssetPath());
     }
 
     private static native long nativeLoad(@FormatType int format, @NonNull String path,
@@ -434,6 +457,7 @@ public final class ApkAssets {
             @PropertyFlags int flags, @Nullable AssetsProvider asset) throws IOException;
     private static native void nativeDestroy(long ptr);
     private static native @NonNull String nativeGetAssetPath(long ptr);
+    private static native @NonNull String nativeGetDebugName(long ptr);
     private static native long nativeGetStringBlock(long ptr);
     private static native boolean nativeIsUpToDate(long ptr);
     private static native long nativeOpenXml(long ptr, @NonNull String fileName) throws IOException;

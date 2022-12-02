@@ -16,6 +16,8 @@
 
 package android.telephony;
 
+import static android.text.TextUtils.formatSimple;
+
 import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
@@ -63,7 +65,6 @@ public final class CellIdentityNr extends CellIdentity {
     }
 
     /**
-     *
      * @param pci Physical Cell Id in range [0, 1007].
      * @param tac 24-bit Tracking Area Code.
      * @param nrArfcn NR Absolute Radio Frequency Channel Number, in range [0, 3279165].
@@ -98,25 +99,10 @@ public final class CellIdentityNr extends CellIdentity {
     }
 
     /** @hide */
-    public CellIdentityNr(@NonNull android.hardware.radio.V1_4.CellIdentityNr cid) {
-        this(cid.pci, cid.tac, cid.nrarfcn, new int[] {}, cid.mcc, cid.mnc, cid.nci,
-                cid.operatorNames.alphaLong, cid.operatorNames.alphaShort,
-                new ArraySet<>());
-    }
-
-    /** @hide */
-    public CellIdentityNr(@NonNull android.hardware.radio.V1_5.CellIdentityNr cid) {
-        this(cid.base.pci, cid.base.tac, cid.base.nrarfcn,
-                cid.bands.stream().mapToInt(Integer::intValue).toArray(), cid.base.mcc,
-                cid.base.mnc, cid.base.nci, cid.base.operatorNames.alphaLong,
-                cid.base.operatorNames.alphaShort, cid.additionalPlmns);
-    }
-
-    /** @hide */
     @Override
     public @NonNull CellIdentityNr sanitizeLocationInfo() {
         return new CellIdentityNr(CellInfo.UNAVAILABLE, CellInfo.UNAVAILABLE, mNrArfcn,
-                mBands, mMccStr, mMncStr, CellInfo.UNAVAILABLE, mAlphaLong, mAlphaShort,
+                mBands, mMccStr, mMncStr, CellInfo.UNAVAILABLE_LONG, mAlphaLong, mAlphaShort,
                 mAdditionalPlmns);
     }
 
@@ -128,7 +114,7 @@ public final class CellIdentityNr extends CellIdentity {
 
         if (mNci == CellInfo.UNAVAILABLE_LONG) return;
 
-        mGlobalCellId = plmn + String.format("%09x", mNci);
+        mGlobalCellId = plmn + formatSimple("%09x", mNci);
     }
 
     /**
@@ -231,7 +217,7 @@ public final class CellIdentityNr extends CellIdentity {
     }
 
     /**
-     * @return Mobile Network Code in string fomrat, or {@code null} if unknown.
+     * @return Mobile Network Code in string format, or {@code null} if unknown.
      */
     @Nullable
     public String getMncString() {

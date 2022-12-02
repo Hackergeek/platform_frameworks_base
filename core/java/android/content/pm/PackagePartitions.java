@@ -19,8 +19,11 @@ package android.content.pm;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.os.Build;
+import android.os.Build.Partition;
 import android.os.Environment;
 import android.os.FileUtils;
+import android.os.SystemProperties;
 
 import com.android.internal.annotations.VisibleForTesting;
 
@@ -47,7 +50,7 @@ public class PackagePartitions {
     public static final int PARTITION_PRODUCT = 4;
     public static final int PARTITION_SYSTEM_EXT = 5;
 
-    @IntDef(flag = true, prefix = { "PARTITION_" }, value = {
+    @IntDef(prefix = { "PARTITION_" }, value = {
         PARTITION_SYSTEM,
         PARTITION_VENDOR,
         PARTITION_ODM,
@@ -64,18 +67,32 @@ public class PackagePartitions {
      */
     private static final ArrayList<SystemPartition> SYSTEM_PARTITIONS =
             new ArrayList<>(Arrays.asList(
-                    new SystemPartition(Environment.getRootDirectory(), PARTITION_SYSTEM,
+                    new SystemPartition(Environment.getRootDirectory(),
+                            PARTITION_SYSTEM, Partition.PARTITION_NAME_SYSTEM,
                             true /* containsPrivApp */, false /* containsOverlay */),
-                    new SystemPartition(Environment.getVendorDirectory(), PARTITION_VENDOR,
+                    new SystemPartition(Environment.getVendorDirectory(),
+                            PARTITION_VENDOR, Partition.PARTITION_NAME_VENDOR,
                             true /* containsPrivApp */, true /* containsOverlay */),
-                    new SystemPartition(Environment.getOdmDirectory(), PARTITION_ODM,
+                    new SystemPartition(Environment.getOdmDirectory(),
+                            PARTITION_ODM, Partition.PARTITION_NAME_ODM,
                             true /* containsPrivApp */, true /* containsOverlay */),
-                    new SystemPartition(Environment.getOemDirectory(), PARTITION_OEM,
+                    new SystemPartition(Environment.getOemDirectory(),
+                            PARTITION_OEM, Partition.PARTITION_NAME_OEM,
                             false /* containsPrivApp */, true /* containsOverlay */),
-                    new SystemPartition(Environment.getProductDirectory(), PARTITION_PRODUCT,
+                    new SystemPartition(Environment.getProductDirectory(),
+                            PARTITION_PRODUCT, Partition.PARTITION_NAME_PRODUCT,
                             true /* containsPrivApp */, true /* containsOverlay */),
-                    new SystemPartition(Environment.getSystemExtDirectory(), PARTITION_SYSTEM_EXT,
+                    new SystemPartition(Environment.getSystemExtDirectory(),
+                            PARTITION_SYSTEM_EXT, Partition.PARTITION_NAME_SYSTEM_EXT,
                             true /* containsPrivApp */, true /* containsOverlay */)));
+
+    /**
+     * A string to represent the fingerprint of this build and all package partitions. Using it to
+     * determine whether the system update has occurred. Different from {@link Build#FINGERPRINT},
+     * this string is digested from the fingerprints of the build and all package partitions to
+     * help detect the partition update.
+     */
+    public static final String FINGERPRINT = getFingerprint();
 
     /**
      * Returns a list in which the elements are products of the specified function applied to the
@@ -101,11 +118,31 @@ public class PackagePartitions {
         }
     }
 
+    /**
+     * Returns a fingerprint string for this build and all package partitions. The string is
+     * digested from the fingerprints of the build and all package partitions.
+     *
+     * @return A string to represent the fingerprint of this build and all package partitions.
+     */
+    @NonNull
+    private static String getFingerprint() {
+        final String[] digestProperties = new String[SYSTEM_PARTITIONS.size() + 1];
+        for (int i = 0; i < SYSTEM_PARTITIONS.size(); i++) {
+            final String partitionName = SYSTEM_PARTITIONS.get(i).getName();
+            digestProperties[i] = "ro." + partitionName + ".build.fingerprint";
+        }
+        digestProperties[SYSTEM_PARTITIONS.size()] = "ro.build.fingerprint"; // build fingerprint
+        return SystemProperties.digestOf(digestProperties);
+    }
+
     /** Represents a partition that contains application packages. */
     @VisibleForTesting(visibility = VisibleForTesting.Visibility.PRIVATE)
     public static class SystemPartition {
         @PartitionType
         public final int type;
+
+        @NonNull
+        private final String mName;
 
         @NonNull
         private final DeferredCanonicalFile mFolder;
@@ -119,23 +156,30 @@ public class PackagePartitions {
         @Nullable
         private final DeferredCanonicalFile mOverlayFolder;
 
-        private SystemPartition(@NonNull File folder, @PartitionType int type,
+        @NonNull
+        private final File mNonConicalFolder;
+
+        private SystemPartition(@NonNull File folder, @PartitionType int type, String name,
                 boolean containsPrivApp, boolean containsOverlay) {
             this.type = type;
+            this.mName = name;
             this.mFolder = new DeferredCanonicalFile(folder);
             this.mAppFolder = new DeferredCanonicalFile(folder, "app");
             this.mPrivAppFolder = containsPrivApp ? new DeferredCanonicalFile(folder, "priv-app")
                     : null;
             this.mOverlayFolder = containsOverlay ? new DeferredCanonicalFile(folder, "overlay")
                     : null;
+            this.mNonConicalFolder = folder;
         }
 
         public SystemPartition(@NonNull SystemPartition original) {
             this.type = original.type;
+            this.mName = original.mName;
             this.mFolder = new DeferredCanonicalFile(original.mFolder.getFile());
             this.mAppFolder = original.mAppFolder;
             this.mPrivAppFolder = original.mPrivAppFolder;
             this.mOverlayFolder = original.mOverlayFolder;
+            this.mNonConicalFolder = original.mNonConicalFolder;
         }
 
         /**
@@ -143,14 +187,29 @@ public class PackagePartitions {
          * different root folder.
          */
         public SystemPartition(@NonNull File rootFolder, @NonNull SystemPartition partition) {
-            this(rootFolder, partition.type, partition.mPrivAppFolder != null,
+            this(rootFolder, partition.type, partition.mName, partition.mPrivAppFolder != null,
                     partition.mOverlayFolder != null);
+        }
+
+        /**
+         * Returns the name identifying the partition.
+         * @see Partition
+         */
+        @NonNull
+        public String getName() {
+            return mName;
         }
 
         /** Returns the canonical folder of the partition. */
         @NonNull
         public File getFolder() {
             return mFolder.getFile();
+        }
+
+        /** Returns the non-canonical folder of the partition. */
+        @NonNull
+        public File getNonConicalFolder() {
+            return mNonConicalFolder;
         }
 
         /** Returns the canonical app folder of the partition. */

@@ -16,7 +16,11 @@
 
 package android.view;
 
+import static android.Manifest.permission.HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
+import static android.Manifest.permission.HIDE_OVERLAY_WINDOWS;
+import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 import static android.view.WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
+import static android.view.WindowManager.LayoutParams.SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
 
 import android.annotation.ColorInt;
 import android.annotation.DrawableRes;
@@ -24,9 +28,11 @@ import android.annotation.IdRes;
 import android.annotation.LayoutRes;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresPermission;
 import android.annotation.StyleRes;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
+import android.annotation.UiContext;
 import android.app.WindowConfiguration;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.Context;
@@ -44,13 +50,13 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.RemoteException;
 import android.transition.Scene;
 import android.transition.Transition;
 import android.transition.TransitionManager;
 import android.util.Pair;
 import android.view.View.OnApplyWindowInsetsListener;
 import android.view.accessibility.AccessibilityEvent;
+import android.window.OnBackInvokedDispatcher;
 
 import java.util.Collections;
 import java.util.List;
@@ -61,9 +67,7 @@ import java.util.List;
  * window manager. It provides standard UI policies such as a background, title
  * area, default key processing, etc.
  *
- * <p>The only existing implementation of this abstract class is
- * android.view.PhoneWindow, which you should instantiate when needing a
- * Window.
+ * <p>The framework will instantiate an implementation of this class on behalf of the application.
  */
 public abstract class Window {
     /** Flag for the "options panel" feature.  This is enabled by default. */
@@ -161,7 +165,7 @@ public abstract class Window {
      * Max value used as a feature ID
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public static final int FEATURE_MAX = FEATURE_ACTIVITY_TRANSITIONS;
 
     /**
@@ -280,6 +284,7 @@ public abstract class Window {
     public static final int DECOR_CAPTION_SHADE_DARK = 2;
 
     @UnsupportedAppUsage
+    @UiContext
     private final Context mContext;
 
     @UnsupportedAppUsage
@@ -289,6 +294,9 @@ public abstract class Window {
     private OnWindowDismissedCallback mOnWindowDismissedCallback;
     private OnWindowSwipeDismissedCallback mOnWindowSwipeDismissedCallback;
     private WindowControllerCallback mWindowControllerCallback;
+    @WindowInsetsController.Appearance
+    private int mSystemBarAppearance;
+    private DecorCallback mDecorCallback;
     private OnRestrictedCaptionAreaChangedListener mOnRestrictedCaptionAreaChangedListener;
     private Rect mRestrictedCaptionAreaRect;
     @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.P, trackingBug = 115609023)
@@ -633,7 +641,7 @@ public abstract class Window {
          * Moves the activity between {@link WindowConfiguration#WINDOWING_MODE_FREEFORM} windowing
          * mode and {@link WindowConfiguration#WINDOWING_MODE_FULLSCREEN}.
          */
-        void toggleFreeformWindowingMode() throws RemoteException;
+        void toggleFreeformWindowingMode();
 
         /**
          * Puts the activity in picture-in-picture mode if the activity supports.
@@ -653,6 +661,35 @@ public abstract class Window {
          * Update the navigation bar color to a forced one.
          */
         void updateNavigationBarColor(int color);
+    }
+
+    /** @hide */
+    public interface DecorCallback {
+        /**
+         * Called from
+         * {@link com.android.internal.policy.DecorView#onSystemBarAppearanceChanged(int)}.
+         *
+         * @param appearance The newly applied appearance.
+         */
+        void onSystemBarAppearanceChanged(@WindowInsetsController.Appearance int appearance);
+
+        /**
+         * Called from
+         * {@link com.android.internal.policy.DecorView#updateColorViews(WindowInsets, boolean)}
+         * when {@link com.android.internal.policy.DecorView#mDrawLegacyNavigationBarBackground} is
+         * being updated.
+         *
+         * @param drawLegacyNavigationBarBackground the new value that is being set to
+         *        {@link com.android.internal.policy.DecorView#mDrawLegacyNavigationBarBackground}.
+         * @return The value to be set to
+         *   {@link com.android.internal.policy.DecorView#mDrawLegacyNavigationBarBackgroundHandled}
+         *         on behalf of the {@link com.android.internal.policy.DecorView}.
+         *         {@code true} to tell that the Window can render the legacy navigation bar
+         *         background on behalf of the {@link com.android.internal.policy.DecorView}.
+         *         {@code false} to let {@link com.android.internal.policy.DecorView} handle it.
+         */
+        boolean onDrawLegacyNavigationBarBackgroundChanged(
+                boolean drawLegacyNavigationBarBackground);
     }
 
     /**
@@ -722,7 +759,7 @@ public abstract class Window {
     }
 
 
-    public Window(Context context) {
+    public Window(@UiContext Context context) {
         mContext = context;
         mFeatures = mLocalFeatures = getDefaultFeatures(context);
     }
@@ -733,6 +770,7 @@ public abstract class Window {
      *
      * @return Context The Context that was supplied to the constructor.
      */
+    @UiContext
     public final Context getContext() {
         return mContext;
     }
@@ -788,7 +826,7 @@ public abstract class Window {
     }
 
     /** @hide */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public final boolean isDestroyed() {
         return mDestroyed;
     }
@@ -978,6 +1016,36 @@ public abstract class Window {
         return mWindowControllerCallback;
     }
 
+    /** @hide */
+    public final void setDecorCallback(DecorCallback decorCallback) {
+        mDecorCallback = decorCallback;
+    }
+
+    /** @hide */
+    @WindowInsetsController.Appearance
+    public final int getSystemBarAppearance() {
+        return mSystemBarAppearance;
+    }
+
+    /** @hide */
+    public final void dispatchOnSystemBarAppearanceChanged(
+            @WindowInsetsController.Appearance int appearance) {
+        mSystemBarAppearance = appearance;
+        if (mDecorCallback != null) {
+            mDecorCallback.onSystemBarAppearanceChanged(appearance);
+        }
+    }
+
+    /** @hide */
+    public final boolean onDrawLegacyNavigationBarBackgroundChanged(
+            boolean drawLegacyNavigationBarBackground) {
+        if (mDecorCallback == null) {
+            return false;
+        }
+        return mDecorCallback.onDrawLegacyNavigationBarBackgroundChanged(
+                drawLegacyNavigationBarBackground);
+    }
+
     /**
      * Set a callback for changes of area where caption will draw its content.
      *
@@ -986,6 +1054,26 @@ public abstract class Window {
     public final void setRestrictedCaptionAreaListener(OnRestrictedCaptionAreaChangedListener listener) {
         mOnRestrictedCaptionAreaChangedListener = listener;
         mRestrictedCaptionAreaRect = listener != null ? new Rect() : null;
+    }
+
+    /**
+     * Prevent non-system overlay windows from being drawn on top of this window.
+     *
+     * @param hide whether non-system overlay windows should be hidden.
+     */
+    @RequiresPermission(HIDE_OVERLAY_WINDOWS)
+    public final void setHideOverlayWindows(boolean hide) {
+        // This permission check is here to throw early and let the developer know that they need
+        // to hold HIDE_OVERLAY_WINDOWS for the flag to have any effect. The WM verifies that the
+        // owner of the window has the permission before applying the flag, but this is done
+        // asynchronously.
+        if (mContext.checkSelfPermission(HIDE_NON_SYSTEM_OVERLAY_WINDOWS) != PERMISSION_GRANTED
+                && mContext.checkSelfPermission(HIDE_OVERLAY_WINDOWS) != PERMISSION_GRANTED) {
+            throw new SecurityException(
+                    "Permission denial: setHideOverlayWindows: HIDE_OVERLAY_WINDOWS");
+        }
+        setPrivateFlags(hide ? SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS : 0,
+                SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS);
     }
 
     /**
@@ -1134,7 +1222,7 @@ public abstract class Window {
      *
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void addPrivateFlags(int flags) {
         setPrivateFlags(flags, flags);
     }
@@ -1327,6 +1415,11 @@ public abstract class Window {
     public void setDecorFitsSystemWindows(boolean decorFitsSystemWindows) {
     }
 
+    /** @hide */
+    public boolean decorFitsSystemWindows() {
+        return false;
+    }
+
     /**
      * Specify custom window attributes.  <strong>PLEASE NOTE:</strong> the
      * layout params you give here should generally be from values previously
@@ -1384,6 +1477,7 @@ public abstract class Window {
     }
 
     /** @hide */
+    @SuppressWarnings("HiddenAbstractMethod")
     @UnsupportedAppUsage
     public abstract void alwaysReadCloseOnTouchAttr();
 
@@ -1564,6 +1658,7 @@ public abstract class Window {
      *
      * @hide
      */
+    @SuppressWarnings("HiddenAbstractMethod")
     public abstract void clearContentView();
 
     /**
@@ -1672,6 +1767,42 @@ public abstract class Window {
      * @param drawable The new Drawable to use for this window's background.
      */
     public abstract void setBackgroundDrawable(Drawable drawable);
+
+    /**
+     * <p>
+     * Blurs the screen behind the window within the bounds of the window.
+     * </p><p>
+     * The density of the blur is set by the blur radius. The radius defines the size
+     * of the neighbouring area, from which pixels will be averaged to form the final
+     * color for each pixel. The operation approximates a Gaussian blur.
+     * A radius of 0 means no blur. The higher the radius, the denser the blur.
+     * </p><p>
+     * The window background drawable is drawn on top of the blurred region. The blur
+     * region bounds and rounded corners will mimic those of the background drawable.
+     * </p><p>
+     * For the blur region to be visible, the window has to be translucent
+     * (see {@link android.R.attr#windowIsTranslucent}) and floating
+     * (see {@link android.R.attr#windowIsFloating}).
+     * </p><p>
+     * Note the difference with {@link WindowManager.LayoutParams#setBlurBehindRadius},
+     * which blurs the whole screen behind the window. Background blur blurs the screen behind
+     * only within the bounds of the window.
+     * </p><p>
+     * Some devices might not support cross-window blur due to GPU limitations. It can also be
+     * disabled at runtime, e.g. during battery saving mode, when multimedia tunneling is used or
+     * when minimal post processing is requested. In such situations, no blur will be computed or
+     * drawn, resulting in a transparent window background. To avoid this, the app might want to
+     * change its theme to one that does not use blurs. To listen for cross-window blur
+     * enabled/disabled events, use {@link WindowManager#addCrossWindowBlurEnabledListener}.
+     * </p>
+     *
+     * @param blurRadius The blur radius to use for window background blur in pixels
+     *
+     * @see android.R.styleable#Window_windowBackgroundBlurRadius
+     * @see WindowManager.LayoutParams#setBlurBehindRadius
+     * @see WindowManager#addCrossWindowBlurEnabledListener
+     */
+    public void setBackgroundBlurRadius(int blurRadius) {}
 
     /**
      * Set the value for a drawable feature of this window, from a resource
@@ -2557,28 +2688,27 @@ public abstract class Window {
     /**
      * System request to begin scroll capture.
      *
-     * @param controller the controller to receive responses
+     * @param listener to receive the response
      * @hide
      */
-    public void requestScrollCapture(IScrollCaptureController controller) {
+    public void requestScrollCapture(IScrollCaptureResponseListener listener) {
     }
 
     /**
-     * Registers a {@link ScrollCaptureCallback} with the root of this window.
+     * Used to provide scroll capture support for an arbitrary window. This registeres the given
+     * callback with the root view of the window.
      *
      * @param callback the callback to add
-     * @hide
      */
-    public void addScrollCaptureCallback(@NonNull ScrollCaptureCallback callback) {
+    public void registerScrollCaptureCallback(@NonNull ScrollCaptureCallback callback) {
     }
 
     /**
      * Unregisters a {@link ScrollCaptureCallback} previously registered with this window.
      *
      * @param callback the callback to remove
-     * @hide
      */
-    public void removeScrollCaptureCallback(@NonNull ScrollCaptureCallback callback) {
+    public void unregisterScrollCaptureCallback(@NonNull ScrollCaptureCallback callback) {
     }
 
     /** @hide */
@@ -2632,18 +2762,21 @@ public abstract class Window {
      * Called when the activity changes from fullscreen mode to multi-window mode and visa-versa.
      * @hide
      */
+    @SuppressWarnings("HiddenAbstractMethod")
     public abstract void onMultiWindowModeChanged();
 
     /**
      * Called when the activity changes to/from picture-in-picture mode.
      * @hide
      */
+    @SuppressWarnings("HiddenAbstractMethod")
     public abstract void onPictureInPictureModeChanged(boolean isInPictureInPictureMode);
 
     /**
      * Called when the activity just relaunched.
      * @hide
      */
+    @SuppressWarnings("HiddenAbstractMethod")
     public abstract void reportActivityRelaunched();
 
     /**
@@ -2652,5 +2785,24 @@ public abstract class Window {
      */
     public @Nullable WindowInsetsController getInsetsController() {
         return null;
+    }
+
+    /**
+     * This will be null before a content view is added, e.g. via
+     * {@link #setContentView} or {@link #addContentView}. See
+     * {@link android.view.View#getRootSurfaceControl}.
+     *
+     * @return The {@link android.view.AttachedSurfaceControl} interface for this Window
+     */
+    public @Nullable AttachedSurfaceControl getRootSurfaceControl() {
+        return null;
+    }
+
+    /**
+     * Returns the {@link OnBackInvokedDispatcher} instance associated with this window.
+     */
+    @NonNull
+    public OnBackInvokedDispatcher getOnBackInvokedDispatcher() {
+        throw new RuntimeException("Not implemented. Must override in a subclass.");
     }
 }

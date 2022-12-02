@@ -18,7 +18,6 @@ package com.android.systemui.screenrecord;
 
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -26,40 +25,60 @@ import android.os.CountDownTimer;
 import android.os.UserHandle;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.systemui.broadcast.BroadcastDispatcher;
+import com.android.systemui.dagger.SysUISingleton;
+import com.android.systemui.settings.UserContextProvider;
 import com.android.systemui.statusbar.policy.CallbackController;
 
-import java.util.ArrayList;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import javax.inject.Inject;
-import javax.inject.Singleton;
 
 /**
  * Helper class to initiate a screen recording
  */
-@Singleton
+@SysUISingleton
 public class RecordingController
         implements CallbackController<RecordingController.RecordingStateChangeCallback> {
     private static final String TAG = "RecordingController";
-    private static final String SYSUI_PACKAGE = "com.android.systemui";
-    private static final String SYSUI_SCREENRECORD_LAUNCHER =
-            "com.android.systemui.screenrecord.ScreenRecordDialog";
 
     private boolean mIsStarting;
     private boolean mIsRecording;
     private PendingIntent mStopIntent;
     private CountDownTimer mCountDownTimer = null;
     private BroadcastDispatcher mBroadcastDispatcher;
+    private UserContextProvider mUserContextProvider;
 
-    private ArrayList<RecordingStateChangeCallback> mListeners = new ArrayList<>();
+    protected static final String INTENT_UPDATE_STATE =
+            "com.android.systemui.screenrecord.UPDATE_STATE";
+    protected static final String EXTRA_STATE = "extra_state";
+
+    private CopyOnWriteArrayList<RecordingStateChangeCallback> mListeners =
+            new CopyOnWriteArrayList<>();
 
     @VisibleForTesting
     protected final BroadcastReceiver mUserChangeReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (mStopIntent != null) {
-                stopRecording();
+            stopRecording();
+        }
+    };
+
+    @VisibleForTesting
+    protected final BroadcastReceiver mStateChangeReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent != null && INTENT_UPDATE_STATE.equals(intent.getAction())) {
+                if (intent.hasExtra(EXTRA_STATE)) {
+                    boolean state = intent.getBooleanExtra(EXTRA_STATE, false);
+                    updateState(state);
+                } else {
+                    Log.e(TAG, "Received update intent with no state");
+                }
             }
         }
     };
@@ -68,20 +87,16 @@ public class RecordingController
      * Create a new RecordingController
      */
     @Inject
-    public RecordingController(BroadcastDispatcher broadcastDispatcher) {
+    public RecordingController(BroadcastDispatcher broadcastDispatcher,
+            UserContextProvider userContextProvider) {
         mBroadcastDispatcher = broadcastDispatcher;
+        mUserContextProvider = userContextProvider;
     }
 
-    /**
-     * Get an intent to show screen recording options to the user.
-     */
-    public Intent getPromptIntent() {
-        final ComponentName launcherComponent = new ComponentName(SYSUI_PACKAGE,
-                SYSUI_SCREENRECORD_LAUNCHER);
-        final Intent intent = new Intent();
-        intent.setComponent(launcherComponent);
-        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        return intent;
+    /** Create a dialog to show screen recording options to the user. */
+    public ScreenRecordDialog createScreenRecordDialog(Context context,
+            @Nullable Runnable onStartRecordingClicked) {
+        return new ScreenRecordDialog(context, this, mUserContextProvider, onStartRecordingClicked);
     }
 
     /**
@@ -115,6 +130,10 @@ public class RecordingController
                     startIntent.send();
                     IntentFilter userFilter = new IntentFilter(Intent.ACTION_USER_SWITCHED);
                     mBroadcastDispatcher.registerReceiver(mUserChangeReceiver, userFilter, null,
+                            UserHandle.ALL);
+
+                    IntentFilter stateFilter = new IntentFilter(INTENT_UPDATE_STATE);
+                    mBroadcastDispatcher.registerReceiver(mStateChangeReceiver, stateFilter, null,
                             UserHandle.ALL);
                     Log.d(TAG, "sent start intent");
                 } catch (PendingIntent.CanceledException e) {
@@ -172,7 +191,6 @@ public class RecordingController
         } catch (PendingIntent.CanceledException e) {
             Log.e(TAG, "Error stopping: " + e.getMessage());
         }
-        mBroadcastDispatcher.unregisterReceiver(mUserChangeReceiver);
     }
 
     /**
@@ -180,6 +198,11 @@ public class RecordingController
      * @param isRecording
      */
     public synchronized void updateState(boolean isRecording) {
+        if (!isRecording && mIsRecording) {
+            // Unregister receivers if we have stopped recording
+            mBroadcastDispatcher.unregisterReceiver(mUserChangeReceiver);
+            mBroadcastDispatcher.unregisterReceiver(mStateChangeReceiver);
+        }
         mIsRecording = isRecording;
         for (RecordingStateChangeCallback cb : mListeners) {
             if (isRecording) {
@@ -191,12 +214,12 @@ public class RecordingController
     }
 
     @Override
-    public void addCallback(RecordingStateChangeCallback listener) {
+    public void addCallback(@NonNull RecordingStateChangeCallback listener) {
         mListeners.add(listener);
     }
 
     @Override
-    public void removeCallback(RecordingStateChangeCallback listener) {
+    public void removeCallback(@NonNull RecordingStateChangeCallback listener) {
         mListeners.remove(listener);
     }
 

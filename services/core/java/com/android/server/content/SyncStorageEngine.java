@@ -33,6 +33,7 @@ import android.content.SyncInfo;
 import android.content.SyncRequest;
 import android.content.SyncStatusInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageManagerInternal;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
@@ -50,18 +51,19 @@ import android.util.Log;
 import android.util.Pair;
 import android.util.Slog;
 import android.util.SparseArray;
+import android.util.TypedXmlPullParser;
+import android.util.TypedXmlSerializer;
 import android.util.Xml;
 import android.util.proto.ProtoInputStream;
 import android.util.proto.ProtoOutputStream;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.ArrayUtils;
-import com.android.internal.util.FastXmlSerializer;
 import com.android.internal.util.IntPair;
+import com.android.server.LocalServices;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
-import org.xmlpull.v1.XmlSerializer;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -69,7 +71,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.HashMap;
@@ -166,6 +167,8 @@ public class SyncStorageEngine {
 
     private static HashMap<String, String> sAuthorityRenames;
     private static PeriodicSyncAddedListener mPeriodicSyncAddedListener;
+
+    private final PackageManagerInternal mPackageManagerInternal;
 
     private volatile boolean mIsClockValid;
 
@@ -526,6 +529,8 @@ public class SyncStorageEngine {
         mDefaultMasterSyncAutomatically = mContext.getResources().getBoolean(
                 com.android.internal.R.bool.config_syncstorageengine_masterSyncAutomatically);
 
+        mPackageManagerInternal = LocalServices.getService(PackageManagerInternal.class);
+
         File systemDir = new File(dataDir, "system");
         mSyncDir = new File(systemDir, SYNC_DIR_NAME);
         mSyncDir.mkdirs();
@@ -610,9 +615,9 @@ public class SyncStorageEngine {
         return mSyncRandomOffset;
     }
 
-    public void addStatusChangeListener(int mask, int userId, ISyncStatusObserver callback) {
+    public void addStatusChangeListener(int mask, int callingUid, ISyncStatusObserver callback) {
         synchronized (mAuthorities) {
-            final long cookie = IntPair.of(userId, mask);
+            final long cookie = IntPair.of(callingUid, mask);
             mChangeListeners.register(callback, cookie);
         }
     }
@@ -645,16 +650,32 @@ public class SyncStorageEngine {
         }
     }
 
-    void reportChange(int which, int callingUserId) {
+    void reportChange(int which, EndPoint target) {
+        final String syncAdapterPackageName;
+        if (target.account == null || target.provider == null) {
+            syncAdapterPackageName = null;
+        } else {
+            syncAdapterPackageName = ContentResolver.getSyncAdapterPackageAsUser(
+                    target.account.type, target.provider, target.userId);
+        }
+        reportChange(which, syncAdapterPackageName, target.userId);
+    }
+
+    void reportChange(int which, String callingPackageName, int callingUserId) {
         ArrayList<ISyncStatusObserver> reports = null;
         synchronized (mAuthorities) {
             int i = mChangeListeners.beginBroadcast();
             while (i > 0) {
                 i--;
                 final long cookie = (long) mChangeListeners.getBroadcastCookie(i);
-                final int userId = IntPair.first(cookie);
+                final int registerUid = IntPair.first(cookie);
+                final int registerUserId = UserHandle.getUserId(registerUid);
                 final int mask = IntPair.second(cookie);
-                if ((which & mask) == 0 || callingUserId != userId) {
+                if ((which & mask) == 0 || callingUserId != registerUserId) {
+                    continue;
+                }
+                if (callingPackageName != null && mPackageManagerInternal.filterAppAccess(
+                        callingPackageName, registerUid, callingUserId)) {
                     continue;
                 }
                 if (reports == null) {
@@ -717,12 +738,12 @@ public class SyncStorageEngine {
                 " cuid=", callingUid,
                 " cpid=", callingPid
         );
+        final AuthorityInfo authority;
         synchronized (mAuthorities) {
-            AuthorityInfo authority =
-                    getOrCreateAuthorityLocked(
-                            new EndPoint(account, providerName, userId),
-                            -1 /* ident */,
-                            false);
+            authority = getOrCreateAuthorityLocked(
+                    new EndPoint(account, providerName, userId),
+                    -1 /* ident */,
+                    false);
             if (authority.enabled == sync) {
                 if (Log.isLoggable(TAG, Log.VERBOSE)) {
                     Slog.d(TAG, "setSyncAutomatically: already set to " + sync + ", doing nothing");
@@ -744,7 +765,7 @@ public class SyncStorageEngine {
                     new Bundle(),
                     syncExemptionFlag, callingUid, callingPid);
         }
-        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, userId);
+        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, authority.target);
         queueBackup();
     }
 
@@ -812,7 +833,7 @@ public class SyncStorageEngine {
             requestSync(aInfo, SyncOperation.REASON_IS_SYNCABLE, new Bundle(),
                     ContentResolver.SYNC_EXEMPTION_NONE, callingUid, callingPid);
         }
-        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, target.userId);
+        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, target);
     }
 
     public Pair<Long, Long> getBackoff(EndPoint info) {
@@ -858,7 +879,7 @@ public class SyncStorageEngine {
             }
         }
         if (changed) {
-            reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, info.userId);
+            reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, info);
         }
     }
 
@@ -920,7 +941,8 @@ public class SyncStorageEngine {
         }
 
         for (int i = changedUserIds.size() - 1; i > 0; i--) {
-            reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, changedUserIds.valueAt(i));
+            reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS,
+                    null /* callingPackageName */, changedUserIds.valueAt(i));
         }
     }
 
@@ -946,7 +968,7 @@ public class SyncStorageEngine {
             }
             authority.delayUntil = delayUntil;
         }
-        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, info.userId);
+        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, info);
     }
 
     /**
@@ -989,7 +1011,8 @@ public class SyncStorageEngine {
                     new Bundle(),
                     syncExemptionFlag, callingUid, callingPid);
         }
-        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS, userId);
+        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_SETTINGS,
+                null /* callingPackageName */, userId);
         mContext.sendBroadcast(ContentResolver.ACTION_SYNC_CONN_STATUS_CHANGED);
         queueBackup();
     }
@@ -1040,7 +1063,7 @@ public class SyncStorageEngine {
             SyncStatusInfo status = getOrCreateSyncStatusLocked(authority.ident);
             status.pending = pendingValue;
         }
-        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_PENDING, info.userId);
+        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_PENDING, info);
     }
 
     /**
@@ -1130,7 +1153,7 @@ public class SyncStorageEngine {
                     activeSyncContext.mStartTime);
             getCurrentSyncs(authorityInfo.target.userId).add(syncInfo);
         }
-        reportActiveChange(activeSyncContext.mSyncOperation.target.userId);
+        reportActiveChange(activeSyncContext.mSyncOperation.target);
         return syncInfo;
     }
 
@@ -1147,14 +1170,14 @@ public class SyncStorageEngine {
             getCurrentSyncs(userId).remove(syncInfo);
         }
 
-        reportActiveChange(userId);
+        reportActiveChange(new EndPoint(syncInfo.account, syncInfo.authority, userId));
     }
 
     /**
      * To allow others to send active change reports, to poke clients.
      */
-    public void reportActiveChange(int userId) {
-        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_ACTIVE, userId);
+    public void reportActiveChange(EndPoint target) {
+        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_ACTIVE, target);
     }
 
     /**
@@ -1189,12 +1212,13 @@ public class SyncStorageEngine {
             if (Log.isLoggable(TAG, Log.VERBOSE)) Slog.v(TAG, "returning historyId " + id);
         }
 
-        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_STATUS, op.target.userId);
+        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_STATUS, op.owningPackage, op.target.userId);
         return id;
     }
 
     public void stopSyncEvent(long historyId, long elapsedTime, String resultMessage,
-                              long downstreamActivity, long upstreamActivity, int userId) {
+                              long downstreamActivity, long upstreamActivity, String opPackageName,
+                              int userId) {
         synchronized (mAuthorities) {
             if (Log.isLoggable(TAG, Log.VERBOSE)) {
                 Slog.v(TAG, "stopSyncEvent: historyId=" + historyId);
@@ -1334,7 +1358,7 @@ public class SyncStorageEngine {
             }
         }
 
-        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_STATUS, userId);
+        reportChange(ContentResolver.SYNC_OBSERVER_TYPE_STATUS, opPackageName, userId);
     }
 
     /**
@@ -1635,8 +1659,7 @@ public class SyncStorageEngine {
             if (Log.isLoggable(TAG_FILE, Log.VERBOSE)) {
                 Slog.v(TAG_FILE, "Reading " + mAccountInfoFile.getBaseFile());
             }
-            XmlPullParser parser = Xml.newPullParser();
-            parser.setInput(fis, StandardCharsets.UTF_8.name());
+            TypedXmlPullParser parser = Xml.resolvePullParser(fis);
             int eventType = parser.getEventType();
             while (eventType != XmlPullParser.START_TAG &&
                     eventType != XmlPullParser.END_DOCUMENT) {
@@ -1649,37 +1672,23 @@ public class SyncStorageEngine {
 
             String tagName = parser.getName();
             if ("accounts".equals(tagName)) {
-                String listen = parser.getAttributeValue(null, XML_ATTR_LISTEN_FOR_TICKLES);
-                String versionString = parser.getAttributeValue(null, "version");
-                int version;
-                try {
-                    version = (versionString == null) ? 0 : Integer.parseInt(versionString);
-                } catch (NumberFormatException e) {
-                    version = 0;
-                }
+                boolean listen = parser.getAttributeBoolean(
+                        null, XML_ATTR_LISTEN_FOR_TICKLES, true);
+                int version = parser.getAttributeInt(null, "version", 0);
 
                 if (version < 3) {
                     mGrantSyncAdaptersAccountAccess = true;
                 }
 
-                String nextIdString = parser.getAttributeValue(null, XML_ATTR_NEXT_AUTHORITY_ID);
-                try {
-                    int id = (nextIdString == null) ? 0 : Integer.parseInt(nextIdString);
-                    mNextAuthorityId = Math.max(mNextAuthorityId, id);
-                } catch (NumberFormatException e) {
-                    // don't care
-                }
-                String offsetString = parser.getAttributeValue(null, XML_ATTR_SYNC_RANDOM_OFFSET);
-                try {
-                    mSyncRandomOffset = (offsetString == null) ? 0 : Integer.parseInt(offsetString);
-                } catch (NumberFormatException e) {
-                    mSyncRandomOffset = 0;
-                }
+                int nextId = parser.getAttributeInt(null, XML_ATTR_NEXT_AUTHORITY_ID, 0);
+                mNextAuthorityId = Math.max(mNextAuthorityId, nextId);
+
+                mSyncRandomOffset = parser.getAttributeInt(null, XML_ATTR_SYNC_RANDOM_OFFSET, 0);
                 if (mSyncRandomOffset == 0) {
                     Random random = new Random(System.currentTimeMillis());
                     mSyncRandomOffset = random.nextInt(86400);
                 }
-                mMasterSyncAutomatically.put(0, listen == null || Boolean.parseBoolean(listen));
+                mMasterSyncAutomatically.put(0, listen);
                 eventType = parser.next();
                 AuthorityInfo authority = null;
                 PeriodicSync periodicSync = null;
@@ -1803,42 +1812,35 @@ public class SyncStorageEngine {
         return writeNeeded;
     }
 
-    private void parseListenForTickles(XmlPullParser parser) {
-        String user = parser.getAttributeValue(null, XML_ATTR_USER);
+    private void parseListenForTickles(TypedXmlPullParser parser) {
         int userId = 0;
         try {
-            userId = Integer.parseInt(user);
-        } catch (NumberFormatException e) {
+            parser.getAttributeInt(null, XML_ATTR_USER);
+        } catch (XmlPullParserException e) {
             Slog.e(TAG, "error parsing the user for listen-for-tickles", e);
-        } catch (NullPointerException e) {
-            Slog.e(TAG, "the user in listen-for-tickles is null", e);
         }
-        String enabled = parser.getAttributeValue(null, XML_ATTR_ENABLED);
-        boolean listen = enabled == null || Boolean.parseBoolean(enabled);
+        boolean listen = parser.getAttributeBoolean(null, XML_ATTR_ENABLED, true);
         mMasterSyncAutomatically.put(userId, listen);
     }
 
-    private AuthorityInfo parseAuthority(XmlPullParser parser, int version,
-            AccountAuthorityValidator validator) {
+    private AuthorityInfo parseAuthority(TypedXmlPullParser parser, int version,
+            AccountAuthorityValidator validator) throws XmlPullParserException {
         AuthorityInfo authority = null;
         int id = -1;
         try {
-            id = Integer.parseInt(parser.getAttributeValue(null, "id"));
-        } catch (NumberFormatException e) {
+            id = parser.getAttributeInt(null, "id");
+        } catch (XmlPullParserException e) {
             Slog.e(TAG, "error parsing the id of the authority", e);
-        } catch (NullPointerException e) {
-            Slog.e(TAG, "the id of the authority is null", e);
         }
         if (id >= 0) {
             String authorityName = parser.getAttributeValue(null, "authority");
-            String enabled = parser.getAttributeValue(null, XML_ATTR_ENABLED);
+            boolean enabled = parser.getAttributeBoolean(null, XML_ATTR_ENABLED, true);
             String syncable = parser.getAttributeValue(null, "syncable");
             String accountName = parser.getAttributeValue(null, "account");
             String accountType = parser.getAttributeValue(null, "type");
-            String user = parser.getAttributeValue(null, XML_ATTR_USER);
+            int userId = parser.getAttributeInt(null, XML_ATTR_USER, 0);
             String packageName = parser.getAttributeValue(null, "package");
             String className = parser.getAttributeValue(null, "class");
-            int userId = user == null ? 0 : Integer.parseInt(user);
             if (accountType == null && packageName == null) {
                 accountType = "com.google";
                 syncable = String.valueOf(AuthorityInfo.NOT_INITIALIZED);
@@ -1883,7 +1885,7 @@ public class SyncStorageEngine {
                 }
             }
             if (authority != null) {
-                authority.enabled = enabled == null || Boolean.parseBoolean(enabled);
+                authority.enabled = enabled;
                 try {
                     authority.syncable = (syncable == null) ?
                             AuthorityInfo.NOT_INITIALIZED : Integer.parseInt(syncable);
@@ -1911,32 +1913,22 @@ public class SyncStorageEngine {
     /**
      * Parse a periodic sync from accounts.xml. Sets the bundle to be empty.
      */
-    private PeriodicSync parsePeriodicSync(XmlPullParser parser, AuthorityInfo authorityInfo) {
+    private PeriodicSync parsePeriodicSync(TypedXmlPullParser parser, AuthorityInfo authorityInfo) {
         Bundle extras = new Bundle(); // Gets filled in later.
-        String periodValue = parser.getAttributeValue(null, "period");
-        String flexValue = parser.getAttributeValue(null, "flex");
-        final long period;
+        long period;
         long flextime;
         try {
-            period = Long.parseLong(periodValue);
-        } catch (NumberFormatException e) {
+            period = parser.getAttributeLong(null, "period");
+        } catch (XmlPullParserException e) {
             Slog.e(TAG, "error parsing the period of a periodic sync", e);
-            return null;
-        } catch (NullPointerException e) {
-            Slog.e(TAG, "the period of a periodic sync is null", e);
             return null;
         }
         try {
-            flextime = Long.parseLong(flexValue);
-        } catch (NumberFormatException e) {
+            flextime = parser.getAttributeLong(null, "flex");
+        } catch (XmlPullParserException e) {
             flextime = calculateDefaultFlexTime(period);
-            Slog.e(TAG, "Error formatting value parsed for periodic sync flex: " + flexValue
-                    + ", using default: "
-                    + flextime);
-        } catch (NullPointerException expected) {
-            flextime = calculateDefaultFlexTime(period);
-            Slog.d(TAG, "No flex time specified for this sync, using a default. period: "
-                    + period + " flex: " + flextime);
+            Slog.e(TAG, "Error formatting value parsed for periodic sync flex, using default: "
+                    + flextime, e);
         }
         PeriodicSync periodicSync;
         periodicSync =
@@ -1948,31 +1940,29 @@ public class SyncStorageEngine {
         return periodicSync;
     }
 
-    private void parseExtra(XmlPullParser parser, Bundle extras) {
+    private void parseExtra(TypedXmlPullParser parser, Bundle extras) {
         String name = parser.getAttributeValue(null, "name");
         String type = parser.getAttributeValue(null, "type");
-        String value1 = parser.getAttributeValue(null, "value1");
-        String value2 = parser.getAttributeValue(null, "value2");
 
         try {
             if ("long".equals(type)) {
-                extras.putLong(name, Long.parseLong(value1));
+                extras.putLong(name, parser.getAttributeLong(null, "value1"));
             } else if ("integer".equals(type)) {
-                extras.putInt(name, Integer.parseInt(value1));
+                extras.putInt(name, parser.getAttributeInt(null, "value1"));
             } else if ("double".equals(type)) {
-                extras.putDouble(name, Double.parseDouble(value1));
+                extras.putDouble(name, parser.getAttributeDouble(null, "value1"));
             } else if ("float".equals(type)) {
-                extras.putFloat(name, Float.parseFloat(value1));
+                extras.putFloat(name, parser.getAttributeFloat(null, "value1"));
             } else if ("boolean".equals(type)) {
-                extras.putBoolean(name, Boolean.parseBoolean(value1));
+                extras.putBoolean(name, parser.getAttributeBoolean(null, "value1"));
             } else if ("string".equals(type)) {
-                extras.putString(name, value1);
+                extras.putString(name, parser.getAttributeValue(null, "value1"));
             } else if ("account".equals(type)) {
+                final String value1 = parser.getAttributeValue(null, "value1");
+                final String value2 = parser.getAttributeValue(null, "value2");
                 extras.putParcelable(name, new Account(value1, value2));
             }
-        } catch (NumberFormatException e) {
-            Slog.e(TAG, "error parsing bundle value", e);
-        } catch (NullPointerException e) {
+        } catch (XmlPullParserException e) {
             Slog.e(TAG, "error parsing bundle value", e);
         }
     }
@@ -1988,15 +1978,14 @@ public class SyncStorageEngine {
 
         try {
             fos = mAccountInfoFile.startWrite();
-            XmlSerializer out = new FastXmlSerializer();
-            out.setOutput(fos, StandardCharsets.UTF_8.name());
+            TypedXmlSerializer out = Xml.resolveSerializer(fos);
             out.startDocument(null, true);
             out.setFeature("http://xmlpull.org/v1/doc/features.html#indent-output", true);
 
             out.startTag(null, "accounts");
-            out.attribute(null, "version", Integer.toString(ACCOUNTS_VERSION));
-            out.attribute(null, XML_ATTR_NEXT_AUTHORITY_ID, Integer.toString(mNextAuthorityId));
-            out.attribute(null, XML_ATTR_SYNC_RANDOM_OFFSET, Integer.toString(mSyncRandomOffset));
+            out.attributeInt(null, "version", ACCOUNTS_VERSION);
+            out.attributeInt(null, XML_ATTR_NEXT_AUTHORITY_ID, mNextAuthorityId);
+            out.attributeInt(null, XML_ATTR_SYNC_RANDOM_OFFSET, mSyncRandomOffset);
 
             // Write the Sync Automatically flags for each user
             final int M = mMasterSyncAutomatically.size();
@@ -2004,8 +1993,8 @@ public class SyncStorageEngine {
                 int userId = mMasterSyncAutomatically.keyAt(m);
                 Boolean listen = mMasterSyncAutomatically.valueAt(m);
                 out.startTag(null, XML_TAG_LISTEN_FOR_TICKLES);
-                out.attribute(null, XML_ATTR_USER, Integer.toString(userId));
-                out.attribute(null, XML_ATTR_ENABLED, Boolean.toString(listen));
+                out.attributeInt(null, XML_ATTR_USER, userId);
+                out.attributeBoolean(null, XML_ATTR_ENABLED, listen);
                 out.endTag(null, XML_TAG_LISTEN_FOR_TICKLES);
             }
 
@@ -2014,13 +2003,13 @@ public class SyncStorageEngine {
                 AuthorityInfo authority = mAuthorities.valueAt(i);
                 EndPoint info = authority.target;
                 out.startTag(null, "authority");
-                out.attribute(null, "id", Integer.toString(authority.ident));
-                out.attribute(null, XML_ATTR_USER, Integer.toString(info.userId));
-                out.attribute(null, XML_ATTR_ENABLED, Boolean.toString(authority.enabled));
+                out.attributeInt(null, "id", authority.ident);
+                out.attributeInt(null, XML_ATTR_USER, info.userId);
+                out.attributeBoolean(null, XML_ATTR_ENABLED, authority.enabled);
                 out.attribute(null, "account", info.account.name);
                 out.attribute(null, "type", info.account.type);
                 out.attribute(null, "authority", info.provider);
-                out.attribute(null, "syncable", Integer.toString(authority.syncable));
+                out.attributeInt(null, "syncable", authority.syncable);
                 out.endTag(null, "authority");
             }
             out.endTag(null, "accounts");
@@ -2432,10 +2421,10 @@ public class SyncStorageEngine {
     public static final int STATISTICS_FILE_ITEM = 101;
 
     private void readStatsParcelLocked(File parcel) {
+        Parcel in = Parcel.obtain();
         try {
             final AtomicFile parcelFile = new AtomicFile(parcel);
             byte[] data = parcelFile.readFully();
-            Parcel in = Parcel.obtain();
             in.unmarshall(data, 0, data.length);
             in.setDataPosition(0);
             int token;
@@ -2463,6 +2452,8 @@ public class SyncStorageEngine {
             }
         } catch (IOException e) {
             Slog.i(TAG, "No initial statistics");
+        } finally {
+            in.recycle();
         }
     }
 

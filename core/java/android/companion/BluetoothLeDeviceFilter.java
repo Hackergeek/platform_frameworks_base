@@ -30,6 +30,7 @@ import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanRecord;
 import android.bluetooth.le.ScanResult;
 import android.compat.annotation.UnsupportedAppUsage;
+import android.os.Build;
 import android.os.Parcel;
 import android.provider.OneTimeUseBuilder;
 import android.text.TextUtils;
@@ -74,7 +75,7 @@ public final class BluetoothLeDeviceFilter implements DeviceFilter<ScanResult> {
             String renameSuffix, int renameBytesFrom, int renameBytesLength,
             int renameNameFrom, int renameNameLength, boolean renameBytesReverseOrder) {
         mNamePattern = namePattern;
-        mScanFilter = ObjectUtils.firstNotNull(scanFilter, ScanFilter.EMPTY);
+        mScanFilter = ObjectUtils.firstNotNull(scanFilter, new ScanFilter.Builder().build());
         mRawDataFilter = rawDataFilter;
         mRawDataFilterMask = rawDataFilterMask;
         mRenamePrefix = renamePrefix;
@@ -94,7 +95,7 @@ public final class BluetoothLeDeviceFilter implements DeviceFilter<ScanResult> {
 
     /** @hide */
     @NonNull
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public ScanFilter getScanFilter() {
         return mScanFilter;
     }
@@ -184,7 +185,7 @@ public final class BluetoothLeDeviceFilter implements DeviceFilter<ScanResult> {
     }
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         BluetoothLeDeviceFilter that = (BluetoothLeDeviceFilter) o;
@@ -203,9 +204,10 @@ public final class BluetoothLeDeviceFilter implements DeviceFilter<ScanResult> {
 
     @Override
     public int hashCode() {
-        return Objects.hash(mNamePattern, mScanFilter, mRawDataFilter, mRawDataFilterMask,
-                mRenamePrefix, mRenameSuffix, mRenameBytesFrom, mRenameBytesLength,
-                mRenameNameFrom, mRenameNameLength, mRenameBytesReverseOrder);
+        return Objects.hash(mNamePattern, mScanFilter, Arrays.hashCode(mRawDataFilter),
+                Arrays.hashCode(mRawDataFilterMask), mRenamePrefix, mRenameSuffix,
+                mRenameBytesFrom, mRenameBytesLength, mRenameNameFrom, mRenameNameLength,
+                mRenameBytesReverseOrder);
     }
 
     @Override
@@ -251,7 +253,7 @@ public final class BluetoothLeDeviceFilter implements DeviceFilter<ScanResult> {
         public BluetoothLeDeviceFilter createFromParcel(Parcel in) {
             Builder builder = new Builder()
                     .setNamePattern(patternFromString(in.readString()))
-                    .setScanFilter(in.readParcelable(null));
+                    .setScanFilter(in.readParcelable(null, android.bluetooth.le.ScanFilter.class));
             byte[] rawDataFilter = in.createByteArray();
             byte[] rawDataFilterMask = in.createByteArray();
             if (rawDataFilter != null) {

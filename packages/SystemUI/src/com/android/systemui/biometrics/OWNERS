@@ -1,7 +1,4 @@
 set noparent
 
-kchyn@google.com
-jaggies@google.com
-curtislb@google.com
-ilyamaty@google.com
-joshmccloskey@google.com
+include /services/core/java/com/android/server/biometrics/OWNERS
+beverlyt@google.com

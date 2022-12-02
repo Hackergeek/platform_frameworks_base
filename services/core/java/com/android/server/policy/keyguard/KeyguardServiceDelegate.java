@@ -15,6 +15,7 @@ import android.content.res.Resources;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.util.Log;
@@ -65,7 +66,7 @@ public class KeyguardServiceDelegate {
         boolean showing;
         boolean showingAndNotOccluded;
         boolean inputRestricted;
-        boolean occluded;
+        volatile boolean occluded;
         boolean secure;
         boolean dreaming;
         boolean systemIsReady;
@@ -176,7 +177,8 @@ public class KeyguardServiceDelegate {
                 // This is used to hide the scrim once keyguard displays.
                 if (mKeyguardState.interactiveState == INTERACTIVE_STATE_AWAKE
                         || mKeyguardState.interactiveState == INTERACTIVE_STATE_WAKING) {
-                    mKeyguardService.onStartedWakingUp();
+                    mKeyguardService.onStartedWakingUp(PowerManager.WAKE_REASON_UNKNOWN,
+                            false /* cameraGestureTriggered */);
                 }
                 if (mKeyguardState.interactiveState == INTERACTIVE_STATE_AWAKE) {
                     mKeyguardService.onFinishedWakingUp();
@@ -232,13 +234,6 @@ public class KeyguardServiceDelegate {
         return false;
     }
 
-    public boolean hasLockscreenWallpaper() {
-        if (mKeyguardService != null) {
-            return mKeyguardService.hasLockscreenWallpaper();
-        }
-        return false;
-    }
-
     public boolean hasKeyguard() {
         return mKeyguardState.deviceHasKeyguard;
     }
@@ -256,12 +251,16 @@ public class KeyguardServiceDelegate {
         }
     }
 
-    public void setOccluded(boolean isOccluded, boolean animate) {
-        if (mKeyguardService != null) {
+    public void setOccluded(boolean isOccluded, boolean animate, boolean notify) {
+        if (mKeyguardService != null && notify) {
             if (DEBUG) Log.v(TAG, "setOccluded(" + isOccluded + ") animate=" + animate);
             mKeyguardService.setOccluded(isOccluded, animate);
         }
         mKeyguardState.occluded = isOccluded;
+    }
+
+    public boolean isOccluded() {
+        return mKeyguardState.occluded;
     }
 
     public void dismiss(IKeyguardDismissCallback callback, CharSequence message) {
@@ -291,10 +290,11 @@ public class KeyguardServiceDelegate {
         mKeyguardState.dreaming = false;
     }
 
-    public void onStartedWakingUp() {
+    public void onStartedWakingUp(
+            @PowerManager.WakeReason int pmWakeReason, boolean cameraGestureTriggered) {
         if (mKeyguardService != null) {
             if (DEBUG) Log.v(TAG, "onStartedWakingUp()");
-            mKeyguardService.onStartedWakingUp();
+            mKeyguardService.onStartedWakingUp(pmWakeReason, cameraGestureTriggered);
         }
         mKeyguardState.interactiveState = INTERACTIVE_STATE_WAKING;
     }
@@ -345,17 +345,19 @@ public class KeyguardServiceDelegate {
         mKeyguardState.screenState = SCREEN_STATE_ON;
     }
 
-    public void onStartedGoingToSleep(int why) {
+    public void onStartedGoingToSleep(@PowerManager.GoToSleepReason int pmSleepReason) {
         if (mKeyguardService != null) {
-            mKeyguardService.onStartedGoingToSleep(why);
+            mKeyguardService.onStartedGoingToSleep(pmSleepReason);
         }
-        mKeyguardState.offReason = why;
+        mKeyguardState.offReason =
+                WindowManagerPolicyConstants.translateSleepReasonToOffReason(pmSleepReason);
         mKeyguardState.interactiveState = INTERACTIVE_STATE_GOING_TO_SLEEP;
     }
 
-    public void onFinishedGoingToSleep(int why, boolean cameraGestureTriggered) {
+    public void onFinishedGoingToSleep(
+            @PowerManager.GoToSleepReason int pmSleepReason, boolean cameraGestureTriggered) {
         if (mKeyguardService != null) {
-            mKeyguardService.onFinishedGoingToSleep(why, cameraGestureTriggered);
+            mKeyguardService.onFinishedGoingToSleep(pmSleepReason, cameraGestureTriggered);
         }
         mKeyguardState.interactiveState = INTERACTIVE_STATE_SLEEP;
     }
@@ -410,6 +412,17 @@ public class KeyguardServiceDelegate {
     public void onShortPowerPressedGoHome() {
         if (mKeyguardService != null) {
             mKeyguardService.onShortPowerPressedGoHome();
+        }
+    }
+
+    public void dismissKeyguardToLaunch(Intent intentToLaunch) {
+        if (mKeyguardService != null) {
+            mKeyguardService.dismissKeyguardToLaunch(intentToLaunch);
+        }
+    }
+    public void onSystemKeyPressed(int keycode) {
+        if (mKeyguardService != null) {
+            mKeyguardService.onSystemKeyPressed(keycode);
         }
     }
 

@@ -6,10 +6,10 @@ import static android.os.ParcelFileDescriptor.MODE_READ_WRITE;
 import static android.os.ParcelFileDescriptor.MODE_TRUNCATE;
 
 import static com.android.server.backup.UserBackupManagerService.BACKUP_MANIFEST_FILENAME;
-import static com.android.server.backup.UserBackupManagerService.OP_TYPE_BACKUP_WAIT;
 
 import android.app.ApplicationThreadConstants;
 import android.app.IBackupAgent;
+import android.app.backup.BackupManager;
 import android.app.backup.FullBackup;
 import android.app.backup.FullBackupDataOutput;
 import android.app.backup.IBackupCallback;
@@ -21,6 +21,7 @@ import android.os.RemoteException;
 import android.os.SELinux;
 import android.util.Slog;
 
+import com.android.server.backup.OperationStorage.OpType;
 import com.android.server.backup.fullbackup.AppMetadataBackupWriter;
 import com.android.server.backup.remote.ServiceBackupCallback;
 import com.android.server.backup.utils.FullBackupUtils;
@@ -146,7 +147,8 @@ public class KeyValueAdbBackupEngine {
     private IBackupAgent bindToAgent(ApplicationInfo targetApp) {
         try {
             return mBackupManagerService.bindToAgentSynchronous(targetApp,
-                    ApplicationThreadConstants.BACKUP_MODE_INCREMENTAL);
+                    ApplicationThreadConstants.BACKUP_MODE_INCREMENTAL,
+                    BackupManager.OperationType.BACKUP);
         } catch (SecurityException e) {
             Slog.e(TAG, "error in binding to agent for package " + targetApp.packageName
                     + ". " + e);
@@ -160,7 +162,7 @@ public class KeyValueAdbBackupEngine {
         long kvBackupAgentTimeoutMillis = mAgentTimeoutParameters.getKvBackupAgentTimeoutMillis();
         try {
             mBackupManagerService.prepareOperationTimeout(token, kvBackupAgentTimeoutMillis, null,
-                    OP_TYPE_BACKUP_WAIT);
+                    OpType.BACKUP_WAIT);
 
             IBackupCallback callback =
                     new ServiceBackupCallback(
@@ -260,7 +262,7 @@ public class KeyValueAdbBackupEngine {
             pipes = ParcelFileDescriptor.createPipe();
 
             mBackupManagerService.prepareOperationTimeout(token, kvBackupAgentTimeoutMillis, null,
-                    OP_TYPE_BACKUP_WAIT);
+                    OpType.BACKUP_WAIT);
 
             // We will have to create a runnable that will read the manifest and backup data we
             // created, such that we can pipe the data into mOutput. The reason we do this is that

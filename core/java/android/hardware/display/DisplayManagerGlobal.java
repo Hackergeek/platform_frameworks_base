@@ -16,6 +16,11 @@
 
 package android.hardware.display;
 
+
+import static android.hardware.display.DisplayManager.EventsMask;
+import static android.view.Display.HdrCapabilities.HdrType;
+
+import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.PropertyInvalidatedCache;
@@ -26,6 +31,7 @@ import android.content.res.Resources;
 import android.graphics.ColorSpace;
 import android.graphics.Point;
 import android.hardware.display.DisplayManager.DisplayListener;
+import android.hardware.graphics.common.DisplayDecorationSupport;
 import android.media.projection.IMediaProjection;
 import android.media.projection.MediaProjection;
 import android.os.Handler;
@@ -42,9 +48,15 @@ import android.view.DisplayAdjustments;
 import android.view.DisplayInfo;
 import android.view.Surface;
 
+import com.android.internal.annotations.VisibleForTesting;
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.Executor;
 
 /**
  * Manager communication with the display manager service on behalf of
@@ -66,31 +78,43 @@ public final class DisplayManagerGlobal {
     // orientation change before the display info cache has actually been invalidated.
     private static final boolean USE_CACHE = false;
 
+    @IntDef(prefix = {"SWITCHING_TYPE_"}, value = {
+            EVENT_DISPLAY_ADDED,
+            EVENT_DISPLAY_CHANGED,
+            EVENT_DISPLAY_REMOVED,
+            EVENT_DISPLAY_BRIGHTNESS_CHANGED
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface DisplayEvent {}
+
     public static final int EVENT_DISPLAY_ADDED = 1;
     public static final int EVENT_DISPLAY_CHANGED = 2;
     public static final int EVENT_DISPLAY_REMOVED = 3;
+    public static final int EVENT_DISPLAY_BRIGHTNESS_CHANGED = 4;
 
     @UnsupportedAppUsage
     private static DisplayManagerGlobal sInstance;
 
     // Guarded by mLock
     private boolean mDispatchNativeCallbacks = false;
+    private float mNativeCallbackReportedRefreshRate;
     private final Object mLock = new Object();
 
     @UnsupportedAppUsage
     private final IDisplayManager mDm;
 
     private DisplayManagerCallback mCallback;
-    private final ArrayList<DisplayListenerDelegate> mDisplayListeners =
-            new ArrayList<DisplayListenerDelegate>();
+    private @EventsMask long mRegisteredEventsMask = 0;
+    private final ArrayList<DisplayListenerDelegate> mDisplayListeners = new ArrayList<>();
 
-    private final SparseArray<DisplayInfo> mDisplayInfoCache = new SparseArray<DisplayInfo>();
+    private final SparseArray<DisplayInfo> mDisplayInfoCache = new SparseArray<>();
     private final ColorSpace mWideColorSpace;
     private int[] mDisplayIdCache;
 
     private int mWifiDisplayScanNestCount;
 
-    private DisplayManagerGlobal(IDisplayManager dm) {
+    @VisibleForTesting
+    public DisplayManagerGlobal(IDisplayManager dm) {
         mDm = dm;
         try {
             mWideColorSpace =
@@ -106,7 +130,7 @@ public final class DisplayManagerGlobal {
                 8, // size of display cache
                 CACHE_KEY_DISPLAY_INFO_PROPERTY) {
                 @Override
-                protected DisplayInfo recompute(Integer id) {
+                public DisplayInfo recompute(Integer id) {
                     try {
                         return mDm.getDisplayInfo(id);
                     } catch (RemoteException ex) {
@@ -182,6 +206,16 @@ public final class DisplayManagerGlobal {
      */
     @UnsupportedAppUsage
     public int[] getDisplayIds() {
+        return getDisplayIds(/* includeDisabledDisplays= */ false);
+    }
+
+    /**
+     * Gets all valid logical display ids and invalid ones if specified.
+     *
+     * @return An array containing all display ids.
+     */
+    @UnsupportedAppUsage
+    public int[] getDisplayIds(boolean includeDisabledDisplays) {
         try {
             synchronized (mLock) {
                 if (USE_CACHE) {
@@ -190,7 +224,8 @@ public final class DisplayManagerGlobal {
                     }
                 }
 
-                int[] displayIds = mDm.getDisplayIds();
+                int[] displayIds =
+                        mDm.getDisplayIds(includeDisabledDisplays);
                 if (USE_CACHE) {
                     mDisplayIdCache = displayIds;
                 }
@@ -274,18 +309,25 @@ public final class DisplayManagerGlobal {
      * If that is still null, a runtime exception will be thrown.
      */
     public void registerDisplayListener(@NonNull DisplayListener listener,
-            @Nullable Handler handler) {
+            @Nullable Handler handler, @EventsMask long eventsMask) {
         if (listener == null) {
             throw new IllegalArgumentException("listener must not be null");
+        }
+
+        if (eventsMask == 0) {
+            throw new IllegalArgumentException("The set of events to listen to must not be empty.");
         }
 
         synchronized (mLock) {
             int index = findDisplayListenerLocked(listener);
             if (index < 0) {
                 Looper looper = getLooperForHandler(handler);
-                mDisplayListeners.add(new DisplayListenerDelegate(listener, looper));
+                mDisplayListeners.add(new DisplayListenerDelegate(listener, looper, eventsMask));
                 registerCallbackIfNeededLocked();
+            } else {
+                mDisplayListeners.get(index).setEventsMask(eventsMask);
             }
+            updateCallbackIfNeededLocked();
         }
     }
 
@@ -300,6 +342,7 @@ public final class DisplayManagerGlobal {
                 DisplayListenerDelegate d = mDisplayListeners.get(index);
                 d.clearEvents();
                 mDisplayListeners.remove(index);
+                updateCallbackIfNeededLocked();
             }
         }
     }
@@ -325,18 +368,41 @@ public final class DisplayManagerGlobal {
         return -1;
     }
 
+    @EventsMask
+    private int calculateEventsMaskLocked() {
+        int mask = 0;
+        final int numListeners = mDisplayListeners.size();
+        for (int i = 0; i < numListeners; i++) {
+            mask |= mDisplayListeners.get(i).mEventsMask;
+        }
+        if (mDispatchNativeCallbacks) {
+            mask |= DisplayManager.EVENT_FLAG_DISPLAY_ADDED
+                    | DisplayManager.EVENT_FLAG_DISPLAY_CHANGED
+                    | DisplayManager.EVENT_FLAG_DISPLAY_REMOVED;
+        }
+        return mask;
+    }
+
     private void registerCallbackIfNeededLocked() {
         if (mCallback == null) {
             mCallback = new DisplayManagerCallback();
+            updateCallbackIfNeededLocked();
+        }
+    }
+
+    private void updateCallbackIfNeededLocked() {
+        int mask = calculateEventsMaskLocked();
+        if (mask != mRegisteredEventsMask) {
             try {
-                mDm.registerCallback(mCallback);
+                mDm.registerCallbackWithEventMask(mCallback, mask);
+                mRegisteredEventsMask = mask;
             } catch (RemoteException ex) {
                 throw ex.rethrowFromSystemServer();
             }
         }
     }
 
-    private void handleDisplayEvent(int displayId, int event) {
+    private void handleDisplayEvent(int displayId, @DisplayEvent int event) {
         synchronized (mLock) {
             if (USE_CACHE) {
                 mDisplayInfoCache.remove(displayId);
@@ -347,8 +413,9 @@ public final class DisplayManagerGlobal {
             }
 
             final int numListeners = mDisplayListeners.size();
+            DisplayInfo info = getDisplayInfo(displayId);
             for (int i = 0; i < numListeners; i++) {
-                mDisplayListeners.get(i).sendDisplayEvent(displayId, event);
+                mDisplayListeners.get(i).sendDisplayEvent(displayId, event, info);
             }
             if (event == EVENT_DISPLAY_CHANGED && mDispatchNativeCallbacks) {
                 // Choreographer only supports a single display, so only dispatch refresh rate
@@ -357,10 +424,11 @@ public final class DisplayManagerGlobal {
                     // We can likely save a binder hop if we attach the refresh rate onto the
                     // listener.
                     DisplayInfo display = getDisplayInfoLocked(displayId);
-                    if (display != null) {
-                        float refreshRate = display.getMode().getRefreshRate();
+                    if (display != null
+                            && mNativeCallbackReportedRefreshRate != display.getRefreshRate()) {
+                        mNativeCallbackReportedRefreshRate = display.getRefreshRate();
                         // Signal native callbacks if we ever set a refresh rate.
-                        nSignalNativeCallbacks(refreshRate);
+                        nSignalNativeCallbacks(mNativeCallbackReportedRefreshRate);
                     }
                 }
             }
@@ -466,6 +534,59 @@ public final class DisplayManagerGlobal {
         }
     }
 
+    /**
+     * Sets the HDR types that have been disabled by user.
+     * @param userDisabledHdrTypes the HDR types to disable. The HDR types are any of
+     */
+    public void setUserDisabledHdrTypes(@HdrType int[] userDisabledHdrTypes) {
+        try {
+            mDm.setUserDisabledHdrTypes(userDisabledHdrTypes);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Sets whether or not the user disabled HDR types are returned from
+     * {@link Display#getHdrCapabilities}.
+     *
+     * @param areUserDisabledHdrTypesAllowed If true, the user-disabled
+     * types are ignored and returned, if the display supports them. If
+     * false, the user-disabled types are taken into consideration and
+     * are never returned, even if the display supports them.
+     */
+    public void setAreUserDisabledHdrTypesAllowed(boolean areUserDisabledHdrTypesAllowed) {
+        try {
+            mDm.setAreUserDisabledHdrTypesAllowed(areUserDisabledHdrTypesAllowed);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns whether or not the user-disabled HDR types are returned from
+     * {@link Display#getHdrCapabilities}.
+     */
+    public boolean areUserDisabledHdrTypesAllowed() {
+        try {
+            return mDm.areUserDisabledHdrTypesAllowed();
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the HDR formats disabled by the user.
+     *
+     */
+    public int[] getUserDisabledHdrTypes() {
+        try {
+            return mDm.getUserDisabledHdrTypes();
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
     public void requestColorMode(int displayId, int colorMode) {
         try {
             mDm.requestColorMode(displayId, colorMode);
@@ -476,8 +597,8 @@ public final class DisplayManagerGlobal {
 
     public VirtualDisplay createVirtualDisplay(@NonNull Context context, MediaProjection projection,
             @NonNull VirtualDisplayConfig virtualDisplayConfig, VirtualDisplay.Callback callback,
-            Handler handler) {
-        VirtualDisplayCallback callbackWrapper = new VirtualDisplayCallback(callback, handler);
+            @Nullable Executor executor, @Nullable Context windowContext) {
+        VirtualDisplayCallback callbackWrapper = new VirtualDisplayCallback(callback, executor);
         IMediaProjection projectionToken = projection != null ? projection.getProjection() : null;
         int displayId;
         try {
@@ -486,6 +607,17 @@ public final class DisplayManagerGlobal {
         } catch (RemoteException ex) {
             throw ex.rethrowFromSystemServer();
         }
+        return createVirtualDisplayWrapper(virtualDisplayConfig, windowContext, callbackWrapper,
+                displayId);
+    }
+
+    /**
+     * Create a VirtualDisplay wrapper object for a newly created virtual display ; to be called
+     * once the display has been created in system_server.
+     */
+    @Nullable
+    public VirtualDisplay createVirtualDisplayWrapper(VirtualDisplayConfig virtualDisplayConfig,
+            Context windowContext, IVirtualDisplayCallback callbackWrapper, int displayId) {
         if (displayId < 0) {
             Log.e(TAG, "Could not create virtual display: " + virtualDisplayConfig.getName());
             return null;
@@ -502,7 +634,7 @@ public final class DisplayManagerGlobal {
             return null;
         }
         return new VirtualDisplay(this, display, callbackWrapper,
-                virtualDisplayConfig.getSurface());
+                virtualDisplayConfig.getSurface(), windowContext);
     }
 
     public void setVirtualDisplaySurface(IVirtualDisplayCallback token, Surface surface) {
@@ -567,6 +699,17 @@ public final class DisplayManagerGlobal {
     }
 
     /**
+     * Retrieves Brightness Info for the specified display.
+     */
+    public BrightnessInfo getBrightnessInfo(int displayId) {
+        try {
+            return mDm.getBrightnessInfo(displayId);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
      * Gets the preferred wide gamut color space for all displays.
      * The wide gamut color space is returned from composition pipeline
      * based on hardware capability.
@@ -586,6 +729,34 @@ public final class DisplayManagerGlobal {
             String packageName) {
         try {
             mDm.setBrightnessConfigurationForUser(c, userId, packageName);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Sets the brightness configuration for a given display.
+     *
+     * @hide
+     */
+    public void setBrightnessConfigurationForDisplay(BrightnessConfiguration c,
+            String uniqueDisplayId, int userId, String packageName) {
+        try {
+            mDm.setBrightnessConfigurationForDisplay(c, uniqueDisplayId, userId, packageName);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Gets the brightness configuration for a given display or null if one hasn't been set.
+     *
+     * @hide
+     */
+    public BrightnessConfiguration getBrightnessConfigurationForDisplay(String uniqueDisplayId,
+            int userId) {
+        try {
+            return mDm.getBrightnessConfigurationForDisplay(uniqueDisplayId, userId);
         } catch (RemoteException ex) {
             throw ex.rethrowFromSystemServer();
         }
@@ -636,13 +807,59 @@ public final class DisplayManagerGlobal {
      * Requires the {@link android.Manifest.permission#CONTROL_DISPLAY_BRIGHTNESS} permission.
      * </p>
      *
-     * @param brightness The brightness value from 0 to 255.
+     * @param brightness The brightness value from 0.0f to 1.0f.
      *
      * @hide Requires signature permission.
      */
-    public void setTemporaryBrightness(float brightness) {
+    public void setTemporaryBrightness(int displayId, float brightness) {
         try {
-            mDm.setTemporaryBrightness(brightness);
+            mDm.setTemporaryBrightness(displayId, brightness);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+
+    /**
+     * Sets the brightness of the display.
+     *
+     * @param brightness The brightness value from 0.0f to 1.0f.
+     *
+     * @hide
+     */
+    public void setBrightness(int displayId, float brightness) {
+        try {
+            mDm.setBrightness(displayId, brightness);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Report whether/how the display supports DISPLAY_DECORATION.
+     *
+     * @param displayId The display whose support is being queried.
+     *
+     * @hide
+     */
+    public DisplayDecorationSupport getDisplayDecorationSupport(int displayId) {
+        try {
+            return mDm.getDisplayDecorationSupport(displayId);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Gets the brightness of the display.
+     *
+     * @param displayId The display from which to get the brightness
+     *
+     * @hide
+     */
+    public float getBrightness(int displayId) {
+        try {
+            return mDm.getBrightness(displayId);
         } catch (RemoteException ex) {
             throw ex.rethrowFromSystemServer();
         }
@@ -699,9 +916,96 @@ public final class DisplayManagerGlobal {
         }
     }
 
+    /**
+     * Sets the default display mode, according to the refresh rate and the resolution chosen by the
+     * user.
+     */
+    public void setUserPreferredDisplayMode(int displayId, Display.Mode mode) {
+        try {
+            mDm.setUserPreferredDisplayMode(displayId, mode);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the user preferred display mode.
+     */
+    public Display.Mode getUserPreferredDisplayMode(int displayId) {
+        try {
+            return mDm.getUserPreferredDisplayMode(displayId);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the system preferred display mode.
+     */
+    public Display.Mode getSystemPreferredDisplayMode(int displayId) {
+        try {
+            return mDm.getSystemPreferredDisplayMode(displayId);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * When enabled the app requested display resolution and refresh rate is always selected
+     * in DisplayModeDirector regardless of user settings and policies for low brightness, low
+     * battery etc.
+     */
+    public void setShouldAlwaysRespectAppRequestedMode(boolean enabled) {
+        try {
+            mDm.setShouldAlwaysRespectAppRequestedMode(enabled);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns whether DisplayModeDirector is running in a mode which always selects the app
+     * requested display mode and ignores user settings and policies for low brightness, low
+     * battery etc.
+     */
+    public boolean shouldAlwaysRespectAppRequestedMode() {
+        try {
+            return mDm.shouldAlwaysRespectAppRequestedMode();
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Sets the refresh rate switching type.
+     *
+     * @hide
+     */
+    public void setRefreshRateSwitchingType(@DisplayManager.SwitchingType int newValue) {
+        try {
+            mDm.setRefreshRateSwitchingType(newValue);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the refresh rate switching type.
+     *
+     * @hide
+     */
+    @DisplayManager.SwitchingType
+    public int getRefreshRateSwitchingType() {
+        try {
+            return mDm.getRefreshRateSwitchingType();
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
     private final class DisplayManagerCallback extends IDisplayManagerCallback.Stub {
         @Override
-        public void onDisplayEvent(int displayId, int event) {
+        public void onDisplayEvent(int displayId, @DisplayEvent int event) {
             if (DEBUG) {
                 Log.d(TAG, "onDisplayEvent: displayId=" + displayId + ", event=" + event);
             }
@@ -711,14 +1015,19 @@ public final class DisplayManagerGlobal {
 
     private static final class DisplayListenerDelegate extends Handler {
         public final DisplayListener mListener;
+        public volatile long mEventsMask;
 
-        DisplayListenerDelegate(DisplayListener listener, @NonNull Looper looper) {
+        private final DisplayInfo mDisplayInfo = new DisplayInfo();
+
+        DisplayListenerDelegate(DisplayListener listener, @NonNull Looper looper,
+                @EventsMask long eventsMask) {
             super(looper, null, true /*async*/);
             mListener = listener;
+            mEventsMask = eventsMask;
         }
 
-        public void sendDisplayEvent(int displayId, int event) {
-            Message msg = obtainMessage(event, displayId, 0);
+        public void sendDisplayEvent(int displayId, @DisplayEvent int event, DisplayInfo info) {
+            Message msg = obtainMessage(event, displayId, 0, info);
             sendMessage(msg);
         }
 
@@ -726,78 +1035,83 @@ public final class DisplayManagerGlobal {
             removeCallbacksAndMessages(null);
         }
 
+        public void setEventsMask(@EventsMask long newEventsMask) {
+            mEventsMask = newEventsMask;
+        }
+
         @Override
         public void handleMessage(Message msg) {
             switch (msg.what) {
                 case EVENT_DISPLAY_ADDED:
-                    mListener.onDisplayAdded(msg.arg1);
+                    if ((mEventsMask & DisplayManager.EVENT_FLAG_DISPLAY_ADDED) != 0) {
+                        mListener.onDisplayAdded(msg.arg1);
+                    }
                     break;
                 case EVENT_DISPLAY_CHANGED:
-                    mListener.onDisplayChanged(msg.arg1);
+                    if ((mEventsMask & DisplayManager.EVENT_FLAG_DISPLAY_CHANGED) != 0) {
+                        DisplayInfo newInfo = (DisplayInfo) msg.obj;
+                        if (newInfo != null && !newInfo.equals(mDisplayInfo)) {
+                            mDisplayInfo.copyFrom(newInfo);
+                            mListener.onDisplayChanged(msg.arg1);
+                        }
+                    }
+                    break;
+                case EVENT_DISPLAY_BRIGHTNESS_CHANGED:
+                    if ((mEventsMask & DisplayManager.EVENT_FLAG_DISPLAY_BRIGHTNESS) != 0) {
+                        mListener.onDisplayChanged(msg.arg1);
+                    }
                     break;
                 case EVENT_DISPLAY_REMOVED:
-                    mListener.onDisplayRemoved(msg.arg1);
+                    if ((mEventsMask & DisplayManager.EVENT_FLAG_DISPLAY_REMOVED) != 0) {
+                        mListener.onDisplayRemoved(msg.arg1);
+                    }
                     break;
             }
         }
     }
 
-    private final static class VirtualDisplayCallback extends IVirtualDisplayCallback.Stub {
-        private VirtualDisplayCallbackDelegate mDelegate;
+    /**
+     * Assists in dispatching VirtualDisplay lifecycle event callbacks on a given Executor.
+     */
+    public static final class VirtualDisplayCallback extends IVirtualDisplayCallback.Stub {
+        @Nullable private final VirtualDisplay.Callback mCallback;
+        @Nullable private final Executor mExecutor;
 
-        public VirtualDisplayCallback(VirtualDisplay.Callback callback, Handler handler) {
-            if (callback != null) {
-                mDelegate = new VirtualDisplayCallbackDelegate(callback, handler);
-            }
+        /**
+         * Creates a virtual display callback.
+         *
+         * @param callback The callback to call for virtual display events, or {@code null} if the
+         * caller does not wish to receive callback events.
+         * @param executor The executor to call the {@code callback} on. Must not be {@code null} if
+         * the callback is not {@code null}.
+         */
+        public VirtualDisplayCallback(VirtualDisplay.Callback callback, Executor executor) {
+            mCallback = callback;
+            mExecutor = mCallback != null ? Objects.requireNonNull(executor) : null;
         }
+
+        // These methods are called from the binder thread, but the AIDL is oneway, so it should be
+        // safe to call the callback on arbitrary executors directly without risking blocking
+        // the system.
 
         @Override // Binder call
         public void onPaused() {
-            if (mDelegate != null) {
-                mDelegate.sendEmptyMessage(VirtualDisplayCallbackDelegate.MSG_DISPLAY_PAUSED);
+            if (mCallback != null) {
+                mExecutor.execute(mCallback::onPaused);
             }
         }
 
         @Override // Binder call
         public void onResumed() {
-            if (mDelegate != null) {
-                mDelegate.sendEmptyMessage(VirtualDisplayCallbackDelegate.MSG_DISPLAY_RESUMED);
+            if (mCallback != null) {
+                mExecutor.execute(mCallback::onResumed);
             }
         }
 
         @Override // Binder call
         public void onStopped() {
-            if (mDelegate != null) {
-                mDelegate.sendEmptyMessage(VirtualDisplayCallbackDelegate.MSG_DISPLAY_STOPPED);
-            }
-        }
-    }
-
-    private final static class VirtualDisplayCallbackDelegate extends Handler {
-        public static final int MSG_DISPLAY_PAUSED = 0;
-        public static final int MSG_DISPLAY_RESUMED = 1;
-        public static final int MSG_DISPLAY_STOPPED = 2;
-
-        private final VirtualDisplay.Callback mCallback;
-
-        public VirtualDisplayCallbackDelegate(VirtualDisplay.Callback callback,
-                Handler handler) {
-            super(handler != null ? handler.getLooper() : Looper.myLooper(), null, true /*async*/);
-            mCallback = callback;
-        }
-
-        @Override
-        public void handleMessage(Message msg) {
-            switch (msg.what) {
-                case MSG_DISPLAY_PAUSED:
-                    mCallback.onPaused();
-                    break;
-                case MSG_DISPLAY_RESUMED:
-                    mCallback.onResumed();
-                    break;
-                case MSG_DISPLAY_STOPPED:
-                    mCallback.onStopped();
-                    break;
+            if (mCallback != null) {
+                mExecutor.execute(mCallback::onStopped);
             }
         }
     }
@@ -826,27 +1140,37 @@ public final class DisplayManagerGlobal {
 
     private static native void nSignalNativeCallbacks(float refreshRate);
 
-    // Called from AChoreographer via JNI.
-    // Registers AChoreographer so that refresh rate callbacks can be dispatched from DMS.
-    private void registerNativeChoreographerForRefreshRateCallbacks() {
+    /**
+     * Called from AChoreographer via JNI.
+     * Registers AChoreographer so that refresh rate callbacks can be dispatched from DMS.
+     * Public for unit testing to be able to call this method.
+     */
+    @VisibleForTesting
+    public void registerNativeChoreographerForRefreshRateCallbacks() {
         synchronized (mLock) {
-            registerCallbackIfNeededLocked();
             mDispatchNativeCallbacks = true;
+            registerCallbackIfNeededLocked();
+            updateCallbackIfNeededLocked();
             DisplayInfo display = getDisplayInfoLocked(Display.DEFAULT_DISPLAY);
             if (display != null) {
                 // We need to tell AChoreographer instances the current refresh rate so that apps
                 // can get it for free once a callback first registers.
-                float refreshRate = display.getMode().getRefreshRate();
-                nSignalNativeCallbacks(refreshRate);
+                mNativeCallbackReportedRefreshRate = display.getRefreshRate();
+                nSignalNativeCallbacks(mNativeCallbackReportedRefreshRate);
             }
         }
     }
 
-    // Called from AChoreographer via JNI.
-    // Unregisters AChoreographer from receiving refresh rate callbacks.
-    private void unregisterNativeChoreographerForRefreshRateCallbacks() {
+    /**
+     * Called from AChoreographer via JNI.
+     * Unregisters AChoreographer from receiving refresh rate callbacks.
+     * Public for unit testing to be able to call this method.
+     */
+    @VisibleForTesting
+    public void unregisterNativeChoreographerForRefreshRateCallbacks() {
         synchronized (mLock) {
             mDispatchNativeCallbacks = false;
+            updateCallbackIfNeededLocked();
         }
     }
 }

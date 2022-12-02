@@ -16,14 +16,17 @@
 
 #pragma once
 
+#include <utils/Mutex.h>
 #include <utils/Log.h>
 #include <utils/RefBase.h>
+
+#include <ui/FatVector.h>
 
 #include "FrameInfo.h"
 #include "FrameMetricsObserver.h"
 
 #include <string.h>
-#include <vector>
+#include <mutex>
 
 namespace android {
 namespace uirenderer {
@@ -32,9 +35,13 @@ class FrameMetricsReporter {
 public:
     FrameMetricsReporter() {}
 
-    void addObserver(FrameMetricsObserver* observer) { mObservers.push_back(observer); }
+    void addObserver(FrameMetricsObserver* observer) {
+        std::lock_guard lock(mObserversLock);
+        mObservers.push_back(observer);
+    }
 
     bool removeObserver(FrameMetricsObserver* observer) {
+        std::lock_guard lock(mObserversLock);
         for (size_t i = 0; i < mObservers.size(); i++) {
             if (mObservers[i].get() == observer) {
                 mObservers.erase(mObservers.begin() + i);
@@ -44,16 +51,30 @@ public:
         return false;
     }
 
-    bool hasObservers() { return mObservers.size() > 0; }
-
-    void reportFrameMetrics(const int64_t* stats) {
-        for (size_t i = 0; i < mObservers.size(); i++) {
-            mObservers[i]->notify(stats);
-        }
+    bool hasObservers() {
+        std::lock_guard lock(mObserversLock);
+        return mObservers.size() > 0;
     }
 
+    /**
+     * Notify observers about the metrics contained in 'stats'.
+     * If an observer is waiting for present time, notify when 'stats' has present time.
+     *
+     * If an observer does not want present time, only notify when 'hasPresentTime' is false.
+     * Never notify both types of observers from the same callback, because the callback with
+     * 'hasPresentTime' is sent at a different time than the one without.
+     *
+     * The 'frameNumber' and 'surfaceControlId' associated to the frame whose's stats are being
+     * reported are used to determine whether or not the stats should be reported. We won't report
+     * stats of frames that are from "old" surfaces (i.e. with surfaceControlIds older than the one
+     * the observer was attached on) nor those that are from "old" frame numbers.
+     */
+    void reportFrameMetrics(const int64_t* stats, bool hasPresentTime, uint64_t frameNumber,
+                            int32_t surfaceControlId);
+
 private:
-    std::vector<sp<FrameMetricsObserver> > mObservers;
+    FatVector<sp<FrameMetricsObserver>, 10> mObservers GUARDED_BY(mObserversLock);
+    std::mutex mObserversLock;
 };
 
 }  // namespace uirenderer

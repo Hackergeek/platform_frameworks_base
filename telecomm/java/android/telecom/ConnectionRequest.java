@@ -18,6 +18,7 @@ package android.telecom;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.SuppressLint;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
 import android.net.Uri;
@@ -67,7 +68,8 @@ public final class ConnectionRequest implements Parcelable {
          * Sets the participants for the resulting {@link ConnectionRequest}
          * @param participants The participants to which the {@link Connection} is to connect.
          */
-        public @NonNull Builder setParticipants(@Nullable List<Uri> participants) {
+        public @NonNull Builder setParticipants(
+                @SuppressLint("NullableCollection") @Nullable List<Uri> participants) {
             this.mParticipants = participants;
             return this;
         }
@@ -270,17 +272,17 @@ public final class ConnectionRequest implements Parcelable {
     }
 
     private ConnectionRequest(Parcel in) {
-        mAccountHandle = in.readParcelable(getClass().getClassLoader());
-        mAddress = in.readParcelable(getClass().getClassLoader());
-        mExtras = in.readParcelable(getClass().getClassLoader());
+        mAccountHandle = in.readParcelable(getClass().getClassLoader(), android.telecom.PhoneAccountHandle.class);
+        mAddress = in.readParcelable(getClass().getClassLoader(), android.net.Uri.class);
+        mExtras = in.readParcelable(getClass().getClassLoader(), android.os.Bundle.class);
         mVideoState = in.readInt();
         mTelecomCallId = in.readString();
         mShouldShowIncomingCallUi = in.readInt() == 1;
-        mRttPipeFromInCall = in.readParcelable(getClass().getClassLoader());
-        mRttPipeToInCall = in.readParcelable(getClass().getClassLoader());
+        mRttPipeFromInCall = in.readParcelable(getClass().getClassLoader(), android.os.ParcelFileDescriptor.class);
+        mRttPipeToInCall = in.readParcelable(getClass().getClassLoader(), android.os.ParcelFileDescriptor.class);
 
         mParticipants = new ArrayList<Uri>();
-        in.readList(mParticipants, getClass().getClassLoader());
+        in.readList(mParticipants, getClass().getClassLoader(), android.net.Uri.class);
 
         mIsAdhocConference = in.readInt() == 1;
     }
@@ -327,7 +329,6 @@ public final class ConnectionRequest implements Parcelable {
      * @hide
      */
     @SystemApi
-    @TestApi
     public @Nullable String getTelecomCallId() {
         return mTelecomCallId;
     }

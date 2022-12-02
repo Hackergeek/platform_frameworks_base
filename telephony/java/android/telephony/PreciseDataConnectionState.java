@@ -73,7 +73,7 @@ public final class PreciseDataConnectionState implements Parcelable {
      */
     @TestApi
     @Deprecated
-    @UnsupportedAppUsage // (maxTargetSdk = Build.VERSION_CODES.Q)
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553) // (maxTargetSdk = Build.VERSION_CODES.Q)
     // FIXME: figure out how to remove the UnsupportedAppUsage and delete this constructor
     public PreciseDataConnectionState(@DataState int state,
                                       @NetworkType int networkType,
@@ -125,9 +125,9 @@ public final class PreciseDataConnectionState implements Parcelable {
         mId = in.readInt();
         mState = in.readInt();
         mNetworkType = in.readInt();
-        mLinkProperties = in.readParcelable(LinkProperties.class.getClassLoader());
+        mLinkProperties = in.readParcelable(LinkProperties.class.getClassLoader(), android.net.LinkProperties.class);
         mFailCause = in.readInt();
-        mApnSetting = in.readParcelable(ApnSetting.class.getClassLoader());
+        mApnSetting = in.readParcelable(ApnSetting.class.getClassLoader(), android.telephony.data.ApnSetting.class);
     }
 
     /**
@@ -166,14 +166,12 @@ public final class PreciseDataConnectionState implements Parcelable {
     /**
      * @return The unique id of the data connection
      *
-     * Note this is the id assigned in {@link DataCallResponse}.
+     * Note this is the id assigned by the data service.
      * The id remains the same for data connection handover between
      * {@link AccessNetworkConstants#TRANSPORT_TYPE_WLAN} and
      * {@link AccessNetworkConstants#TRANSPORT_TYPE_WWAN}
      *
-     * @hide
      */
-    @SystemApi
     public int getId() {
         return mId;
     }

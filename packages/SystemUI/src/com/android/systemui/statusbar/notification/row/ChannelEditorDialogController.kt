@@ -37,12 +37,10 @@ import android.view.Window
 import android.view.WindowInsets.Type.statusBars
 import android.view.WindowManager
 import android.widget.TextView
-
 import com.android.internal.annotations.VisibleForTesting
 import com.android.systemui.R
-
+import com.android.systemui.dagger.SysUISingleton
 import javax.inject.Inject
-import javax.inject.Singleton
 
 private const val TAG = "ChannelDialogController"
 
@@ -58,7 +56,7 @@ private const val TAG = "ChannelDialogController"
  *   - the next 3 channels sorted alphabetically for that app   <on/off>
  *   -                                                          <on/off>
  */
-@Singleton
+@SysUISingleton
 class ChannelEditorDialogController @Inject constructor(
     c: Context,
     private val noMan: INotificationManager,
@@ -158,11 +156,11 @@ class ChannelEditorDialogController @Inject constructor(
         groupList: Sequence<NotificationChannelGroup>
     ): Sequence<NotificationChannel> {
 
+        // TODO (b/194833441): remove channel level settings when we move to a permission
         val channels = groupList
                 .flatMap { group ->
                     group.channels.asSequence().filterNot { channel ->
-                        channel.isImportanceLockedByOEM ||
-                                channel.importance == IMPORTANCE_NONE ||
+                        channel.importance == IMPORTANCE_NONE ||
                                 channel.isImportanceLockedByCriticalDeviceFunction
                     }
                 }
@@ -282,7 +280,8 @@ class ChannelEditorDialogController @Inject constructor(
 
     @VisibleForTesting
     fun launchSettings(sender: View) {
-        onSettingsClickListener?.onClick(sender, null, appUid!!)
+        val channel = if (providedChannels.size == 1) providedChannels[0] else null
+        onSettingsClickListener?.onClick(sender, channel, appUid!!)
     }
 
     private fun initDialog() {

@@ -24,6 +24,7 @@
 namespace android {
 
 struct {
+    jclass clazz;
     jmethodID callback;
 } gHardwareRendererObserverClassInfo;
 
@@ -35,15 +36,16 @@ static JNIEnv* getenv(JavaVM* vm) {
     return env;
 }
 
-HardwareRendererObserver::HardwareRendererObserver(JavaVM *vm, jobject observer) : mVm(vm) {
-    mObserverWeak = getenv(mVm)->NewWeakGlobalRef(observer);
-    LOG_ALWAYS_FATAL_IF(mObserverWeak == nullptr,
-            "unable to create frame stats observer reference");
+HardwareRendererObserver::HardwareRendererObserver(JavaVM* vm, jobject observer,
+                                                   bool waitForPresentTime)
+        : uirenderer::FrameMetricsObserver(waitForPresentTime), mVm(vm) {
+    mObserver = getenv(mVm)->NewGlobalRef(observer);
+    LOG_ALWAYS_FATAL_IF(mObserver == nullptr, "unable to create frame stats observer reference");
 }
 
 HardwareRendererObserver::~HardwareRendererObserver() {
     JNIEnv* env = getenv(mVm);
-    env->DeleteWeakGlobalRef(mObserverWeak);
+    env->DeleteGlobalRef(mObserver);
 }
 
 bool HardwareRendererObserver::getNextBuffer(JNIEnv* env, jlongArray metrics, int* dropCount) {
@@ -64,6 +66,8 @@ bool HardwareRendererObserver::getNextBuffer(JNIEnv* env, jlongArray metrics, in
 }
 
 void HardwareRendererObserver::notify(const int64_t* stats) {
+    if (!mKeepListening) return;
+
     FrameMetricsNotification& elem = mRingBuffer[mNextFree];
 
     if (!elem.hasData.load()) {
@@ -75,25 +79,26 @@ void HardwareRendererObserver::notify(const int64_t* stats) {
         elem.hasData = true;
 
         JNIEnv* env = getenv(mVm);
-        jobject target = env->NewLocalRef(mObserverWeak);
-        if (target != nullptr) {
-            env->CallVoidMethod(target, gHardwareRendererObserverClassInfo.callback);
-            env->DeleteLocalRef(target);
-        }
+        mKeepListening = env->CallStaticBooleanMethod(gHardwareRendererObserverClassInfo.clazz,
+                                                      gHardwareRendererObserverClassInfo.callback,
+                                                      mObserver);
     } else {
         mDroppedReports++;
     }
 }
 
 static jlong android_graphics_HardwareRendererObserver_createObserver(JNIEnv* env,
-                                                                      jobject observerObj) {
+                                                                      jobject /*clazz*/,
+                                                                      jobject weakRefThis,
+                                                                      jboolean waitForPresentTime) {
     JavaVM* vm = nullptr;
     if (env->GetJavaVM(&vm) != JNI_OK) {
         LOG_ALWAYS_FATAL("Unable to get Java VM");
         return 0;
     }
 
-    HardwareRendererObserver* observer = new HardwareRendererObserver(vm, observerObj);
+    HardwareRendererObserver* observer =
+            new HardwareRendererObserver(vm, weakRefThis, waitForPresentTime);
     return reinterpret_cast<jlong>(observer);
 }
 
@@ -110,17 +115,19 @@ static jint android_graphics_HardwareRendererObserver_getNextBuffer(JNIEnv* env,
 }
 
 static const std::array gMethods = {
-    MAKE_JNI_NATIVE_METHOD("nCreateObserver", "()J",
-                           android_graphics_HardwareRendererObserver_createObserver),
-    MAKE_JNI_NATIVE_METHOD("nGetNextBuffer", "(J[J)I",
-                           android_graphics_HardwareRendererObserver_getNextBuffer),
+        MAKE_JNI_NATIVE_METHOD("nCreateObserver", "(Ljava/lang/ref/WeakReference;Z)J",
+                               android_graphics_HardwareRendererObserver_createObserver),
+        MAKE_JNI_NATIVE_METHOD("nGetNextBuffer", "(J[J)I",
+                               android_graphics_HardwareRendererObserver_getNextBuffer),
 };
 
 int register_android_graphics_HardwareRendererObserver(JNIEnv* env) {
 
     jclass observerClass = FindClassOrDie(env, "android/graphics/HardwareRendererObserver");
-    gHardwareRendererObserverClassInfo.callback = GetMethodIDOrDie(env, observerClass,
-                                                                   "notifyDataAvailable", "()V");
+    gHardwareRendererObserverClassInfo.clazz =
+            reinterpret_cast<jclass>(env->NewGlobalRef(observerClass));
+    gHardwareRendererObserverClassInfo.callback = GetStaticMethodIDOrDie(
+            env, observerClass, "invokeDataAvailable", "(Ljava/lang/ref/WeakReference;)Z");
 
     return RegisterMethodsOrDie(env, "android/graphics/HardwareRendererObserver",
                                 gMethods.data(), gMethods.size());

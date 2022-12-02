@@ -18,28 +18,30 @@ package com.android.systemui.statusbar.notification
 
 import android.animation.ObjectAnimator
 import android.util.FloatProperty
-import com.android.systemui.Interpolators
+import com.android.systemui.animation.Interpolators
+import com.android.systemui.dagger.SysUISingleton
 import com.android.systemui.plugins.statusbar.StatusBarStateController
 import com.android.systemui.statusbar.StatusBarState
 import com.android.systemui.statusbar.notification.collection.NotificationEntry
-import com.android.systemui.statusbar.notification.stack.NotificationStackScrollLayout
+import com.android.systemui.statusbar.notification.stack.NotificationStackScrollLayoutController
 import com.android.systemui.statusbar.notification.stack.StackStateAnimator
 import com.android.systemui.statusbar.phone.DozeParameters
 import com.android.systemui.statusbar.phone.KeyguardBypassController
-import com.android.systemui.statusbar.phone.NotificationIconAreaController
-import com.android.systemui.statusbar.phone.PanelExpansionListener
+import com.android.systemui.statusbar.phone.ScreenOffAnimationController
+import com.android.systemui.statusbar.phone.panelstate.PanelExpansionChangeEvent
+import com.android.systemui.statusbar.phone.panelstate.PanelExpansionListener
 import com.android.systemui.statusbar.policy.HeadsUpManager
 import com.android.systemui.statusbar.policy.OnHeadsUpChangedListener
-
 import javax.inject.Inject
-import javax.inject.Singleton
+import kotlin.math.min
 
-@Singleton
+@SysUISingleton
 class NotificationWakeUpCoordinator @Inject constructor(
     private val mHeadsUpManager: HeadsUpManager,
     private val statusBarStateController: StatusBarStateController,
     private val bypassController: KeyguardBypassController,
-    private val dozeParameters: DozeParameters
+    private val dozeParameters: DozeParameters,
+    private val screenOffAnimationController: ScreenOffAnimationController
 ) : OnHeadsUpChangedListener, StatusBarStateController.StateListener, PanelExpansionListener {
 
     private val mNotificationVisibility = object : FloatProperty<NotificationWakeUpCoordinator>(
@@ -53,7 +55,7 @@ class NotificationWakeUpCoordinator @Inject constructor(
             return coordinator.mLinearVisibilityAmount
         }
     }
-    private lateinit var mStackScroller: NotificationStackScrollLayout
+    private lateinit var mStackScrollerController: NotificationStackScrollLayoutController
     private var mVisibilityInterpolator = Interpolators.FAST_OUT_SLOW_IN_REVERSE
 
     private var mLinearDozeAmount: Float = 0.0f
@@ -79,7 +81,7 @@ class NotificationWakeUpCoordinator @Inject constructor(
                 if (mNotificationsVisible && !mNotificationsVisibleForExpansion &&
                     !bypassController.bypassEnabled) {
                     // We're waking up while pulsing, let's make sure the animation looks nice
-                    mStackScroller.wakeUpFromPulse()
+                    mStackScrollerController.wakeUpFromPulse()
                 }
                 if (bypassController.bypassEnabled && !mNotificationsVisible) {
                     // Let's make sure our huns become visible once we are waking up in case
@@ -98,7 +100,6 @@ class NotificationWakeUpCoordinator @Inject constructor(
         }
 
     private var collapsedEnoughToHide: Boolean = false
-    lateinit var iconAreaController: NotificationIconAreaController
 
     var pulsing: Boolean = false
         set(value) {
@@ -156,10 +157,10 @@ class NotificationWakeUpCoordinator @Inject constructor(
         })
     }
 
-    fun setStackScroller(stackScroller: NotificationStackScrollLayout) {
-        mStackScroller = stackScroller
-        pulseExpanding = stackScroller.isPulseExpanding
-        stackScroller.setOnPulseHeightChangedListener {
+    fun setStackScroller(stackScrollerController: NotificationStackScrollLayoutController) {
+        mStackScrollerController = stackScrollerController
+        pulseExpanding = stackScrollerController.isPulseExpanding
+        stackScrollerController.setOnPulseHeightChangedListener {
             val nowExpanding = isPulseExpanding()
             val changed = nowExpanding != pulseExpanding
             pulseExpanding = nowExpanding
@@ -169,7 +170,7 @@ class NotificationWakeUpCoordinator @Inject constructor(
         }
     }
 
-    fun isPulseExpanding(): Boolean = mStackScroller.isPulseExpanding
+    fun isPulseExpanding(): Boolean = mStackScrollerController.isPulseExpanding
 
     /**
      * @param visible should notifications be visible
@@ -234,9 +235,14 @@ class NotificationWakeUpCoordinator @Inject constructor(
     }
 
     override fun onDozeAmountChanged(linear: Float, eased: Float) {
-        if (updateDozeAmountIfBypass()) {
+        if (overrideDozeAmountIfAnimatingScreenOff(linear)) {
             return
         }
+
+        if (overrideDozeAmountIfBypass()) {
+            return
+        }
+
         if (linear != 1.0f && linear != 0.0f &&
             (mLinearDozeAmount == 0.0f || mLinearDozeAmount == 1.0f)) {
             // Let's notify the scroller that an animation started
@@ -249,7 +255,7 @@ class NotificationWakeUpCoordinator @Inject constructor(
         val changed = linear != mLinearDozeAmount
         mLinearDozeAmount = linear
         mDozeAmount = eased
-        mStackScroller.setDozeAmount(mDozeAmount)
+        mStackScrollerController.setDozeAmount(mDozeAmount)
         updateHideAmount()
         if (changed && linear == 0.0f) {
             setNotificationsVisible(visible = false, animate = false, increaseSpeed = false)
@@ -259,7 +265,23 @@ class NotificationWakeUpCoordinator @Inject constructor(
     }
 
     override fun onStateChanged(newState: Int) {
-        updateDozeAmountIfBypass()
+        if (state == StatusBarState.SHADE && newState == StatusBarState.SHADE) {
+            // The SHADE -> SHADE transition is only possible as part of cancelling the screen-off
+            // animation (e.g. by fingerprint unlock).  This is done because the system is in an
+            // undefined state, so it's an indication that we should do state cleanup. We override
+            // the doze amount to 0f (not dozing) so that the notifications are no longer hidden.
+            // See: UnlockedScreenOffAnimationController.onFinishedWakingUp()
+            setDozeAmount(0f, 0f)
+        }
+
+        if (overrideDozeAmountIfAnimatingScreenOff(mLinearDozeAmount)) {
+            return
+        }
+
+        if (overrideDozeAmountIfBypass()) {
+            return
+        }
+
         if (bypassController.bypassEnabled &&
                 newState == StatusBarState.KEYGUARD && state == StatusBarState.SHADE_LOCKED &&
             (!statusBarStateController.isDozing || shouldAnimateVisibility())) {
@@ -267,11 +289,12 @@ class NotificationWakeUpCoordinator @Inject constructor(
             setNotificationsVisible(visible = true, increaseSpeed = false, animate = false)
             setNotificationsVisible(visible = false, increaseSpeed = false, animate = true)
         }
+
         this.state = newState
     }
 
-    override fun onPanelExpansionChanged(expansion: Float, tracking: Boolean) {
-        val collapsedEnough = expansion <= 0.9f
+    override fun onPanelExpansionChanged(event: PanelExpansionChangeEvent) {
+        val collapsedEnough = event.fraction <= 0.9f
         if (collapsedEnough != this.collapsedEnoughToHide) {
             val couldShowPulsingHuns = canShowPulsingHuns
             this.collapsedEnoughToHide = collapsedEnough
@@ -282,7 +305,11 @@ class NotificationWakeUpCoordinator @Inject constructor(
         }
     }
 
-    private fun updateDozeAmountIfBypass(): Boolean {
+    /**
+     * @return Whether the doze amount was overridden because bypass is enabled. If true, the
+     * original doze amount should be ignored.
+     */
+    private fun overrideDozeAmountIfBypass(): Boolean {
         if (bypassController.bypassEnabled) {
             var amount = 1.0f
             if (statusBarStateController.state == StatusBarState.SHADE ||
@@ -292,6 +319,23 @@ class NotificationWakeUpCoordinator @Inject constructor(
             setDozeAmount(amount, amount)
             return true
         }
+        return false
+    }
+
+    /**
+     * If we're playing the screen off animation, force the notification doze amount to be 1f (fully
+     * dozing). This is needed so that the notifications aren't briefly visible as the screen turns
+     * off and dozeAmount goes from 1f to 0f.
+     *
+     * @return Whether the doze amount was overridden because we are playing the screen off
+     * animation. If true, the original doze amount should be ignored.
+     */
+    private fun overrideDozeAmountIfAnimatingScreenOff(linearDozeAmount: Float): Boolean {
+        if (screenOffAnimationController.overrideNotificationsFullyDozingOnKeyguard()) {
+            setDozeAmount(1f, 1f)
+            return true
+        }
+
         return false
     }
 
@@ -329,35 +373,21 @@ class NotificationWakeUpCoordinator @Inject constructor(
         }
     }
 
-    fun getWakeUpHeight(): Float {
-        return mStackScroller.wakeUpHeight
-    }
-
     private fun updateHideAmount() {
-        val linearAmount = Math.min(1.0f - mLinearVisibilityAmount, mLinearDozeAmount)
-        val amount = Math.min(1.0f - mVisibilityAmount, mDozeAmount)
-        mStackScroller.setHideAmount(linearAmount, amount)
+        val linearAmount = min(1.0f - mLinearVisibilityAmount, mLinearDozeAmount)
+        val amount = min(1.0f - mVisibilityAmount, mDozeAmount)
+        mStackScrollerController.setHideAmount(linearAmount, amount)
         notificationsFullyHidden = linearAmount == 1.0f
     }
 
     private fun notifyAnimationStart(awake: Boolean) {
-        mStackScroller.notifyHideAnimationStart(!awake)
+        mStackScrollerController.notifyHideAnimationStart(!awake)
     }
 
     override fun onDozingChanged(isDozing: Boolean) {
         if (isDozing) {
             setNotificationsVisible(visible = false, animate = false, increaseSpeed = false)
         }
-    }
-
-    /**
-     * Set the height how tall notifications are pulsing. This is only set whenever we are expanding
-     * from a pulse and determines how much the notifications are expanded.
-     */
-    fun setPulseHeight(height: Float): Float {
-        val overflow = mStackScroller.setPulseHeight(height)
-        //  no overflow for the bypass experience
-        return if (bypassController.bypassEnabled) 0.0f else overflow
     }
 
     override fun onHeadsUpStateChanged(entry: NotificationEntry, isHeadsUp: Boolean) {
@@ -382,7 +412,7 @@ class NotificationWakeUpCoordinator @Inject constructor(
     }
 
     private fun shouldAnimateVisibility() =
-            dozeParameters.getAlwaysOn() && !dozeParameters.getDisplayNeedsBlanking()
+            dozeParameters.alwaysOn && !dozeParameters.displayNeedsBlanking
 
     interface WakeUpListener {
         /**

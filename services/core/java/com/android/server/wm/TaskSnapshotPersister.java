@@ -23,19 +23,19 @@ import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
 
 import android.annotation.NonNull;
 import android.annotation.TestApi;
-import android.app.ActivityManager.TaskSnapshot;
 import android.graphics.Bitmap;
 import android.graphics.Bitmap.Config;
 import android.os.Process;
 import android.os.SystemClock;
-import android.os.UserManagerInternal;
 import android.util.ArraySet;
 import android.util.AtomicFile;
 import android.util.Slog;
+import android.window.TaskSnapshot;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.LocalServices;
+import com.android.server.pm.UserManagerInternal;
 import com.android.server.wm.nano.WindowManagerProtos.TaskSnapshotProto;
 
 import java.io.File;
@@ -380,9 +380,13 @@ class TaskSnapshotPersister {
             proto.insetTop = mSnapshot.getContentInsets().top;
             proto.insetRight = mSnapshot.getContentInsets().right;
             proto.insetBottom = mSnapshot.getContentInsets().bottom;
+            proto.letterboxInsetLeft = mSnapshot.getLetterboxInsets().left;
+            proto.letterboxInsetTop = mSnapshot.getLetterboxInsets().top;
+            proto.letterboxInsetRight = mSnapshot.getLetterboxInsets().right;
+            proto.letterboxInsetBottom = mSnapshot.getLetterboxInsets().bottom;
             proto.isRealSnapshot = mSnapshot.isRealSnapshot();
             proto.windowingMode = mSnapshot.getWindowingMode();
-            proto.systemUiVisibility = mSnapshot.getSystemUiVisibility();
+            proto.appearance = mSnapshot.getAppearance();
             proto.isTranslucent = mSnapshot.isTranslucent();
             proto.topActivityComponent = mSnapshot.getTopActivityComponent().flattenToString();
             proto.id = mSnapshot.getId();
@@ -403,8 +407,12 @@ class TaskSnapshotPersister {
         }
 
         boolean writeBuffer() {
+            if (TaskSnapshotController.isInvalidHardwareBuffer(mSnapshot.getHardwareBuffer())) {
+                Slog.e(TAG, "Invalid task snapshot hw buffer, taskId=" + mTaskId);
+                return false;
+            }
             final Bitmap bitmap = Bitmap.wrapHardwareBuffer(
-                    mSnapshot.getSnapshot(), mSnapshot.getColorSpace());
+                    mSnapshot.getHardwareBuffer(), mSnapshot.getColorSpace());
             if (bitmap == null) {
                 Slog.e(TAG, "Invalid task snapshot hw bitmap");
                 return false;

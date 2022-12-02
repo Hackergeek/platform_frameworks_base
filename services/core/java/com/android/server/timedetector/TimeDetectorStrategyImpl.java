@@ -16,26 +16,36 @@
 
 package com.android.server.timedetector;
 
-import android.annotation.IntDef;
+import static com.android.server.timedetector.TimeDetectorStrategy.originToString;
+
+import static java.util.stream.Collectors.joining;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.UserIdInt;
 import android.app.AlarmManager;
+import android.app.time.ExternalTimeSuggestion;
+import android.app.timedetector.GnssTimeSuggestion;
 import android.app.timedetector.ManualTimeSuggestion;
 import android.app.timedetector.NetworkTimeSuggestion;
 import android.app.timedetector.TelephonyTimeSuggestion;
+import android.content.Context;
+import android.os.Handler;
 import android.os.TimestampedValue;
+import android.util.IndentingPrintWriter;
 import android.util.LocalLog;
 import android.util.Slog;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.timezonedetector.ArrayMapWithHistory;
+import com.android.server.timezonedetector.ConfigurationChangeListener;
 import com.android.server.timezonedetector.ReferenceWithHistory;
 
-import java.io.PrintWriter;
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * An implementation of {@link TimeDetectorStrategy} that passes telephony and manual suggestions to
@@ -47,7 +57,7 @@ import java.lang.annotation.RetentionPolicy;
 public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
 
     private static final boolean DBG = false;
-    private static final String LOG_TAG = "SimpleTimeDetectorStrategy";
+    private static final String LOG_TAG = TimeDetectorService.TAG;
 
     /** A score value used to indicate "no score", either due to validation failure or age. */
     private static final int TELEPHONY_INVALID_SCORE = -1;
@@ -60,24 +70,8 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
      * Telephony and network suggestions older than this value are considered too old to be used.
      */
     @VisibleForTesting
-    static final long MAX_UTC_TIME_AGE_MILLIS =
+    static final long MAX_SUGGESTION_TIME_AGE_MILLIS =
             TELEPHONY_BUCKET_COUNT * TELEPHONY_BUCKET_SIZE_MILLIS;
-
-    @IntDef({ ORIGIN_TELEPHONY, ORIGIN_MANUAL, ORIGIN_NETWORK })
-    @Retention(RetentionPolicy.SOURCE)
-    public @interface Origin {}
-
-    /** Used when a time value originated from a telephony signal. */
-    @Origin
-    private static final int ORIGIN_TELEPHONY = 1;
-
-    /** Used when a time value originated from a user / manual settings. */
-    @Origin
-    private static final int ORIGIN_MANUAL = 2;
-
-    /** Used when a time value originated from a network signal. */
-    @Origin
-    private static final int ORIGIN_NETWORK = 3;
 
     /**
      * CLOCK_PARANOIA: The maximum difference allowed between the expected system clock time and the
@@ -92,6 +86,9 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
      */
     private static final int KEEP_SUGGESTION_HISTORY_SIZE = 10;
 
+    /** The value in Unix epoch milliseconds of the Y2038 issue. */
+    private static final long Y2038_LIMIT_IN_MILLIS = 1000L * Integer.MAX_VALUE;
+
     /**
      * A log that records the decisions / decision metadata that affected the device's system clock
      * time. This is logged in bug reports to assist with debugging issues with detection.
@@ -99,8 +96,8 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
     @NonNull
     private final LocalLog mTimeChangesLog = new LocalLog(30, false /* useLocalTimestamps */);
 
-    // @NonNull after initialize()
-    private Callback mCallback;
+    @NonNull
+    private final Environment mEnvironment;
 
     // Used to store the last time the system clock state was set automatically. It is used to
     // detect (and log) issues with the realtime clock or whether the clock is being set without
@@ -122,26 +119,142 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
     private final ReferenceWithHistory<NetworkTimeSuggestion> mLastNetworkSuggestion =
             new ReferenceWithHistory<>(KEEP_SUGGESTION_HISTORY_SIZE);
 
-    @Override
-    public void initialize(@NonNull Callback callback) {
-        mCallback = callback;
+    @GuardedBy("this")
+    private final ReferenceWithHistory<GnssTimeSuggestion> mLastGnssSuggestion =
+            new ReferenceWithHistory<>(KEEP_SUGGESTION_HISTORY_SIZE);
+
+    @GuardedBy("this")
+    private final ReferenceWithHistory<ExternalTimeSuggestion> mLastExternalSuggestion =
+            new ReferenceWithHistory<>(KEEP_SUGGESTION_HISTORY_SIZE);
+
+    /**
+     * The interface used by the strategy to interact with the surrounding service.
+     *
+     * <p>Note: Because the system properties-derived value {@link #isAutoTimeDetectionEnabled()}
+     * can be modified independently and from different threads (and processes!), its use is prone
+     * to race conditions. That will be true until the responsibility for setting their values is
+     * moved to {@link TimeDetectorStrategy}. There are similar issues with
+     * {@link #systemClockMillis()} while any process can modify the system clock.
+     */
+    public interface Environment {
+
+        /**
+         * Sets a {@link ConfigurationChangeListener} that will be invoked when there are any
+         * changes that could affect time detection. This is invoked during system server setup.
+         */
+        void setConfigChangeListener(@NonNull ConfigurationChangeListener listener);
+
+        /**
+         * The absolute threshold below which the system clock need not be updated. i.e. if setting
+         * the system clock would adjust it by less than this (either backwards or forwards) then it
+         * need not be set.
+         */
+        int systemClockUpdateThresholdMillis();
+
+        /** Returns true if automatic time detection is enabled. */
+        boolean isAutoTimeDetectionEnabled();
+
+        /**
+         * Returns a lower bound for valid automatic times. It is guaranteed to be in the past,
+         * i.e. it is unrelated to the current system clock time.
+         * It holds no other meaning; it could be related to when the device system image was built,
+         * or could be updated by a mainline module.
+         */
+        @NonNull
+        Instant autoTimeLowerBound();
+
+        /**
+         * Returns the order to look at time suggestions when automatically detecting time.
+         * See {@code #ORIGIN_} constants
+         */
+        @Origin int[] autoOriginPriorities();
+
+        /**
+         * Returns {@link ConfigurationInternal} for specified user.
+         */
+        @NonNull
+        ConfigurationInternal configurationInternal(@UserIdInt int userId);
+
+        /** Acquire a suitable wake lock. Must be followed by {@link #releaseWakeLock()} */
+        void acquireWakeLock();
+
+        /** Returns the elapsedRealtimeMillis clock value. */
+        long elapsedRealtimeMillis();
+
+        /** Returns the system clock value. */
+        long systemClockMillis();
+
+        /** Sets the device system clock. The WakeLock must be held. */
+        void setSystemClock(long newTimeMillis);
+
+        /** Release the wake lock acquired by a call to {@link #acquireWakeLock()}. */
+        void releaseWakeLock();
+
+        /**
+         * Returns {@code true} if the device may be at risk of time_t overflow (because bionic
+         * defines time_t as a 32-bit signed integer for 32-bit processes).
+         */
+        boolean deviceHasY2038Issue();
+    }
+
+    static TimeDetectorStrategy create(
+            @NonNull Context context, @NonNull Handler handler,
+            @NonNull ServiceConfigAccessor serviceConfigAccessor) {
+
+        TimeDetectorStrategyImpl.Environment environment =
+                new EnvironmentImpl(context, handler, serviceConfigAccessor);
+        return new TimeDetectorStrategyImpl(environment);
+    }
+
+    @VisibleForTesting
+    TimeDetectorStrategyImpl(@NonNull Environment environment) {
+        mEnvironment = Objects.requireNonNull(environment);
+        mEnvironment.setConfigChangeListener(this::handleAutoTimeConfigChanged);
     }
 
     @Override
-    public synchronized void suggestManualTime(@NonNull ManualTimeSuggestion suggestion) {
-        final TimestampedValue<Long> newUtcTime = suggestion.getUtcTime();
+    public synchronized void suggestExternalTime(@NonNull ExternalTimeSuggestion timeSuggestion) {
+        final TimestampedValue<Long> newUnixEpochTime = timeSuggestion.getUnixEpochTime();
 
-        if (!validateSuggestionTime(newUtcTime, suggestion)) {
+        if (!validateAutoSuggestionTime(newUnixEpochTime, timeSuggestion)) {
             return;
         }
 
+        mLastExternalSuggestion.set(timeSuggestion);
+
+        String reason = "External time suggestion received: suggestion=" + timeSuggestion;
+        doAutoTimeDetection(reason);
+    }
+
+    @Override
+    public synchronized void suggestGnssTime(@NonNull GnssTimeSuggestion timeSuggestion) {
+        final TimestampedValue<Long> newUnixEpochTime = timeSuggestion.getUnixEpochTime();
+
+        if (!validateAutoSuggestionTime(newUnixEpochTime, timeSuggestion)) {
+            return;
+        }
+
+        mLastGnssSuggestion.set(timeSuggestion);
+
+        String reason = "GNSS time suggestion received: suggestion=" + timeSuggestion;
+        doAutoTimeDetection(reason);
+    }
+
+    @Override
+    public synchronized boolean suggestManualTime(@NonNull ManualTimeSuggestion suggestion) {
+        final TimestampedValue<Long> newUnixEpochTime = suggestion.getUnixEpochTime();
+
+        if (!validateSuggestionTime(newUnixEpochTime, suggestion)) {
+            return false;
+        }
+
         String cause = "Manual time suggestion received: suggestion=" + suggestion;
-        setSystemClockIfRequired(ORIGIN_MANUAL, newUtcTime, cause);
+        return setSystemClockIfRequired(ORIGIN_MANUAL, newUnixEpochTime, cause);
     }
 
     @Override
     public synchronized void suggestNetworkTime(@NonNull NetworkTimeSuggestion timeSuggestion) {
-        if (!validateSuggestionTime(timeSuggestion.getUtcTime(), timeSuggestion)) {
+        if (!validateAutoSuggestionTime(timeSuggestion.getUnixEpochTime(), timeSuggestion)) {
             return;
         }
 
@@ -171,13 +284,16 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
         // unlike time zone, where a user may lose connectivity when boarding a flight and where we
         // do want to "forget" old signals. Suggestions that are too old are discarded later in the
         // detection algorithm.
-        if (timeSuggestion.getUtcTime() == null) {
+        if (timeSuggestion.getUnixEpochTime() == null) {
             return;
         }
 
-        // Perform validation / input filtering and record the validated suggestion against the
-        // slotIndex.
-        if (!validateAndStoreTelephonySuggestion(timeSuggestion)) {
+        if (!validateAutoSuggestionTime(timeSuggestion.getUnixEpochTime(), timeSuggestion)) {
+            return;
+        }
+
+        // Perform input filtering and record the validated suggestion against the slotIndex.
+        if (!storeTelephonySuggestion(timeSuggestion)) {
             return;
         }
 
@@ -188,12 +304,17 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
     }
 
     @Override
-    public synchronized void handleAutoTimeDetectionChanged() {
-        boolean enabled = mCallback.isAutoTimeDetectionEnabled();
+    @NonNull
+    public ConfigurationInternal getConfigurationInternal(@UserIdInt int userId) {
+        return mEnvironment.configurationInternal(userId);
+    }
+
+    private synchronized void handleAutoTimeConfigChanged() {
+        boolean enabled = mEnvironment.isAutoTimeDetectionEnabled();
         // When automatic time detection is enabled we update the system clock instantly if we can.
         // Conversely, when automatic time detection is disabled we leave the clock as it is.
         if (enabled) {
-            String reason = "Auto time zone detection setting enabled.";
+            String reason = "Auto time zone detection config changed.";
             doAutoTimeDetection(reason);
         } else {
             // CLOCK_PARANOIA: We are losing "control" of the system clock so we cannot predict what
@@ -203,18 +324,30 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
     }
 
     @Override
-    public synchronized void dump(@NonNull PrintWriter pw, @Nullable String[] args) {
-        IndentingPrintWriter ipw = new IndentingPrintWriter(pw, " ");
+    public synchronized void dump(@NonNull IndentingPrintWriter ipw, @Nullable String[] args) {
         ipw.println("TimeDetectorStrategy:");
         ipw.increaseIndent(); // level 1
 
         ipw.println("mLastAutoSystemClockTimeSet=" + mLastAutoSystemClockTimeSet);
-        ipw.println("mCallback.isAutoTimeDetectionEnabled()="
-                + mCallback.isAutoTimeDetectionEnabled());
-        ipw.println("mCallback.elapsedRealtimeMillis()=" + mCallback.elapsedRealtimeMillis());
-        ipw.println("mCallback.systemClockMillis()=" + mCallback.systemClockMillis());
-        ipw.println("mCallback.systemClockUpdateThresholdMillis()="
-                + mCallback.systemClockUpdateThresholdMillis());
+        ipw.println("mEnvironment.isAutoTimeDetectionEnabled()="
+                + mEnvironment.isAutoTimeDetectionEnabled());
+        long elapsedRealtimeMillis = mEnvironment.elapsedRealtimeMillis();
+        ipw.printf("mEnvironment.elapsedRealtimeMillis()=%s (%s)\n",
+                Duration.ofMillis(elapsedRealtimeMillis), elapsedRealtimeMillis);
+        long systemClockMillis = mEnvironment.systemClockMillis();
+        ipw.printf("mEnvironment.systemClockMillis()=%s (%s)\n",
+                Instant.ofEpochMilli(systemClockMillis), systemClockMillis);
+        ipw.println("mEnvironment.systemClockUpdateThresholdMillis()="
+                + mEnvironment.systemClockUpdateThresholdMillis());
+        Instant autoTimeLowerBound = mEnvironment.autoTimeLowerBound();
+        ipw.printf("mEnvironment.autoTimeLowerBound()=%s (%s)\n",
+                autoTimeLowerBound, autoTimeLowerBound.toEpochMilli());
+        String priorities =
+                Arrays.stream(mEnvironment.autoOriginPriorities())
+                        .mapToObj(TimeDetectorStrategy::originToString)
+                        .collect(joining(",", "[", "]"));
+        ipw.println("mEnvironment.autoOriginPriorities()=" + priorities);
+        ipw.println("mEnvironment.deviceHasY2038Issue()=" + mEnvironment.deviceHasY2038Issue());
 
         ipw.println("Time change log:");
         ipw.increaseIndent(); // level 2
@@ -231,26 +364,30 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
         mLastNetworkSuggestion.dump(ipw);
         ipw.decreaseIndent(); // level 2
 
+        ipw.println("Gnss suggestion history:");
+        ipw.increaseIndent(); // level 2
+        mLastGnssSuggestion.dump(ipw);
+        ipw.decreaseIndent(); // level 2
+
+        ipw.println("External suggestion history:");
+        ipw.increaseIndent(); // level 2
+        mLastExternalSuggestion.dump(ipw);
+        ipw.decreaseIndent(); // level 2
+
         ipw.decreaseIndent(); // level 1
-        ipw.flush();
     }
 
     @GuardedBy("this")
-    private boolean validateAndStoreTelephonySuggestion(
+    private boolean storeTelephonySuggestion(
             @NonNull TelephonyTimeSuggestion suggestion) {
-        TimestampedValue<Long> newUtcTime = suggestion.getUtcTime();
-        if (!validateSuggestionTime(newUtcTime, suggestion)) {
-            // There's probably nothing useful we can do: elsewhere we assume that reference
-            // times are in the past so just stop here.
-            return false;
-        }
+        TimestampedValue<Long> newUnixEpochTime = suggestion.getUnixEpochTime();
 
         int slotIndex = suggestion.getSlotIndex();
         TelephonyTimeSuggestion previousSuggestion = mSuggestionBySlotIndex.get(slotIndex);
         if (previousSuggestion != null) {
             // We can log / discard suggestions with obvious issues with the reference time clock.
-            if (previousSuggestion.getUtcTime() == null
-                    || previousSuggestion.getUtcTime().getValue() == null) {
+            if (previousSuggestion.getUnixEpochTime() == null
+                    || previousSuggestion.getUnixEpochTime().getValue() == null) {
                 // This should be impossible given we only store validated suggestions.
                 Slog.w(LOG_TAG, "Previous suggestion is null or has a null time."
                         + " previousSuggestion=" + previousSuggestion
@@ -259,7 +396,7 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
             }
 
             long referenceTimeDifference = TimestampedValue.referenceTimeDifference(
-                    newUtcTime, previousSuggestion.getUtcTime());
+                    newUnixEpochTime, previousSuggestion.getUnixEpochTime());
             if (referenceTimeDifference < 0) {
                 // The reference time is before the previously received suggestion. Ignore it.
                 Slog.w(LOG_TAG, "Out of order telephony suggestion received."
@@ -276,65 +413,122 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
     }
 
     private boolean validateSuggestionTime(
-            @NonNull TimestampedValue<Long> newUtcTime, @NonNull Object suggestion) {
-        if (newUtcTime.getValue() == null) {
+            @NonNull TimestampedValue<Long> newUnixEpochTime, @NonNull Object suggestion) {
+        if (newUnixEpochTime.getValue() == null) {
             Slog.w(LOG_TAG, "Suggested time value is null. suggestion=" + suggestion);
             return false;
         }
 
         // We can validate the suggestion against the reference time clock.
-        long elapsedRealtimeMillis = mCallback.elapsedRealtimeMillis();
-        if (elapsedRealtimeMillis < newUtcTime.getReferenceTimeMillis()) {
+        long elapsedRealtimeMillis = mEnvironment.elapsedRealtimeMillis();
+        if (elapsedRealtimeMillis < newUnixEpochTime.getReferenceTimeMillis()) {
             // elapsedRealtime clock went backwards?
             Slog.w(LOG_TAG, "New reference time is in the future? Ignoring."
                     + " elapsedRealtimeMillis=" + elapsedRealtimeMillis
                     + ", suggestion=" + suggestion);
             return false;
         }
+
+        if (newUnixEpochTime.getValue() > Y2038_LIMIT_IN_MILLIS
+                && mEnvironment.deviceHasY2038Issue()) {
+            // This check won't prevent a device's system clock exceeding Integer.MAX_VALUE Unix
+            // seconds through the normal passage of time, but it will stop it jumping above 2038
+            // because of a "bad" suggestion. b/204193177
+            Slog.w(LOG_TAG, "Suggested value is above max time supported by this device."
+                    + " suggestion=" + suggestion);
+            return false;
+        }
+        return true;
+    }
+
+    private boolean validateAutoSuggestionTime(
+            @NonNull TimestampedValue<Long> newUnixEpochTime, @NonNull Object suggestion)  {
+        return validateSuggestionTime(newUnixEpochTime, suggestion)
+                && validateSuggestionAgainstLowerBound(newUnixEpochTime, suggestion);
+    }
+
+    private boolean validateSuggestionAgainstLowerBound(
+            @NonNull TimestampedValue<Long> newUnixEpochTime, @NonNull Object suggestion) {
+        Instant lowerBound = mEnvironment.autoTimeLowerBound();
+
+        // Suggestion is definitely wrong if it comes before lower time bound.
+        if (lowerBound.isAfter(Instant.ofEpochMilli(newUnixEpochTime.getValue()))) {
+            Slog.w(LOG_TAG, "Suggestion points to time before lower bound, skipping it. "
+                    + "suggestion=" + suggestion + ", lower bound=" + lowerBound);
+            return false;
+        }
+
         return true;
     }
 
     @GuardedBy("this")
     private void doAutoTimeDetection(@NonNull String detectionReason) {
-        if (!mCallback.isAutoTimeDetectionEnabled()) {
+        if (!mEnvironment.isAutoTimeDetectionEnabled()) {
             // Avoid doing unnecessary work with this (race-prone) check.
             return;
         }
 
-        // Android devices currently prioritize any telephony over network signals. There are
-        // carrier compliance tests that would need to be changed before we could ignore NITZ or
-        // prefer NTP generally. This check is cheap on devices without telephony hardware.
-        TelephonyTimeSuggestion bestTelephonySuggestion = findBestTelephonySuggestion();
-        if (bestTelephonySuggestion != null) {
-            final TimestampedValue<Long> newUtcTime = bestTelephonySuggestion.getUtcTime();
-            String cause = "Found good telephony suggestion."
-                    + ", bestTelephonySuggestion=" + bestTelephonySuggestion
-                    + ", detectionReason=" + detectionReason;
-            setSystemClockIfRequired(ORIGIN_TELEPHONY, newUtcTime, cause);
-            return;
-        }
+        // Try the different origins one at a time.
+        int[] originPriorities = mEnvironment.autoOriginPriorities();
+        for (int origin : originPriorities) {
+            TimestampedValue<Long> newUnixEpochTime = null;
+            String cause = null;
+            if (origin == ORIGIN_TELEPHONY) {
+                TelephonyTimeSuggestion bestTelephonySuggestion = findBestTelephonySuggestion();
+                if (bestTelephonySuggestion != null) {
+                    newUnixEpochTime = bestTelephonySuggestion.getUnixEpochTime();
+                    cause = "Found good telephony suggestion."
+                            + ", bestTelephonySuggestion=" + bestTelephonySuggestion
+                            + ", detectionReason=" + detectionReason;
+                }
+            } else if (origin == ORIGIN_NETWORK) {
+                NetworkTimeSuggestion networkSuggestion = findLatestValidNetworkSuggestion();
+                if (networkSuggestion != null) {
+                    newUnixEpochTime = networkSuggestion.getUnixEpochTime();
+                    cause = "Found good network suggestion."
+                            + ", networkSuggestion=" + networkSuggestion
+                            + ", detectionReason=" + detectionReason;
+                }
+            } else if (origin == ORIGIN_GNSS) {
+                GnssTimeSuggestion gnssTimeSuggestion = findLatestValidGnssSuggestion();
+                if (gnssTimeSuggestion != null) {
+                    newUnixEpochTime = gnssTimeSuggestion.getUnixEpochTime();
+                    cause = "Found good gnss suggestion."
+                            + ", gnssTimeSuggestion=" + gnssTimeSuggestion
+                            + ", detectionReason=" + detectionReason;
+                }
+            } else if (origin == ORIGIN_EXTERNAL) {
+                ExternalTimeSuggestion externalTimeSuggestion = findLatestValidExternalSuggestion();
+                if (externalTimeSuggestion != null) {
+                    newUnixEpochTime = externalTimeSuggestion.getUnixEpochTime();
+                    cause = "Found good external suggestion."
+                            + ", externalTimeSuggestion=" + externalTimeSuggestion
+                            + ", detectionReason=" + detectionReason;
+                }
+            } else {
+                Slog.w(LOG_TAG, "Unknown or unsupported origin=" + origin
+                        + " in " + Arrays.toString(originPriorities)
+                        + ": Skipping");
+            }
 
-        // There is no good telephony suggestion, try network.
-        NetworkTimeSuggestion networkSuggestion = findLatestValidNetworkSuggestion();
-        if (networkSuggestion != null) {
-            final TimestampedValue<Long> newUtcTime = networkSuggestion.getUtcTime();
-            String cause = "Found good network suggestion."
-                    + ", networkSuggestion=" + networkSuggestion
-                    + ", detectionReason=" + detectionReason;
-            setSystemClockIfRequired(ORIGIN_NETWORK, newUtcTime, cause);
-            return;
+            // Update the system clock if a good suggestion has been found.
+            if (newUnixEpochTime != null) {
+                setSystemClockIfRequired(origin, newUnixEpochTime, cause);
+                return;
+            }
         }
 
         if (DBG) {
-            Slog.d(LOG_TAG, "Could not determine time: No best telephony or network suggestion."
-                    + " detectionReason=" + detectionReason);
+            Slog.d(LOG_TAG, "Could not determine time: No suggestion found in"
+                    + " originPriorities=" + Arrays.toString(originPriorities)
+                    + ", detectionReason=" + detectionReason);
         }
     }
 
     @GuardedBy("this")
     @Nullable
     private TelephonyTimeSuggestion findBestTelephonySuggestion() {
-        long elapsedRealtimeMillis = mCallback.elapsedRealtimeMillis();
+        long elapsedRealtimeMillis = mEnvironment.elapsedRealtimeMillis();
 
         // Telephony time suggestions are assumed to be derived from NITZ or NITZ-like signals.
         // These have a number of limitations:
@@ -376,7 +570,7 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
                 Slog.w(LOG_TAG, "Latest suggestion unexpectedly null for slotIndex."
                         + " slotIndex=" + slotIndex);
                 continue;
-            } else if (candidateSuggestion.getUtcTime() == null) {
+            } else if (candidateSuggestion.getUnixEpochTime() == null) {
                 // Unexpected - we do not store empty suggestions.
                 Slog.w(LOG_TAG, "Latest suggestion unexpectedly empty. "
                         + " candidateSuggestion=" + candidateSuggestion);
@@ -410,9 +604,9 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
             long elapsedRealtimeMillis, @NonNull TelephonyTimeSuggestion timeSuggestion) {
 
         // Validate first.
-        TimestampedValue<Long> utcTime = timeSuggestion.getUtcTime();
-        if (!validateSuggestionUtcTime(elapsedRealtimeMillis, utcTime)) {
-            Slog.w(LOG_TAG, "Existing suggestion found to be invalid "
+        TimestampedValue<Long> unixEpochTime = timeSuggestion.getUnixEpochTime();
+        if (!validateSuggestionUnixEpochTime(elapsedRealtimeMillis, unixEpochTime)) {
+            Slog.w(LOG_TAG, "Existing suggestion found to be invalid"
                     + " elapsedRealtimeMillis=" + elapsedRealtimeMillis
                     + ", timeSuggestion=" + timeSuggestion);
             return TELEPHONY_INVALID_SCORE;
@@ -420,7 +614,7 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
 
         // The score is based on the age since receipt. Suggestions are bucketed so two
         // suggestions in the same bucket from different slotIndexs are scored the same.
-        long ageMillis = elapsedRealtimeMillis - utcTime.getReferenceTimeMillis();
+        long ageMillis = elapsedRealtimeMillis - unixEpochTime.getReferenceTimeMillis();
 
         // Turn the age into a discrete value: 0 <= bucketIndex < TELEPHONY_BUCKET_COUNT.
         int bucketIndex = (int) (ageMillis / TELEPHONY_BUCKET_SIZE_MILLIS);
@@ -442,9 +636,9 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
             return null;
         }
 
-        TimestampedValue<Long> utcTime = networkSuggestion.getUtcTime();
-        long elapsedRealTimeMillis = mCallback.elapsedRealtimeMillis();
-        if (!validateSuggestionUtcTime(elapsedRealTimeMillis, utcTime)) {
+        TimestampedValue<Long> unixEpochTime = networkSuggestion.getUnixEpochTime();
+        long elapsedRealTimeMillis = mEnvironment.elapsedRealtimeMillis();
+        if (!validateSuggestionUnixEpochTime(elapsedRealTimeMillis, unixEpochTime)) {
             // The latest suggestion is not valid, usually due to its age.
             return null;
         }
@@ -452,38 +646,78 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
         return networkSuggestion;
     }
 
+    /** Returns the latest, valid, gnss suggestion. Returns {@code null} if there isn't one. */
     @GuardedBy("this")
-    private void setSystemClockIfRequired(
+    @Nullable
+    private GnssTimeSuggestion findLatestValidGnssSuggestion() {
+        GnssTimeSuggestion gnssTimeSuggestion = mLastGnssSuggestion.get();
+        if (gnssTimeSuggestion == null) {
+            // No gnss suggestions received. This is normal if there's no gnss signal.
+            return null;
+        }
+
+        TimestampedValue<Long> unixEpochTime = gnssTimeSuggestion.getUnixEpochTime();
+        long elapsedRealTimeMillis = mEnvironment.elapsedRealtimeMillis();
+        if (!validateSuggestionUnixEpochTime(elapsedRealTimeMillis, unixEpochTime)) {
+            // The latest suggestion is not valid, usually due to its age.
+            return null;
+        }
+
+        return gnssTimeSuggestion;
+    }
+
+    /** Returns the latest, valid, external suggestion. Returns {@code null} if there isn't one. */
+    @GuardedBy("this")
+    @Nullable
+    private ExternalTimeSuggestion findLatestValidExternalSuggestion() {
+        ExternalTimeSuggestion externalTimeSuggestion = mLastExternalSuggestion.get();
+        if (externalTimeSuggestion == null) {
+            // No external suggestions received. This is normal if there's no external signal.
+            return null;
+        }
+
+        TimestampedValue<Long> unixEpochTime = externalTimeSuggestion.getUnixEpochTime();
+        long elapsedRealTimeMillis = mEnvironment.elapsedRealtimeMillis();
+        if (!validateSuggestionUnixEpochTime(elapsedRealTimeMillis, unixEpochTime)) {
+            // The latest suggestion is not valid, usually due to its age.
+            return null;
+        }
+
+        return externalTimeSuggestion;
+    }
+
+    @GuardedBy("this")
+    private boolean setSystemClockIfRequired(
             @Origin int origin, @NonNull TimestampedValue<Long> time, @NonNull String cause) {
 
         boolean isOriginAutomatic = isOriginAutomatic(origin);
         if (isOriginAutomatic) {
-            if (!mCallback.isAutoTimeDetectionEnabled()) {
+            if (!mEnvironment.isAutoTimeDetectionEnabled()) {
                 if (DBG) {
                     Slog.d(LOG_TAG, "Auto time detection is not enabled."
-                            + " origin=" + origin
+                            + " origin=" + originToString(origin)
                             + ", time=" + time
                             + ", cause=" + cause);
                 }
-                return;
+                return false;
             }
         } else {
-            if (mCallback.isAutoTimeDetectionEnabled()) {
+            if (mEnvironment.isAutoTimeDetectionEnabled()) {
                 if (DBG) {
                     Slog.d(LOG_TAG, "Auto time detection is enabled."
-                            + " origin=" + origin
+                            + " origin=" + originToString(origin)
                             + ", time=" + time
                             + ", cause=" + cause);
                 }
-                return;
+                return false;
             }
         }
 
-        mCallback.acquireWakeLock();
+        mEnvironment.acquireWakeLock();
         try {
-            setSystemClockUnderWakeLock(origin, time, cause);
+            return setSystemClockUnderWakeLock(origin, time, cause);
         } finally {
-            mCallback.releaseWakeLock();
+            mEnvironment.releaseWakeLock();
         }
     }
 
@@ -492,12 +726,12 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
     }
 
     @GuardedBy("this")
-    private void setSystemClockUnderWakeLock(
-            int origin, @NonNull TimestampedValue<Long> newTime, @NonNull Object cause) {
+    private boolean setSystemClockUnderWakeLock(
+            @Origin int origin, @NonNull TimestampedValue<Long> newTime, @NonNull String cause) {
 
-        long elapsedRealtimeMillis = mCallback.elapsedRealtimeMillis();
+        long elapsedRealtimeMillis = mEnvironment.elapsedRealtimeMillis();
         boolean isOriginAutomatic = isOriginAutomatic(origin);
-        long actualSystemClockMillis = mCallback.systemClockMillis();
+        long actualSystemClockMillis = mEnvironment.systemClockMillis();
         if (isOriginAutomatic) {
             // CLOCK_PARANOIA : Check to see if this class owns the clock or if something else
             // may be setting the clock.
@@ -525,7 +759,7 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
         // Check if the new signal would make sufficient difference to the system clock. If it's
         // below the threshold then ignore it.
         long absTimeDifference = Math.abs(newSystemClockMillis - actualSystemClockMillis);
-        long systemClockUpdateThreshold = mCallback.systemClockUpdateThresholdMillis();
+        long systemClockUpdateThreshold = mEnvironment.systemClockUpdateThresholdMillis();
         if (absTimeDifference < systemClockUpdateThreshold) {
             if (DBG) {
                 Slog.d(LOG_TAG, "Not setting system clock. New time and"
@@ -536,13 +770,14 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
                         + " systemClockUpdateThreshold=" + systemClockUpdateThreshold
                         + " absTimeDifference=" + absTimeDifference);
             }
-            return;
+            return true;
         }
 
-        mCallback.setSystemClock(newSystemClockMillis);
+        mEnvironment.setSystemClock(newSystemClockMillis);
         String logMsg = "Set system clock using time=" + newTime
                 + " cause=" + cause
                 + " elapsedRealtimeMillis=" + elapsedRealtimeMillis
+                + " (old) actualSystemClockMillis=" + actualSystemClockMillis
                 + " newSystemClockMillis=" + newSystemClockMillis;
         if (DBG) {
             Slog.d(LOG_TAG, logMsg);
@@ -556,6 +791,7 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
         } else {
             mLastAutoSystemClockTimeSet = null;
         }
+        return true;
     }
 
     /**
@@ -574,10 +810,29 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
      */
     @VisibleForTesting
     @Nullable
-    public NetworkTimeSuggestion findLatestValidNetworkSuggestionForTests() {
+    public synchronized NetworkTimeSuggestion findLatestValidNetworkSuggestionForTests() {
         return findLatestValidNetworkSuggestion();
     }
 
+    /**
+     * Returns the latest valid gnss suggestion. Not intended for general use: it is used during
+     * tests to check strategy behavior.
+     */
+    @VisibleForTesting
+    @Nullable
+    public synchronized GnssTimeSuggestion findLatestValidGnssSuggestionForTests() {
+        return findLatestValidGnssSuggestion();
+    }
+
+    /**
+     * Returns the latest valid external suggestion. Not intended for general use: it is used during
+     * tests to check strategy behavior.
+     */
+    @VisibleForTesting
+    @Nullable
+    public synchronized ExternalTimeSuggestion findLatestValidExternalSuggestionForTests() {
+        return findLatestValidExternalSuggestion();
+    }
     /**
      * A method used to inspect state during tests. Not intended for general use.
      */
@@ -592,13 +847,31 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
      */
     @VisibleForTesting
     @Nullable
-    public NetworkTimeSuggestion getLatestNetworkSuggestion() {
+    public synchronized NetworkTimeSuggestion getLatestNetworkSuggestion() {
         return mLastNetworkSuggestion.get();
     }
 
-    private static boolean validateSuggestionUtcTime(
-            long elapsedRealtimeMillis, TimestampedValue<Long> utcTime) {
-        long referenceTimeMillis = utcTime.getReferenceTimeMillis();
+    /**
+     * A method used to inspect state during tests. Not intended for general use.
+     */
+    @VisibleForTesting
+    @Nullable
+    public synchronized GnssTimeSuggestion getLatestGnssSuggestion() {
+        return mLastGnssSuggestion.get();
+    }
+
+    /**
+     * A method used to inspect state during tests. Not intended for general use.
+     */
+    @VisibleForTesting
+    @Nullable
+    public synchronized ExternalTimeSuggestion getLatestExternalSuggestion() {
+        return mLastExternalSuggestion.get();
+    }
+
+    private static boolean validateSuggestionUnixEpochTime(
+            long elapsedRealtimeMillis, TimestampedValue<Long> unixEpochTime) {
+        long referenceTimeMillis = unixEpochTime.getReferenceTimeMillis();
         if (referenceTimeMillis > elapsedRealtimeMillis) {
             // Future reference times are ignored. They imply the reference time was wrong, or the
             // elapsed realtime clock used to derive it has gone backwards, neither of which are
@@ -612,6 +885,6 @@ public final class TimeDetectorStrategyImpl implements TimeDetectorStrategy {
         // made and never replaced, it could also mean that the time detection code remains
         // opinionated using a bad invalid suggestion. This caps that edge case at MAX_AGE_MILLIS.
         long ageMillis = elapsedRealtimeMillis - referenceTimeMillis;
-        return ageMillis <= MAX_UTC_TIME_AGE_MILLIS;
+        return ageMillis <= MAX_SUGGESTION_TIME_AGE_MILLIS;
     }
 }

@@ -14,9 +14,18 @@
 // limitations under the License.
 //
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_base_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_base_license"],
+}
+
 java_binary {
     name: "uiautomator",
-    wrapper: "uiautomator",
+    wrapper: "uiautomator.sh",
     srcs: ["src/**/*.java"],
     static_libs: ["uiautomator.core"],
 }

@@ -25,7 +25,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.UserInfo;
 import android.debug.AdbManagerInternal;
-import android.debug.AdbTransportType;
 import android.location.LocationManager;
 import android.os.BatteryManager;
 import android.os.Binder;
@@ -70,8 +69,8 @@ import java.util.Set;
  * automatic updates, etc.) are all disabled by default but may be re-enabled by the user.
  */
 public class TestHarnessModeService extends SystemService {
+    public static final String TEST_HARNESS_MODE_PROPERTY = "persist.sys.test_harness";
     private static final String TAG = TestHarnessModeService.class.getSimpleName();
-    private static final String TEST_HARNESS_MODE_PROPERTY = "persist.sys.test_harness";
 
     private PersistentDataBlockManagerInternal mPersistentDataBlockManagerInternal;
 
@@ -162,17 +161,16 @@ public class TestHarnessModeService extends SystemService {
     private void configureSettings() {
         ContentResolver cr = getContext().getContentResolver();
 
-        // Stop ADB before we enable it, otherwise on userdebug/eng builds, the keys won't have
-        // registered with adbd, and it will prompt the user to confirm the keys.
-        Settings.Global.putInt(cr, Settings.Global.ADB_ENABLED, 0);
-        AdbManagerInternal adbManager = LocalServices.getService(AdbManagerInternal.class);
-        if (adbManager.isAdbEnabled(AdbTransportType.USB)) {
-            adbManager.stopAdbdForTransport(AdbTransportType.USB);
+        // If adb is already enabled, then we need to restart the daemon to pick up the change in
+        // keys. This is only really useful for userdebug/eng builds.
+        if (Settings.Global.getInt(cr, Settings.Global.ADB_ENABLED, 0) == 1) {
+            SystemProperties.set("ctl.restart", "adbd");
+            Slog.d(TAG, "Restarted adbd");
         }
 
-        // Disable the TTL for ADB keys before enabling ADB
+        // Disable the TTL for ADB keys before ADB is enabled as a part of AdbService's
+        // initialization.
         Settings.Global.putLong(cr, Settings.Global.ADB_ALLOWED_CONNECTION_TIME, 0);
-        Settings.Global.putInt(cr, Settings.Global.ADB_ENABLED, 1);
         Settings.Global.putInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 1);
         Settings.Global.putInt(cr, Settings.Global.PACKAGE_VERIFIER_INCLUDE_ADB, 0);
         Settings.Global.putInt(
@@ -191,6 +189,7 @@ public class TestHarnessModeService extends SystemService {
         if (adbManager.getAdbTempKeysFile() != null) {
             writeBytesToFile(persistentData.mAdbTempKeys, adbManager.getAdbTempKeysFile().toPath());
         }
+        adbManager.notifyKeyFilesUpdated();
     }
 
     private void configureUser() {
@@ -286,6 +285,9 @@ public class TestHarnessModeService extends SystemService {
     private class TestHarnessModeShellCommand extends ShellCommand {
         @Override
         public int onCommand(String cmd) {
+            if (cmd == null) {
+                return handleDefaultCommands(cmd);
+            }
             switch (cmd) {
                 case "enable":
                 case "restore":

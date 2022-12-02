@@ -12,17 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_base_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_base_license"],
+}
+
 android_test {
-  name: "BlobStorePerfTests",
-  srcs: ["src/**/*.java"],
-  static_libs: [
-    "BlobStoreTestUtils",
-    "androidx.test.rules",
-    "androidx.annotation_annotation",
-    "apct-perftests-utils",
-    "ub-uiautomator",
-  ],
-  platform_apis: true,
-  test_suites: ["device-tests"],
-  certificate: "platform",
+    name: "BlobStorePerfTests",
+    srcs: ["src/**/*.java"],
+    static_libs: [
+        "BlobStoreTestUtils",
+        "androidx.test.rules",
+        "androidx.annotation_annotation",
+        "apct-perftests-utils",
+        "ub-uiautomator",
+        "collector-device-lib-platform",
+        "androidx.benchmark_benchmark-macro",
+    ],
+    platform_apis: true,
+    test_suites: ["device-tests"],
+    certificate: "platform",
 }

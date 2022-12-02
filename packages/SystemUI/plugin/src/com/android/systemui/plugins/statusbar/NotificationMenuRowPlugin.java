@@ -75,9 +75,9 @@ public interface NotificationMenuRowPlugin extends Plugin {
     public MenuItem getLongpressMenuItem(Context context);
 
     /**
-     * @return the {@link MenuItem} to display when app ops icons are pressed.
+     * @return the {@link MenuItem} to display when feedback icon is pressed.
      */
-    public MenuItem getAppOpsMenuItem(Context context);
+    public MenuItem getFeedbackMenuItem(Context context);
 
     /**
      * @return the {@link MenuItem} to display when snooze item is pressed.
@@ -181,12 +181,6 @@ public interface NotificationMenuRowPlugin extends Plugin {
      * @return true if the menu's parent notification is dismissable, false otherwise.
      */
     public boolean canBeDismissed();
-
-    /**
-     * Informs the menu whether dismiss gestures are left-to-right or right-to-left.
-     */
-    default void setDismissRtl(boolean dismissRtl) {
-    }
 
     /**
      * Determines whether the menu should remain open given its current state, or snap closed.

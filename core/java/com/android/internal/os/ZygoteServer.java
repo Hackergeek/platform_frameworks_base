@@ -49,26 +49,6 @@ class ZygoteServer {
     // TODO (chriswailes): Change this so it is set with Zygote or ZygoteSecondary as appropriate
     public static final String TAG = "ZygoteServer";
 
-    /**
-     * The maximim value that will be accepted from the USAP_POOL_SIZE_MAX device property.
-     * is a mirror of USAP_POOL_MAX_LIMIT found in com_android_internal_os_Zygote.cpp.
-     */
-    private static final int USAP_POOL_SIZE_MAX_LIMIT = 100;
-
-    /**
-     * The minimum value that will be accepted from the USAP_POOL_SIZE_MIN device property.
-     */
-    private static final int USAP_POOL_SIZE_MIN_LIMIT = 1;
-
-    /** The default value used for the USAP_POOL_SIZE_MAX device property */
-    private static final String USAP_POOL_SIZE_MAX_DEFAULT = "10";
-
-    /** The default value used for the USAP_POOL_SIZE_MIN device property */
-    private static final String USAP_POOL_SIZE_MIN_DEFAULT = "1";
-
-    /** The default value used for the USAP_REFILL_DELAY_MS device property */
-    private static final String USAP_POOL_REFILL_DELAY_MS_DEFAULT = "3000";
-
     /** The "not a timestamp" value for the refill delay timestamp mechanism. */
     private static final int INVALID_TIMESTAMP = -1;
 
@@ -264,46 +244,35 @@ class ZygoteServer {
 
     private void fetchUsapPoolPolicyProps() {
         if (mUsapPoolSupported) {
-            final String usapPoolSizeMaxPropString = Zygote.getConfigurationProperty(
-                    ZygoteConfig.USAP_POOL_SIZE_MAX, USAP_POOL_SIZE_MAX_DEFAULT);
+            mUsapPoolSizeMax = Integer.min(
+                ZygoteConfig.getInt(
+                    ZygoteConfig.USAP_POOL_SIZE_MAX,
+                    ZygoteConfig.USAP_POOL_SIZE_MAX_DEFAULT),
+                ZygoteConfig.USAP_POOL_SIZE_MAX_LIMIT);
 
-            if (!usapPoolSizeMaxPropString.isEmpty()) {
-                mUsapPoolSizeMax = Integer.min(Integer.parseInt(
-                        usapPoolSizeMaxPropString), USAP_POOL_SIZE_MAX_LIMIT);
-            }
+            mUsapPoolSizeMin = Integer.max(
+                ZygoteConfig.getInt(
+                    ZygoteConfig.USAP_POOL_SIZE_MIN,
+                    ZygoteConfig.USAP_POOL_SIZE_MIN_DEFAULT),
+                ZygoteConfig.USAP_POOL_SIZE_MIN_LIMIT);
 
-            final String usapPoolSizeMinPropString = Zygote.getConfigurationProperty(
-                    ZygoteConfig.USAP_POOL_SIZE_MIN, USAP_POOL_SIZE_MIN_DEFAULT);
-
-            if (!usapPoolSizeMinPropString.isEmpty()) {
-                mUsapPoolSizeMin = Integer.max(
-                        Integer.parseInt(usapPoolSizeMinPropString), USAP_POOL_SIZE_MIN_LIMIT);
-            }
-
-            final String usapPoolRefillThresholdPropString = Zygote.getConfigurationProperty(
+            mUsapPoolRefillThreshold = Integer.min(
+                ZygoteConfig.getInt(
                     ZygoteConfig.USAP_POOL_REFILL_THRESHOLD,
-                    Integer.toString(mUsapPoolSizeMax / 2));
+                    ZygoteConfig.USAP_POOL_REFILL_THRESHOLD_DEFAULT),
+                mUsapPoolSizeMax);
 
-            if (!usapPoolRefillThresholdPropString.isEmpty()) {
-                mUsapPoolRefillThreshold = Integer.min(
-                        Integer.parseInt(usapPoolRefillThresholdPropString),
-                        mUsapPoolSizeMax);
-            }
-
-            final String usapPoolRefillDelayMsPropString = Zygote.getConfigurationProperty(
-                    ZygoteConfig.USAP_POOL_REFILL_DELAY_MS, USAP_POOL_REFILL_DELAY_MS_DEFAULT);
-
-            if (!usapPoolRefillDelayMsPropString.isEmpty()) {
-                mUsapPoolRefillDelayMs = Integer.parseInt(usapPoolRefillDelayMsPropString);
-            }
+            mUsapPoolRefillDelayMs = ZygoteConfig.getInt(
+                ZygoteConfig.USAP_POOL_REFILL_DELAY_MS,
+                ZygoteConfig.USAP_POOL_REFILL_DELAY_MS_DEFAULT);
 
             // Validity check
             if (mUsapPoolSizeMin >= mUsapPoolSizeMax) {
                 Log.w(TAG, "The max size of the USAP pool must be greater than the minimum size."
                         + "  Restoring default values.");
 
-                mUsapPoolSizeMax = Integer.parseInt(USAP_POOL_SIZE_MAX_DEFAULT);
-                mUsapPoolSizeMin = Integer.parseInt(USAP_POOL_SIZE_MIN_DEFAULT);
+                mUsapPoolSizeMax = ZygoteConfig.USAP_POOL_SIZE_MAX_DEFAULT;
+                mUsapPoolSizeMin = ZygoteConfig.USAP_POOL_SIZE_MIN_DEFAULT;
                 mUsapPoolRefillThreshold = mUsapPoolSizeMax / 2;
             }
         }
@@ -337,7 +306,7 @@ class ZygoteServer {
      * @param sessionSocketRawFDs  Anonymous session sockets that are currently open
      * @return In the Zygote process this function will always return null; in unspecialized app
      *         processes this function will return a Runnable object representing the new
-     *         application that is passed up from usapMain.
+     *         application that is passed up from childMain (the usap's main wait loop).
      */
 
     Runnable fillUsapPool(int[] sessionSocketRawFDs, boolean isPriorityRefill) {
@@ -411,7 +380,7 @@ class ZygoteServer {
         }
     }
 
-    void resetUsapRefillState() {
+    private void resetUsapRefillState() {
         mUsapPoolRefillAction = UsapPoolRefillAction.NONE;
         mUsapPoolRefillTriggerTimestamp = INVALID_TIMESTAMP;
     }
@@ -420,6 +389,7 @@ class ZygoteServer {
      * Runs the zygote process's select loop. Accepts new connections as
      * they happen, and reads commands from connections one spawn-request's
      * worth at a time.
+     * @param abiList list of ABIs supported by this zygote.
      */
     Runnable runSelectLoop(String abiList) {
         ArrayList<FileDescriptor> socketFDs = new ArrayList<>();
@@ -492,10 +462,12 @@ class ZygoteServer {
                 long elapsedTimeMs = System.currentTimeMillis() - mUsapPoolRefillTriggerTimestamp;
 
                 if (elapsedTimeMs >= mUsapPoolRefillDelayMs) {
-                    // Normalize the poll timeout value when the time between one poll event and the
-                    // next pushes us over the delay value.  This prevents poll receiving a 0
-                    // timeout value, which would result in it returning immediately.
-                    pollTimeoutMs = -1;
+                    // The refill delay has elapsed during the period between poll invocations.
+                    // We will now check for any currently ready file descriptors before refilling
+                    // the USAP pool.
+                    pollTimeoutMs = 0;
+                    mUsapPoolRefillTriggerTimestamp = INVALID_TIMESTAMP;
+                    mUsapPoolRefillAction = UsapPoolRefillAction.DELAYED;
 
                 } else if (elapsedTimeMs <= 0) {
                     // This can occur if the clock used by currentTimeMillis is reset, which is
@@ -517,9 +489,11 @@ class ZygoteServer {
             }
 
             if (pollReturnValue == 0) {
-                // The poll timeout has been exceeded.  This only occurs when we have finished the
-                // USAP pool refill delay period.
-
+                // The poll returned zero results either when the timeout value has been exceeded
+                // or when a non-blocking poll is issued and no FDs are ready.  In either case it
+                // is time to refill the pool.  This will result in a duplicate assignment when
+                // the non-blocking poll returns zero results, but it avoids an additional
+                // conditional in the else branch.
                 mUsapPoolRefillTriggerTimestamp = INVALID_TIMESTAMP;
                 mUsapPoolRefillAction = UsapPoolRefillAction.DELAYED;
 
@@ -533,22 +507,23 @@ class ZygoteServer {
 
                     if (pollIndex == 0) {
                         // Zygote server socket
-
                         ZygoteConnection newPeer = acceptCommandPeer(abiList);
                         peers.add(newPeer);
                         socketFDs.add(newPeer.getFileDescriptor());
-
                     } else if (pollIndex < usapPoolEventFDIndex) {
                         // Session socket accepted from the Zygote server socket
 
                         try {
                             ZygoteConnection connection = peers.get(pollIndex);
-                            final Runnable command = connection.processOneCommand(this);
+                            boolean multipleForksOK = !isUsapPoolEnabled()
+                                    && ZygoteHooks.isIndefiniteThreadSuspensionSafe();
+                            final Runnable command =
+                                    connection.processCommand(this, multipleForksOK);
 
                             // TODO (chriswailes): Is this extra check necessary?
                             if (mIsForkChild) {
                                 // We're in the child. We should always have a command to run at
-                                // this stage if processOneCommand hasn't called "exec".
+                                // this stage if processCommand hasn't called "exec".
                                 if (command == null) {
                                     throw new IllegalStateException("command == null");
                                 }
@@ -561,7 +536,7 @@ class ZygoteServer {
                                 }
 
                                 // We don't know whether the remote side of the socket was closed or
-                                // not until we attempt to read from it from processOneCommand. This
+                                // not until we attempt to read from it from processCommand. This
                                 // shows up as a regular POLLIN event in our regular processing
                                 // loop.
                                 if (connection.isClosedByPeer()) {

@@ -26,11 +26,14 @@ import android.util.ArraySet;
 import android.util.Log;
 import android.view.Display;
 
+import com.android.internal.annotations.GuardedBy;
+
 import java.util.Set;
 
 public class SysuiTestableContext extends TestableContext {
 
-    private Set<BroadcastReceiver> mRegisteredReceivers = new ArraySet<>();
+    @GuardedBy("mRegisteredReceivers")
+    private final Set<BroadcastReceiver> mRegisteredReceivers = new ArraySet<>();
 
     public SysuiTestableContext(Context base) {
         super(base);
@@ -54,7 +57,11 @@ public class SysuiTestableContext extends TestableContext {
     }
 
     public void cleanUpReceivers(String testName) {
-        Set<BroadcastReceiver> copy = new ArraySet<>(mRegisteredReceivers);
+        Set<BroadcastReceiver> copy;
+        synchronized (mRegisteredReceivers) {
+            copy = new ArraySet<>(mRegisteredReceivers);
+            mRegisteredReceivers.clear();
+        }
         for (BroadcastReceiver r : copy) {
             try {
                 unregisterReceiver(r);
@@ -68,33 +75,74 @@ public class SysuiTestableContext extends TestableContext {
     @Override
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) {
         if (receiver != null) {
-            mRegisteredReceivers.add(receiver);
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(receiver);
+            }
         }
         return super.registerReceiver(receiver, filter);
+    }
+
+    @Override
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter, int flags) {
+        if (receiver != null) {
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(receiver);
+            }
+        }
+        return super.registerReceiver(receiver, filter, flags);
     }
 
     @Override
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter,
             String broadcastPermission, Handler scheduler) {
         if (receiver != null) {
-            mRegisteredReceivers.add(receiver);
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(receiver);
+            }
         }
         return super.registerReceiver(receiver, filter, broadcastPermission, scheduler);
+    }
+
+    @Override
+    public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter,
+            String broadcastPermission, Handler scheduler, int flags) {
+        if (receiver != null) {
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(receiver);
+            }
+        }
+        return super.registerReceiver(receiver, filter, broadcastPermission, scheduler, flags);
     }
 
     @Override
     public Intent registerReceiverAsUser(BroadcastReceiver receiver, UserHandle user,
             IntentFilter filter, String broadcastPermission, Handler scheduler) {
         if (receiver != null) {
-            mRegisteredReceivers.add(receiver);
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(receiver);
+            }
         }
         return super.registerReceiverAsUser(receiver, user, filter, broadcastPermission, scheduler);
     }
 
     @Override
+    public Intent registerReceiverAsUser(BroadcastReceiver receiver, UserHandle user,
+            IntentFilter filter, String broadcastPermission, Handler scheduler, int flags) {
+        if (receiver != null) {
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.add(receiver);
+            }
+        }
+        return super.registerReceiverAsUser(receiver, user, filter, broadcastPermission, scheduler,
+                flags);
+    }
+
+    @Override
     public void unregisterReceiver(BroadcastReceiver receiver) {
         if (receiver != null) {
-            mRegisteredReceivers.remove(receiver);
+            synchronized (mRegisteredReceivers) {
+                mRegisteredReceivers.remove(receiver);
+            }
         }
         super.unregisterReceiver(receiver);
     }

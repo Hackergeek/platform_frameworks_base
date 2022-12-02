@@ -16,15 +16,19 @@
 
 package com.android.internal.os;
 
+import static com.android.internal.os.SafeZipPathValidatorCallback.VALIDATE_ZIP_PATH_FOR_PATH_TRAVERSAL;
+
+import android.annotation.TestApi;
 import android.app.ActivityManager;
 import android.app.ActivityThread;
 import android.app.ApplicationErrorReport;
 import android.app.IActivityManager;
+import android.app.compat.CompatChanges;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.type.DefaultMimeMapFactory;
+import android.net.TrafficStats;
 import android.os.Build;
 import android.os.DeadObjectException;
-import android.os.Debug;
 import android.os.IBinder;
 import android.os.Process;
 import android.os.SystemProperties;
@@ -33,10 +37,10 @@ import android.util.Log;
 import android.util.Slog;
 
 import com.android.internal.logging.AndroidConfig;
-import com.android.server.NetworkManagementSocketTagger;
 
 import dalvik.system.RuntimeHooks;
 import dalvik.system.VMRuntime;
+import dalvik.system.ZipPathValidator;
 
 import libcore.content.type.MimeMap;
 
@@ -63,6 +67,8 @@ public class RuntimeInit {
     private static IBinder mApplicationObject;
 
     private static volatile boolean mCrashing = false;
+    private static final String SYSPROP_CRASH_COUNT = "sys.system_server.crash_java";
+    private static int mCrashCount;
 
     private static volatile ApplicationWtfHandler sDefaultApplicationWtfHandler;
 
@@ -106,6 +112,8 @@ public class RuntimeInit {
             // first clause in either of these two cases, only for system_server.
             if (mApplicationObject == null && (Process.SYSTEM_UID == Process.myUid())) {
                 Clog_e(TAG, "*** FATAL EXCEPTION IN SYSTEM PROCESS: " + t.getName(), e);
+                mCrashCount = SystemProperties.getInt(SYSPROP_CRASH_COUNT, 0) + 1;
+                SystemProperties.set(SYSPROP_CRASH_COUNT, String.valueOf(mCrashCount));
             } else {
                 logUncaught(t.getName(), ActivityThread.currentProcessName(), Process.myPid(), e);
             }
@@ -255,21 +263,30 @@ public class RuntimeInit {
         /*
          * Wire socket tagging to traffic stats.
          */
-        NetworkManagementSocketTagger.install();
+        TrafficStats.attachSocketTagger();
 
         /*
-         * If we're running in an emulator launched with "-trace", put the
-         * VM into emulator trace profiling mode so that the user can hit
-         * F9/F10 at any time to capture traces.  This has performance
-         * consequences, so it's not something you want to do always.
+         * Initialize the zip path validator callback depending on the targetSdk.
          */
-        String trace = SystemProperties.get("ro.kernel.android.tracing");
-        if (trace.equals("1")) {
-            Slog.i(TAG, "NOTE: emulator trace profiling enabled");
-            Debug.enableEmulatorTraceOutput();
-        }
+        initZipPathValidatorCallback();
 
         initialized = true;
+    }
+
+    /**
+     * If targetSDK >= U: set the safe zip path validator callback which disallows dangerous zip
+     * entry names.
+     * Otherwise: clear the callback to the default validation.
+     *
+     * @hide
+     */
+    @TestApi
+    public static void initZipPathValidatorCallback() {
+        if (CompatChanges.isChangeEnabled(VALIDATE_ZIP_PATH_FOR_PATH_TRAVERSAL)) {
+            ZipPathValidator.setCallback(new SafeZipPathValidatorCallback());
+        } else {
+            ZipPathValidator.clearCallback();
+        }
     }
 
     /**

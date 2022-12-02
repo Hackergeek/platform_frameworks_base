@@ -32,6 +32,48 @@ import android.os.TimestampedValue;
 public interface TimeDetector {
 
     /**
+     * The name of the service for shell commands.
+     * @hide
+     */
+    String SHELL_COMMAND_SERVICE_NAME = "time_detector";
+
+    /**
+     * A shell command that prints the current "auto time detection" global setting value.
+     * @hide
+     */
+    String SHELL_COMMAND_IS_AUTO_DETECTION_ENABLED = "is_auto_detection_enabled";
+
+    /**
+     * A shell command that injects a manual time suggestion.
+     * @hide
+     */
+    String SHELL_COMMAND_SUGGEST_MANUAL_TIME = "suggest_manual_time";
+
+    /**
+     * A shell command that injects a telephony time suggestion.
+     * @hide
+     */
+    String SHELL_COMMAND_SUGGEST_TELEPHONY_TIME = "suggest_telephony_time";
+
+    /**
+     * A shell command that injects a network time suggestion.
+     * @hide
+     */
+    String SHELL_COMMAND_SUGGEST_NETWORK_TIME = "suggest_network_time";
+
+    /**
+     * A shell command that injects a GNSS time suggestion.
+     * @hide
+     */
+    String SHELL_COMMAND_SUGGEST_GNSS_TIME = "suggest_gnss_time";
+
+    /**
+     * A shell command that injects a external time suggestion.
+     * @hide
+     */
+    String SHELL_COMMAND_SUGGEST_EXTERNAL_TIME = "suggest_external_time";
+
+    /**
      * A shared utility method to create a {@link ManualTimeSuggestion}.
      *
      * @hide
@@ -53,12 +95,16 @@ public interface TimeDetector {
     void suggestTelephonyTime(@NonNull TelephonyTimeSuggestion timeSuggestion);
 
     /**
-     * Suggests the user's manually entered current time to the detector.
+     * Suggests the current time, determined from the user's manually entered information, to
+     * the detector. Returns {@code false} if the suggestion was invalid, or the device
+     * configuration prevented the suggestion being used, {@code true} if the suggestion was
+     * accepted. A suggestion that is valid but does not change the time because it matches the
+     * current device time is considered accepted.
      *
      * @hide
      */
     @RequiresPermission(android.Manifest.permission.SUGGEST_MANUAL_TIME_AND_ZONE)
-    void suggestManualTime(@NonNull ManualTimeSuggestion timeSuggestion);
+    boolean suggestManualTime(@NonNull ManualTimeSuggestion timeSuggestion);
 
     /**
      * Suggests the time according to a network time source like NTP.
@@ -67,4 +113,12 @@ public interface TimeDetector {
      */
     @RequiresPermission(android.Manifest.permission.SET_TIME)
     void suggestNetworkTime(NetworkTimeSuggestion timeSuggestion);
+
+    /**
+     * Suggests the time according to a gnss time source.
+     *
+     * @hide
+     */
+    @RequiresPermission(android.Manifest.permission.SET_TIME)
+    void suggestGnssTime(GnssTimeSuggestion timeSuggestion);
 }

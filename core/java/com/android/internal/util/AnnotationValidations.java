@@ -26,7 +26,7 @@ import android.annotation.Size;
 import android.annotation.UserIdInt;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.content.pm.PackageManager.PackageInfoFlags;
+import android.content.pm.PackageManager.PackageInfoFlagsBits;
 import android.content.pm.PackageManager.PermissionResult;
 import android.os.UserHandle;
 
@@ -160,8 +160,8 @@ public class AnnotationValidations {
     }
 
     public static void validate(
-            Class<PackageInfoFlags> annotation, PackageInfoFlags ignored, int value) {
-        validateIntFlags(annotation, value,
+            Class<PackageInfoFlagsBits> annotation, PackageInfoFlagsBits ignored, long value) {
+        validateLongFlags(annotation, value,
                 flagsUpTo(PackageManager.MATCH_HIDDEN_UNTIL_INSTALLED_COMPONENTS));
     }
 
@@ -182,7 +182,7 @@ public class AnnotationValidations {
             Annotation ignored, int value, Object... params) {}
     public static void validate(Class<? extends Annotation> annotation,
             Annotation ignored, int value) {
-        if (("android.annotation".equals(annotation.getPackageName$())
+        if (("android.annotation".equals(annotation.getPackageName())
                 && annotation.getSimpleName().endsWith("Res"))
                 || ColorInt.class.equals(annotation)) {
             if (value < 0) {
@@ -192,7 +192,7 @@ public class AnnotationValidations {
     }
     public static void validate(Class<? extends Annotation> annotation,
             Annotation ignored, long value) {
-        if ("android.annotation".equals(annotation.getPackageName$())
+        if ("android.annotation".equals(annotation.getPackageName())
                 && annotation.getSimpleName().endsWith("Long")) {
             if (value < 0L) {
                 invalid(annotation, value);
@@ -212,7 +212,12 @@ public class AnnotationValidations {
             invalid(annotation, "0x" + Integer.toHexString(value));
         }
     }
-
+    private static void validateLongFlags(
+            Class<? extends Annotation> annotation, long value, int validBits) {
+        if ((validBits & value) != validBits) {
+            invalid(annotation, "0x" + Long.toHexString(value));
+        }
+    }
     private static void invalid(Class<? extends Annotation> annotation, Object value) {
         invalid("@" + annotation.getSimpleName(), value);
     }

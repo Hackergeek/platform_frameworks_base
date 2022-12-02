@@ -28,9 +28,11 @@
 namespace android {
 
 static struct {
+    jclass clazz;
+    jmethodID ctor;
     jfieldID ptr;
     jfieldID name;
-    jfieldID dispatchingTimeoutNanos;
+    jfieldID dispatchingTimeoutMillis;
     jfieldID token;
 } gInputApplicationHandleClassInfo;
 
@@ -54,54 +56,61 @@ jobject NativeInputApplicationHandle::getInputApplicationHandleObjLocalRef(JNIEn
 
 bool NativeInputApplicationHandle::updateInfo() {
     JNIEnv* env = AndroidRuntime::getJNIEnv();
-    jobject obj = env->NewLocalRef(mObjWeak);
-    if (!obj) {
+    ScopedLocalRef<jobject> obj(env, env->NewLocalRef(mObjWeak));
+    if (!obj.get()) {
         return false;
     }
+    if (mInfo.token.get() != nullptr) {
+        // The java fields are immutable, so it doesn't need to update again.
+        return true;
+    }
 
-    mInfo.name = getStringField(env, obj, gInputApplicationHandleClassInfo.name, "<null>");
+    mInfo.name = getStringField(env, obj.get(), gInputApplicationHandleClassInfo.name, "<null>");
 
-    mInfo.dispatchingTimeout = env->GetLongField(obj,
-            gInputApplicationHandleClassInfo.dispatchingTimeoutNanos);
+    mInfo.dispatchingTimeoutMillis =
+            env->GetLongField(obj.get(), gInputApplicationHandleClassInfo.dispatchingTimeoutMillis);
 
-    jobject tokenObj = env->GetObjectField(obj,
-            gInputApplicationHandleClassInfo.token);
-    if (tokenObj) {
-        mInfo.token = ibinderForJavaObject(env, tokenObj);
-        env->DeleteLocalRef(tokenObj);
+    ScopedLocalRef<jobject> tokenObj(env, env->GetObjectField(obj.get(),
+            gInputApplicationHandleClassInfo.token));
+    if (tokenObj.get()) {
+        mInfo.token = ibinderForJavaObject(env, tokenObj.get());
     } else {
         mInfo.token.clear();
     }
 
-    env->DeleteLocalRef(obj);
     return mInfo.token.get() != nullptr;
 }
 
-
 // --- Global functions ---
 
-sp<InputApplicationHandle> android_view_InputApplicationHandle_getHandle(
+std::shared_ptr<InputApplicationHandle> android_view_InputApplicationHandle_getHandle(
         JNIEnv* env, jobject inputApplicationHandleObj) {
     if (!inputApplicationHandleObj) {
         return NULL;
     }
 
     AutoMutex _l(gHandleMutex);
-
     jlong ptr = env->GetLongField(inputApplicationHandleObj, gInputApplicationHandleClassInfo.ptr);
-    NativeInputApplicationHandle* handle;
+    std::shared_ptr<NativeInputApplicationHandle>* handle;
     if (ptr) {
-        handle = reinterpret_cast<NativeInputApplicationHandle*>(ptr);
+        handle = reinterpret_cast<std::shared_ptr<NativeInputApplicationHandle>*>(ptr);
     } else {
         jweak objWeak = env->NewWeakGlobalRef(inputApplicationHandleObj);
-        handle = new NativeInputApplicationHandle(objWeak);
-        handle->incStrong((void*)android_view_InputApplicationHandle_getHandle);
+        handle = new std::shared_ptr(std::make_shared<NativeInputApplicationHandle>(objWeak));
         env->SetLongField(inputApplicationHandleObj, gInputApplicationHandleClassInfo.ptr,
                 reinterpret_cast<jlong>(handle));
     }
-    return handle;
+    return *handle;
 }
 
+jobject android_view_InputApplicationHandle_fromInputApplicationInfo(
+        JNIEnv* env, gui::InputApplicationInfo inputApplicationInfo) {
+    jobject binderObject = javaObjectForIBinder(env, inputApplicationInfo.token);
+    ScopedLocalRef<jstring> name(env, env->NewStringUTF(inputApplicationInfo.name.data()));
+    return env->NewObject(gInputApplicationHandleClassInfo.clazz,
+                          gInputApplicationHandleClassInfo.ctor, binderObject, name.get(),
+                          inputApplicationInfo.dispatchingTimeoutMillis);
+}
 
 // --- JNI ---
 
@@ -112,8 +121,9 @@ static void android_view_InputApplicationHandle_nativeDispose(JNIEnv* env, jobje
     if (ptr) {
         env->SetLongField(obj, gInputApplicationHandleClassInfo.ptr, 0);
 
-        NativeInputApplicationHandle* handle = reinterpret_cast<NativeInputApplicationHandle*>(ptr);
-        handle->decStrong((void*)android_view_InputApplicationHandle_getHandle);
+        std::shared_ptr<NativeInputApplicationHandle>* handle =
+                reinterpret_cast<std::shared_ptr<NativeInputApplicationHandle>*>(ptr);
+        delete handle;
     }
 }
 
@@ -132,6 +142,10 @@ static const JNINativeMethod gInputApplicationHandleMethods[] = {
         var = env->GetFieldID(clazz, fieldName, fieldDescriptor); \
         LOG_FATAL_IF(! (var), "Unable to find field " fieldName);
 
+#define GET_METHOD_ID(var, clazz, methodName, methodSignature)  \
+    var = env->GetMethodID(clazz, methodName, methodSignature); \
+    LOG_ALWAYS_FATAL_IF(!(var), "Unable to find method " methodName);
+
 int register_android_view_InputApplicationHandle(JNIEnv* env) {
     int res = jniRegisterNativeMethods(env, "android/view/InputApplicationHandle",
             gInputApplicationHandleMethods, NELEM(gInputApplicationHandleMethods));
@@ -140,6 +154,10 @@ int register_android_view_InputApplicationHandle(JNIEnv* env) {
 
     jclass clazz;
     FIND_CLASS(clazz, "android/view/InputApplicationHandle");
+    gInputApplicationHandleClassInfo.clazz = MakeGlobalRefOrDie(env, clazz);
+
+    GET_METHOD_ID(gInputApplicationHandleClassInfo.ctor, clazz, "<init>",
+                  "(Landroid/os/IBinder;Ljava/lang/String;J)V");
 
     GET_FIELD_ID(gInputApplicationHandleClassInfo.ptr, clazz,
             "ptr", "J");
@@ -147,9 +165,8 @@ int register_android_view_InputApplicationHandle(JNIEnv* env) {
     GET_FIELD_ID(gInputApplicationHandleClassInfo.name, clazz,
             "name", "Ljava/lang/String;");
 
-    GET_FIELD_ID(gInputApplicationHandleClassInfo.dispatchingTimeoutNanos,
-            clazz,
-            "dispatchingTimeoutNanos", "J");
+    GET_FIELD_ID(gInputApplicationHandleClassInfo.dispatchingTimeoutMillis, clazz,
+                 "dispatchingTimeoutMillis", "J");
 
     GET_FIELD_ID(gInputApplicationHandleClassInfo.token, clazz,
             "token", "Landroid/os/IBinder;");

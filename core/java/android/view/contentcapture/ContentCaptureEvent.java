@@ -16,30 +16,33 @@
 package android.view.contentcapture;
 
 import static android.view.contentcapture.ContentCaptureHelper.getSanitizedString;
+import static android.view.contentcapture.ContentCaptureManager.DEBUG;
 import static android.view.contentcapture.ContentCaptureManager.NO_SESSION_ID;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.graphics.Insets;
+import android.graphics.Rect;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.text.Selection;
+import android.text.Spannable;
+import android.text.SpannableString;
 import android.util.Log;
 import android.view.autofill.AutofillId;
-
-import com.android.internal.util.Preconditions;
+import android.view.inputmethod.BaseInputConnection;
 
 import java.io.PrintWriter;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /** @hide */
 @SystemApi
-@TestApi
 public final class ContentCaptureEvent implements Parcelable {
 
     private static final String TAG = ContentCaptureEvent.class.getSimpleName();
@@ -119,6 +122,12 @@ public final class ContentCaptureEvent implements Parcelable {
      */
     public static final int TYPE_VIEW_INSETS_CHANGED = 9;
 
+    /**
+     * Called before {@link #TYPE_VIEW_TREE_APPEARING}, or after the size of the window containing
+     * the views changed.
+     */
+    public static final int TYPE_WINDOW_BOUNDS_CHANGED = 10;
+
     /** @hide */
     @IntDef(prefix = { "TYPE_" }, value = {
             TYPE_VIEW_APPEARED,
@@ -129,10 +138,14 @@ public final class ContentCaptureEvent implements Parcelable {
             TYPE_CONTEXT_UPDATED,
             TYPE_SESSION_PAUSED,
             TYPE_SESSION_RESUMED,
-            TYPE_VIEW_INSETS_CHANGED
+            TYPE_VIEW_INSETS_CHANGED,
+            TYPE_WINDOW_BOUNDS_CHANGED,
     })
     @Retention(RetentionPolicy.SOURCE)
     public @interface EventType{}
+
+    /** @hide */
+    public static final int MAX_INVALID_VALUE = -1;
 
     private final int mSessionId;
     private final int mType;
@@ -144,6 +157,15 @@ public final class ContentCaptureEvent implements Parcelable {
     private int mParentSessionId = NO_SESSION_ID;
     private @Nullable ContentCaptureContext mClientContext;
     private @Nullable Insets mInsets;
+    private @Nullable Rect mBounds;
+
+    private int mComposingStart = MAX_INVALID_VALUE;
+    private int mComposingEnd = MAX_INVALID_VALUE;
+    private int mSelectionStartIndex = MAX_INVALID_VALUE;
+    private int mSelectionEndIndex = MAX_INVALID_VALUE;
+
+    /** Only used in the main Content Capture session, no need to parcel */
+    private boolean mTextHasComposingSpan;
 
     /** @hide */
     public ContentCaptureEvent(int sessionId, int type, long eventTime) {
@@ -159,13 +181,13 @@ public final class ContentCaptureEvent implements Parcelable {
 
     /** @hide */
     public ContentCaptureEvent setAutofillId(@NonNull AutofillId id) {
-        mId = Preconditions.checkNotNull(id);
+        mId = Objects.requireNonNull(id);
         return this;
     }
 
     /** @hide */
     public ContentCaptureEvent setAutofillIds(@NonNull ArrayList<AutofillId> ids) {
-        mIds = Preconditions.checkNotNull(ids);
+        mIds = Objects.requireNonNull(ids);
         return this;
     }
 
@@ -175,7 +197,7 @@ public final class ContentCaptureEvent implements Parcelable {
      * @hide
      */
     public ContentCaptureEvent addAutofillId(@NonNull AutofillId id) {
-        Preconditions.checkNotNull(id);
+        Objects.requireNonNull(id);
         if (mIds == null) {
             mIds = new ArrayList<>();
             if (mId == null) {
@@ -239,7 +261,7 @@ public final class ContentCaptureEvent implements Parcelable {
     /** @hide */
     @NonNull
     public ContentCaptureEvent setViewNode(@NonNull ViewNode node) {
-        mNode = Preconditions.checkNotNull(node);
+        mNode = Objects.requireNonNull(node);
         return this;
     }
 
@@ -252,8 +274,90 @@ public final class ContentCaptureEvent implements Parcelable {
 
     /** @hide */
     @NonNull
+    public ContentCaptureEvent setComposingIndex(int start, int end) {
+        mComposingStart = start;
+        mComposingEnd = end;
+        return this;
+    }
+
+    /** @hide */
+    @NonNull
+    public boolean hasComposingSpan() {
+        return mComposingStart > MAX_INVALID_VALUE;
+    }
+
+    /** @hide */
+    @NonNull
+    public ContentCaptureEvent setSelectionIndex(int start, int end) {
+        mSelectionStartIndex = start;
+        mSelectionEndIndex = end;
+        return this;
+    }
+
+    boolean hasSameComposingSpan(@NonNull ContentCaptureEvent other) {
+        return mComposingStart == other.mComposingStart && mComposingEnd == other.mComposingEnd;
+    }
+
+    boolean hasSameSelectionSpan(@NonNull ContentCaptureEvent other) {
+        return mSelectionStartIndex == other.mSelectionStartIndex
+                && mSelectionEndIndex == other.mSelectionEndIndex;
+    }
+
+    private int getComposingStart() {
+        return mComposingStart;
+    }
+
+    private int getComposingEnd() {
+        return mComposingEnd;
+    }
+
+    private int getSelectionStart() {
+        return mSelectionStartIndex;
+    }
+
+    private int getSelectionEnd() {
+        return mSelectionEndIndex;
+    }
+
+    private void restoreComposingSpan() {
+        if (mComposingStart <= MAX_INVALID_VALUE
+                || mComposingEnd <= MAX_INVALID_VALUE) {
+            return;
+        }
+        if (mText instanceof Spannable) {
+            BaseInputConnection.setComposingSpans((Spannable) mText, mComposingStart,
+                    mComposingEnd);
+        } else {
+            Log.w(TAG, "Text is not a Spannable.");
+        }
+    }
+
+    private void restoreSelectionSpans() {
+        if (mSelectionStartIndex <= MAX_INVALID_VALUE
+                || mSelectionEndIndex <= MAX_INVALID_VALUE) {
+            return;
+        }
+
+        if (mText instanceof SpannableString) {
+            SpannableString ss = (SpannableString) mText;
+            ss.setSpan(Selection.SELECTION_START, mSelectionStartIndex, mSelectionStartIndex, 0);
+            ss.setSpan(Selection.SELECTION_END, mSelectionEndIndex, mSelectionEndIndex, 0);
+        } else {
+            Log.w(TAG, "Text is not a SpannableString.");
+        }
+    }
+
+    /** @hide */
+    @NonNull
     public ContentCaptureEvent setInsets(@NonNull Insets insets) {
         mInsets = insets;
+        return this;
+    }
+
+    /** @hide */
+    @NonNull
+    public ContentCaptureEvent setBounds(@NonNull Rect bounds) {
+        mBounds = bounds;
         return this;
     }
 
@@ -330,13 +434,23 @@ public final class ContentCaptureEvent implements Parcelable {
     }
 
     /**
+     * Gets the {@link Rect} bounds of the window associated with the event. Valid bounds will only
+     * be returned if the type of the event is {@link #TYPE_WINDOW_BOUNDS_CHANGED}, otherwise they
+     * will be null.
+     */
+    @Nullable
+    public Rect getBounds() {
+        return mBounds;
+    }
+
+    /**
      * Merges event of the same type, either {@link #TYPE_VIEW_TEXT_CHANGED}
      * or {@link #TYPE_VIEW_DISAPPEARED}.
      *
      * @hide
      */
     public void mergeEvent(@NonNull ContentCaptureEvent event) {
-        Preconditions.checkNotNull(event);
+        Objects.requireNonNull(event);
         final int eventType = event.getType();
         if (mType != eventType) {
             Log.e(TAG, "mergeEvent(" + getTypeAsString(eventType) + ") cannot be merged "
@@ -364,6 +478,8 @@ public final class ContentCaptureEvent implements Parcelable {
                     + "TYPE_VIEW_DISAPPEARED event with neither id or ids: " + event);
         } else if (eventType == TYPE_VIEW_TEXT_CHANGED) {
             setText(event.getText());
+            setComposingIndex(event.getComposingStart(), event.getComposingEnd());
+            setSelectionIndex(event.getSelectionStart(), event.getSelectionEnd());
         } else {
             Log.e(TAG, "mergeEvent(" + getTypeAsString(eventType)
                     + ") does not support this event type.");
@@ -398,6 +514,17 @@ public final class ContentCaptureEvent implements Parcelable {
         if (mInsets != null) {
             pw.print(", insets="); pw.println(mInsets);
         }
+        if (mBounds != null) {
+            pw.print(", bounds="); pw.println(mBounds);
+        }
+        if (mComposingStart > MAX_INVALID_VALUE) {
+            pw.print(", composing("); pw.print(mComposingStart);
+            pw.print(", "); pw.print(mComposingEnd); pw.print(")");
+        }
+        if (mSelectionStartIndex > MAX_INVALID_VALUE) {
+            pw.print(", selection("); pw.print(mSelectionStartIndex);
+            pw.print(", "); pw.print(mSelectionEndIndex); pw.print(")");
+        }
     }
 
     @NonNull
@@ -417,19 +544,34 @@ public final class ContentCaptureEvent implements Parcelable {
         }
         if (mNode != null) {
             final String className = mNode.getClassName();
-            if (mNode != null) {
-                string.append(", class=").append(className);
-            }
+            string.append(", class=").append(className);
             string.append(", id=").append(mNode.getAutofillId());
+            if (mNode.getText() != null) {
+                string.append(", text=")
+                        .append(DEBUG ? mNode.getText() : getSanitizedString(mNode.getText()));
+            }
         }
         if (mText != null) {
-            string.append(", text=").append(getSanitizedString(mText));
+            string.append(", text=")
+                    .append(DEBUG ? mText : getSanitizedString(mText));
         }
         if (mClientContext != null) {
             string.append(", context=").append(mClientContext);
         }
         if (mInsets != null) {
             string.append(", insets=").append(mInsets);
+        }
+        if (mBounds != null) {
+            string.append(", bounds=").append(mBounds);
+        }
+        if (mComposingStart > MAX_INVALID_VALUE) {
+            string.append(", composing=[")
+                    .append(mComposingStart).append(",").append(mComposingEnd).append("]");
+        }
+        if (mSelectionStartIndex > MAX_INVALID_VALUE) {
+            string.append(", selection=[")
+                    .append(mSelectionStartIndex).append(",")
+                    .append(mSelectionEndIndex).append("]");
         }
         return string.append(']').toString();
     }
@@ -457,6 +599,15 @@ public final class ContentCaptureEvent implements Parcelable {
         if (mType == TYPE_VIEW_INSETS_CHANGED) {
             parcel.writeParcelable(mInsets, flags);
         }
+        if (mType == TYPE_WINDOW_BOUNDS_CHANGED) {
+            parcel.writeParcelable(mBounds, flags);
+        }
+        if (mType == TYPE_VIEW_TEXT_CHANGED) {
+            parcel.writeInt(mComposingStart);
+            parcel.writeInt(mComposingEnd);
+            parcel.writeInt(mSelectionStartIndex);
+            parcel.writeInt(mSelectionEndIndex);
+        }
     }
 
     public static final @android.annotation.NonNull Parcelable.Creator<ContentCaptureEvent> CREATOR =
@@ -469,7 +620,7 @@ public final class ContentCaptureEvent implements Parcelable {
             final int type = parcel.readInt();
             final long eventTime  = parcel.readLong();
             final ContentCaptureEvent event = new ContentCaptureEvent(sessionId, type, eventTime);
-            final AutofillId id = parcel.readParcelable(null);
+            final AutofillId id = parcel.readParcelable(null, android.view.autofill.AutofillId.class);
             if (id != null) {
                 event.setAutofillId(id);
             }
@@ -486,10 +637,19 @@ public final class ContentCaptureEvent implements Parcelable {
                 event.setParentSessionId(parcel.readInt());
             }
             if (type == TYPE_SESSION_STARTED || type == TYPE_CONTEXT_UPDATED) {
-                event.setClientContext(parcel.readParcelable(null));
+                event.setClientContext(parcel.readParcelable(null, android.view.contentcapture.ContentCaptureContext.class));
             }
             if (type == TYPE_VIEW_INSETS_CHANGED) {
-                event.setInsets(parcel.readParcelable(null));
+                event.setInsets(parcel.readParcelable(null, android.graphics.Insets.class));
+            }
+            if (type == TYPE_WINDOW_BOUNDS_CHANGED) {
+                event.setBounds(parcel.readParcelable(null, android.graphics.Rect.class));
+            }
+            if (type == TYPE_VIEW_TEXT_CHANGED) {
+                event.setComposingIndex(parcel.readInt(), parcel.readInt());
+                event.restoreComposingSpan();
+                event.setSelectionIndex(parcel.readInt(), parcel.readInt());
+                event.restoreSelectionSpans();
             }
             return event;
         }
@@ -526,6 +686,8 @@ public final class ContentCaptureEvent implements Parcelable {
                 return "CONTEXT_UPDATED";
             case TYPE_VIEW_INSETS_CHANGED:
                 return "VIEW_INSETS_CHANGED";
+            case TYPE_WINDOW_BOUNDS_CHANGED:
+                return "TYPE_WINDOW_BOUNDS_CHANGED";
             default:
                 return "UKNOWN_TYPE: " + type;
         }

@@ -16,80 +16,163 @@
 
 package com.android.systemui.biometrics;
 
+import static android.hardware.biometrics.BiometricAuthenticator.TYPE_FINGERPRINT;
 import static android.hardware.biometrics.BiometricManager.Authenticators;
+import static android.hardware.biometrics.BiometricManager.BIOMETRIC_MULTI_SENSOR_FINGERPRINT_AND_FACE;
+
+import static com.google.common.truth.Truth.assertThat;
 
 import static junit.framework.Assert.assertEquals;
 import static junit.framework.Assert.assertNull;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import android.app.ActivityManager;
-import android.app.IActivityTaskManager;
+import android.app.ActivityTaskManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.Point;
 import android.hardware.biometrics.BiometricAuthenticator;
 import android.hardware.biometrics.BiometricConstants;
+import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
-import android.hardware.biometrics.IBiometricServiceReceiverInternal;
+import android.hardware.biometrics.BiometricStateListener;
+import android.hardware.biometrics.ComponentInfoInternal;
+import android.hardware.biometrics.IBiometricContextListener;
+import android.hardware.biometrics.IBiometricSysuiReceiver;
+import android.hardware.biometrics.PromptInfo;
+import android.hardware.biometrics.SensorProperties;
+import android.hardware.display.DisplayManager;
 import android.hardware.face.FaceManager;
+import android.hardware.fingerprint.FingerprintManager;
+import android.hardware.fingerprint.FingerprintSensorProperties;
+import android.hardware.fingerprint.FingerprintSensorPropertiesInternal;
+import android.hardware.fingerprint.IFingerprintAuthenticatorsRegisteredCallback;
 import android.os.Bundle;
-import android.test.suitebuilder.annotation.SmallTest;
+import android.os.Handler;
+import android.os.RemoteException;
+import android.os.UserManager;
 import android.testing.AndroidTestingRunner;
 import android.testing.TestableContext;
+import android.testing.TestableLooper;
 import android.testing.TestableLooper.RunWithLooper;
+import android.view.WindowManager;
+
+import androidx.test.filters.SmallTest;
 
 import com.android.internal.R;
+import com.android.internal.widget.LockPatternUtils;
 import com.android.systemui.SysuiTestCase;
+import com.android.systemui.keyguard.WakefulnessLifecycle;
+import com.android.systemui.plugins.statusbar.StatusBarStateController;
 import com.android.systemui.statusbar.CommandQueue;
+import com.android.systemui.util.concurrency.DelayableExecutor;
+import com.android.systemui.util.concurrency.Execution;
+import com.android.systemui.util.concurrency.FakeExecution;
+import com.android.systemui.util.concurrency.FakeExecutor;
+import com.android.systemui.util.time.FakeSystemClock;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.AdditionalMatchers;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+
+import javax.inject.Provider;
 
 @RunWith(AndroidTestingRunner.class)
 @RunWithLooper
 @SmallTest
 public class AuthControllerTest extends SysuiTestCase {
 
+    private static final long REQUEST_ID = 22;
+
+    @Rule
+    public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+
     @Mock
     private PackageManager mPackageManager;
     @Mock
-    private IBiometricServiceReceiverInternal mReceiver;
+    private IBiometricSysuiReceiver mReceiver;
+    @Mock
+    private IBiometricContextListener mContextListener;
     @Mock
     private AuthDialog mDialog1;
     @Mock
     private AuthDialog mDialog2;
+    @Mock
+    private CommandQueue mCommandQueue;
+    @Mock
+    private ActivityTaskManager mActivityTaskManager;
+    @Mock
+    private WindowManager mWindowManager;
+    @Mock
+    private FingerprintManager mFingerprintManager;
+    @Mock
+    private FaceManager mFaceManager;
+    @Mock
+    private UdfpsController mUdfpsController;
+    @Mock
+    private SidefpsController mSidefpsController;
+    @Mock
+    private DisplayManager mDisplayManager;
+    @Mock
+    private WakefulnessLifecycle mWakefulnessLifecycle;
+    @Mock
+    private UserManager mUserManager;
+    @Mock
+    private LockPatternUtils mLockPatternUtils;
+    @Mock
+    private StatusBarStateController mStatusBarStateController;
+    @Captor
+    ArgumentCaptor<IFingerprintAuthenticatorsRegisteredCallback> mAuthenticatorsRegisteredCaptor;
+    @Captor
+    ArgumentCaptor<BiometricStateListener> mBiometricStateCaptor;
+    @Captor
+    ArgumentCaptor<StatusBarStateController.StateListener> mStatusBarStateListenerCaptor;
 
+    private TestableContext mContextSpy;
+    private Execution mExecution;
+    private TestableLooper mTestableLooper;
+    private Handler mHandler;
+    private DelayableExecutor mBackgroundExecutor;
     private TestableAuthController mAuthController;
 
-
     @Before
-    public void setup() {
-        MockitoAnnotations.initMocks(this);
+    public void setup() throws RemoteException {
+        mContextSpy = spy(mContext);
+        mExecution = new FakeExecution();
+        mTestableLooper = TestableLooper.get(this);
+        mHandler = new Handler(mTestableLooper.getLooper());
+        mBackgroundExecutor = new FakeExecutor(new FakeSystemClock());
 
-        TestableContext context = spy(mContext);
-
-        when(context.getPackageManager()).thenReturn(mPackageManager);
+        when(mContextSpy.getPackageManager()).thenReturn(mPackageManager);
         when(mPackageManager.hasSystemFeature(PackageManager.FEATURE_FACE))
                 .thenReturn(true);
         when(mPackageManager.hasSystemFeature(PackageManager.FEATURE_FINGERPRINT))
@@ -101,17 +184,109 @@ public class AuthControllerTest extends SysuiTestCase {
         when(mDialog1.isAllowDeviceCredentials()).thenReturn(false);
         when(mDialog2.isAllowDeviceCredentials()).thenReturn(false);
 
-        mAuthController = new TestableAuthController(
-                context, mock(CommandQueue.class), new MockInjector());
+        when(mDialog1.getRequestId()).thenReturn(REQUEST_ID);
+        when(mDialog2.getRequestId()).thenReturn(REQUEST_ID);
+
+        when(mDisplayManager.getStableDisplaySize()).thenReturn(new Point());
+
+        when(mFingerprintManager.isHardwareDetected()).thenReturn(true);
+
+        final List<ComponentInfoInternal> componentInfo = new ArrayList<>();
+        componentInfo.add(new ComponentInfoInternal("faceSensor" /* componentId */,
+                "vendor/model/revision" /* hardwareVersion */, "1.01" /* firmwareVersion */,
+                "00000001" /* serialNumber */, "" /* softwareVersion */));
+        componentInfo.add(new ComponentInfoInternal("matchingAlgorithm" /* componentId */,
+                "" /* hardwareVersion */, "" /* firmwareVersion */, "" /* serialNumber */,
+                "vendor/version/revision" /* softwareVersion */));
+
+        FingerprintSensorPropertiesInternal prop = new FingerprintSensorPropertiesInternal(
+                1 /* sensorId */,
+                SensorProperties.STRENGTH_STRONG,
+                1 /* maxEnrollmentsPerUser */,
+                componentInfo,
+                FingerprintSensorProperties.TYPE_UDFPS_OPTICAL,
+                true /* resetLockoutRequireHardwareAuthToken */);
+        List<FingerprintSensorPropertiesInternal> props = new ArrayList<>();
+        props.add(prop);
+        when(mFingerprintManager.getSensorPropertiesInternal()).thenReturn(props);
+
+        mAuthController = new TestableAuthController(mContextSpy, mExecution, mCommandQueue,
+                mActivityTaskManager, mWindowManager, mFingerprintManager, mFaceManager,
+                () -> mUdfpsController, () -> mSidefpsController, mStatusBarStateController);
 
         mAuthController.start();
+        verify(mFingerprintManager).addAuthenticatorsRegisteredCallback(
+                mAuthenticatorsRegisteredCaptor.capture());
+
+        when(mStatusBarStateController.isDozing()).thenReturn(false);
+        verify(mStatusBarStateController).addCallback(mStatusBarStateListenerCaptor.capture());
+
+        mAuthenticatorsRegisteredCaptor.getValue().onAllAuthenticatorsRegistered(props);
+
+        // Ensures that the operations posted on the handler get executed.
+        mTestableLooper.processAllMessages();
     }
 
     // Callback tests
 
     @Test
+    public void testRegistersBiometricStateListener_afterAllAuthenticatorsAreRegistered()
+            throws RemoteException {
+        // This test is sensitive to prior FingerprintManager interactions.
+        reset(mFingerprintManager);
+
+        // This test requires an uninitialized AuthController.
+        AuthController authController = new TestableAuthController(mContextSpy, mExecution,
+                mCommandQueue, mActivityTaskManager, mWindowManager, mFingerprintManager,
+                mFaceManager, () -> mUdfpsController, () -> mSidefpsController,
+                mStatusBarStateController);
+        authController.start();
+
+        verify(mFingerprintManager).addAuthenticatorsRegisteredCallback(
+                mAuthenticatorsRegisteredCaptor.capture());
+        mTestableLooper.processAllMessages();
+
+        verify(mFingerprintManager, never()).registerBiometricStateListener(any());
+
+        mAuthenticatorsRegisteredCaptor.getValue().onAllAuthenticatorsRegistered(new ArrayList<>());
+        mTestableLooper.processAllMessages();
+
+        verify(mFingerprintManager).registerBiometricStateListener(any());
+    }
+
+    @Test
+    public void testDoesNotCrash_afterEnrollmentsChangedForUnknownSensor() throws RemoteException {
+        // This test is sensitive to prior FingerprintManager interactions.
+        reset(mFingerprintManager);
+
+        // This test requires an uninitialized AuthController.
+        AuthController authController = new TestableAuthController(mContextSpy, mExecution,
+                mCommandQueue, mActivityTaskManager, mWindowManager, mFingerprintManager,
+                mFaceManager, () -> mUdfpsController, () -> mSidefpsController,
+                mStatusBarStateController);
+        authController.start();
+
+        verify(mFingerprintManager).addAuthenticatorsRegisteredCallback(
+                mAuthenticatorsRegisteredCaptor.capture());
+
+        // Emulates a device with no authenticators (empty list).
+        mAuthenticatorsRegisteredCaptor.getValue().onAllAuthenticatorsRegistered(new ArrayList<>());
+        mTestableLooper.processAllMessages();
+
+        verify(mFingerprintManager).registerBiometricStateListener(
+                mBiometricStateCaptor.capture());
+
+        // Enrollments changed for an unknown sensor.
+        mBiometricStateCaptor.getValue().onEnrollmentsChanged(0 /* userId */,
+                0xbeef /* sensorId */, true /* hasEnrollments */);
+        mTestableLooper.processAllMessages();
+
+        // Nothing should crash.
+    }
+
+    @Test
     public void testSendsReasonUserCanceled_whenDismissedByUserCancel() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[]{1} /* sensorIds */, false /* credentialAllowed */);
         mAuthController.onDismissed(AuthDialogCallback.DISMISSED_USER_CANCELED,
                 null /* credentialAttestation */);
         verify(mReceiver).onDialogDismissed(
@@ -121,7 +296,7 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testSendsReasonNegative_whenDismissedByButtonNegative() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         mAuthController.onDismissed(AuthDialogCallback.DISMISSED_BUTTON_NEGATIVE,
                 null /* credentialAttestation */);
         verify(mReceiver).onDialogDismissed(
@@ -131,7 +306,7 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testSendsReasonConfirmed_whenDismissedByButtonPositive() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         mAuthController.onDismissed(AuthDialogCallback.DISMISSED_BUTTON_POSITIVE,
                 null /* credentialAttestation */);
         verify(mReceiver).onDialogDismissed(
@@ -141,7 +316,7 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testSendsReasonConfirmNotRequired_whenDismissedByAuthenticated() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         mAuthController.onDismissed(AuthDialogCallback.DISMISSED_BIOMETRIC_AUTHENTICATED,
                 null /* credentialAttestation */);
         verify(mReceiver).onDialogDismissed(
@@ -151,7 +326,7 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testSendsReasonError_whenDismissedByError() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         mAuthController.onDismissed(AuthDialogCallback.DISMISSED_ERROR,
                 null /* credentialAttestation */);
         verify(mReceiver).onDialogDismissed(
@@ -161,7 +336,7 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testSendsReasonServerRequested_whenDismissedByServer() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         mAuthController.onDismissed(AuthDialogCallback.DISMISSED_BY_SYSTEM_SERVER,
                 null /* credentialAttestation */);
         verify(mReceiver).onDialogDismissed(
@@ -172,7 +347,7 @@ public class AuthControllerTest extends SysuiTestCase {
     @Test
     public void testSendsReasonCredentialConfirmed_whenDeviceCredentialAuthenticated()
             throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
 
         final byte[] credentialAttestation = generateRandomHAT();
 
@@ -186,126 +361,149 @@ public class AuthControllerTest extends SysuiTestCase {
     // Statusbar tests
 
     @Test
-    public void testShowInvoked_whenSystemRequested()
-            throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+    public void testShowInvoked_whenSystemRequested() {
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         verify(mDialog1).show(any(), any());
     }
 
     @Test
     public void testOnAuthenticationSucceededInvoked_whenSystemRequested() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
-        mAuthController.onBiometricAuthenticated();
-        verify(mDialog1).onAuthenticationSucceeded();
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+        mAuthController.onBiometricAuthenticated(TYPE_FINGERPRINT);
+        verify(mDialog1).onAuthenticationSucceeded(eq(TYPE_FINGERPRINT));
     }
 
     @Test
     public void testOnAuthenticationFailedInvoked_whenBiometricRejected() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
-        mAuthController.onBiometricError(BiometricAuthenticator.TYPE_NONE,
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+        final int modality = BiometricAuthenticator.TYPE_NONE;
+        mAuthController.onBiometricError(modality,
                 BiometricConstants.BIOMETRIC_PAUSED_REJECTED,
                 0 /* vendorCode */);
 
-        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(mDialog1).onAuthenticationFailed(captor.capture());
+        ArgumentCaptor<Integer> modalityCaptor = ArgumentCaptor.forClass(Integer.class);
+        ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+        verify(mDialog1).onAuthenticationFailed(modalityCaptor.capture(), messageCaptor.capture());
 
-        assertEquals(captor.getValue(), mContext.getString(R.string.biometric_not_recognized));
+        assertEquals(modalityCaptor.getValue().intValue(), modality);
+        assertEquals(messageCaptor.getValue(),
+                mContext.getString(R.string.biometric_not_recognized));
     }
 
     @Test
     public void testOnAuthenticationFailedInvoked_whenBiometricTimedOut() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+        final int modality = BiometricAuthenticator.TYPE_FACE;
         final int error = BiometricConstants.BIOMETRIC_ERROR_TIMEOUT;
         final int vendorCode = 0;
-        mAuthController.onBiometricError(BiometricAuthenticator.TYPE_FACE, error, vendorCode);
+        mAuthController.onBiometricError(modality, error, vendorCode);
 
-        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(mDialog1).onAuthenticationFailed(captor.capture());
+        ArgumentCaptor<Integer> modalityCaptor = ArgumentCaptor.forClass(Integer.class);
+        ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+        verify(mDialog1).onAuthenticationFailed(modalityCaptor.capture(), messageCaptor.capture());
 
-        assertEquals(captor.getValue(), FaceManager.getErrorString(mContext, error, vendorCode));
+        assertEquals(modalityCaptor.getValue().intValue(), modality);
+        assertEquals(messageCaptor.getValue(),
+                FaceManager.getErrorString(mContext, error, vendorCode));
     }
 
     @Test
     public void testOnHelpInvoked_whenSystemRequested() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+        final int modality = BiometricAuthenticator.TYPE_IRIS;
         final String helpMessage = "help";
-        mAuthController.onBiometricHelp(helpMessage);
+        mAuthController.onBiometricHelp(modality, helpMessage);
 
-        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(mDialog1).onHelp(captor.capture());
+        ArgumentCaptor<Integer> modalityCaptor = ArgumentCaptor.forClass(Integer.class);
+        ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+        verify(mDialog1).onHelp(modalityCaptor.capture(), messageCaptor.capture());
 
-        assertEquals(captor.getValue(), helpMessage);
+        assertEquals(modalityCaptor.getValue().intValue(), modality);
+        assertEquals(messageCaptor.getValue(), helpMessage);
     }
 
     @Test
-    public void testOnErrorInvoked_whenSystemRequested() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+    public void testOnErrorInvoked_whenSystemRequested() {
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+        final int modality = BiometricAuthenticator.TYPE_FACE;
         final int error = 1;
         final int vendorCode = 0;
-        mAuthController.onBiometricError(BiometricAuthenticator.TYPE_FACE, error, vendorCode);
+        mAuthController.onBiometricError(modality, error, vendorCode);
 
-        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
-        verify(mDialog1).onError(captor.capture());
+        ArgumentCaptor<Integer> modalityCaptor = ArgumentCaptor.forClass(Integer.class);
+        ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+        verify(mDialog1).onError(modalityCaptor.capture(), messageCaptor.capture());
 
-        assertEquals(captor.getValue(), FaceManager.getErrorString(mContext, error, vendorCode));
+        assertEquals(modalityCaptor.getValue().intValue(), modality);
+        assertEquals(messageCaptor.getValue(),
+                FaceManager.getErrorString(mContext, error, vendorCode));
     }
 
     @Test
     public void testErrorLockout_whenCredentialAllowed_AnimatesToCredentialUI() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         final int error = BiometricConstants.BIOMETRIC_ERROR_LOCKOUT;
         final int vendorCode = 0;
 
         when(mDialog1.isAllowDeviceCredentials()).thenReturn(true);
 
         mAuthController.onBiometricError(BiometricAuthenticator.TYPE_FACE, error, vendorCode);
-        verify(mDialog1, never()).onError(anyString());
+        verify(mDialog1, never()).onError(anyInt(), anyString());
         verify(mDialog1).animateToCredentialUI();
     }
 
     @Test
     public void testErrorLockoutPermanent_whenCredentialAllowed_AnimatesToCredentialUI() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         final int error = BiometricConstants.BIOMETRIC_ERROR_LOCKOUT_PERMANENT;
         final int vendorCode = 0;
 
         when(mDialog1.isAllowDeviceCredentials()).thenReturn(true);
 
         mAuthController.onBiometricError(BiometricAuthenticator.TYPE_FACE, error, vendorCode);
-        verify(mDialog1, never()).onError(anyString());
+        verify(mDialog1, never()).onError(anyInt(), anyString());
         verify(mDialog1).animateToCredentialUI();
     }
 
     @Test
     public void testErrorLockout_whenCredentialNotAllowed_sendsOnError() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+        final int modality = BiometricAuthenticator.TYPE_FACE;
         final int error = BiometricConstants.BIOMETRIC_ERROR_LOCKOUT;
         final int vendorCode = 0;
 
         when(mDialog1.isAllowDeviceCredentials()).thenReturn(false);
 
-        mAuthController.onBiometricError(BiometricAuthenticator.TYPE_FACE, error, vendorCode);
-        verify(mDialog1).onError(eq(FaceManager.getErrorString(mContext, error, vendorCode)));
+        mAuthController.onBiometricError(modality, error, vendorCode);
+        verify(mDialog1).onError(
+                eq(modality), eq(FaceManager.getErrorString(mContext, error, vendorCode)));
         verify(mDialog1, never()).animateToCredentialUI();
     }
 
     @Test
     public void testErrorLockoutPermanent_whenCredentialNotAllowed_sendsOnError() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+        final int modality = BiometricAuthenticator.TYPE_FACE;
         final int error = BiometricConstants.BIOMETRIC_ERROR_LOCKOUT_PERMANENT;
         final int vendorCode = 0;
 
         when(mDialog1.isAllowDeviceCredentials()).thenReturn(false);
 
-        mAuthController.onBiometricError(BiometricAuthenticator.TYPE_FACE, error, vendorCode);
-        verify(mDialog1).onError(eq(FaceManager.getErrorString(mContext, error, vendorCode)));
+        mAuthController.onBiometricError(modality, error, vendorCode);
+        verify(mDialog1).onError(
+                eq(modality), eq(FaceManager.getErrorString(mContext, error, vendorCode)));
         verify(mDialog1, never()).animateToCredentialUI();
     }
 
     @Test
     public void testHideAuthenticationDialog_invokesDismissFromSystemServer() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
-        mAuthController.hideAuthenticationDialog();
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+
+        mAuthController.hideAuthenticationDialog(REQUEST_ID + 1);
+        verify(mDialog1, never()).dismissFromSystemServer();
+        assertThat(mAuthController.mCurrentDialog).isSameInstanceAs(mDialog1);
+
+        mAuthController.hideAuthenticationDialog(REQUEST_ID);
         verify(mDialog1).dismissFromSystemServer();
 
         // In this case, BiometricService sends the error to the client immediately, without
@@ -324,7 +522,7 @@ public class AuthControllerTest extends SysuiTestCase {
         // 1) Credential is confirmed
         // 2) Client cancels authentication
 
-        showDialog(Authenticators.DEVICE_CREDENTIAL, BiometricPrompt.TYPE_NONE);
+        showDialog(new int[0] /* sensorIds */, true /* credentialAllowed */);
         verify(mDialog1).show(any(), any());
 
         final byte[] credentialAttestation = generateRandomHAT();
@@ -335,15 +533,15 @@ public class AuthControllerTest extends SysuiTestCase {
                 eq(BiometricPrompt.DISMISSED_REASON_CREDENTIAL_CONFIRMED),
                 AdditionalMatchers.aryEq(credentialAttestation));
 
-        mAuthController.hideAuthenticationDialog();
+        mAuthController.hideAuthenticationDialog(REQUEST_ID);
     }
 
     @Test
     public void testShowNewDialog_beforeOldDialogDismissed_SkipsAnimations() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         verify(mDialog1).show(any(), any());
 
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
 
         // First dialog should be dismissed without animation
         verify(mDialog1).dismissWithoutCallback(eq(false) /* animate */);
@@ -354,15 +552,14 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testConfigurationPersists_whenOnConfigurationChanged() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         verify(mDialog1).show(any(), any());
 
         // Return that the UI is in "showing" state
         doAnswer(invocation -> {
             Object[] args = invocation.getArguments();
             Bundle savedState = (Bundle) args[0];
-            savedState.putInt(
-                    AuthDialog.KEY_CONTAINER_STATE, AuthContainerView.STATE_SHOWING);
+            savedState.putBoolean(AuthDialog.KEY_CONTAINER_GOING_AWAY, false);
             return null; // onSaveState returns void
         }).when(mDialog1).onSaveState(any());
 
@@ -384,16 +581,14 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testConfigurationPersists_whenBiometricFallbackToCredential() {
-        showDialog(Authenticators.DEVICE_CREDENTIAL | Authenticators.BIOMETRIC_WEAK,
-                BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, true /* credentialAllowed */);
         verify(mDialog1).show(any(), any());
 
         // Pretend that the UI is now showing device credential UI.
         doAnswer(invocation -> {
             Object[] args = invocation.getArguments();
             Bundle savedState = (Bundle) args[0];
-            savedState.putInt(
-                    AuthDialog.KEY_CONTAINER_STATE, AuthContainerView.STATE_SHOWING);
+            savedState.putBoolean(AuthDialog.KEY_CONTAINER_GOING_AWAY, false);
             savedState.putBoolean(AuthDialog.KEY_CREDENTIAL_SHOWING, true);
             return null; // onSaveState returns void
         }).when(mDialog1).onSaveState(any());
@@ -404,23 +599,32 @@ public class AuthControllerTest extends SysuiTestCase {
         ArgumentCaptor<Bundle> captor = ArgumentCaptor.forClass(Bundle.class);
         verify(mDialog2).show(any(), captor.capture());
         assertEquals(Authenticators.DEVICE_CREDENTIAL,
-                mAuthController.mLastBiometricPromptBundle
-                        .getInt(BiometricPrompt.KEY_AUTHENTICATORS_ALLOWED));
+                mAuthController.mLastBiometricPromptInfo.getAuthenticators());
+    }
+
+    @Test
+    public void testClientNotified_whenTaskStackChangesDuringShow() throws Exception {
+        switchTask("other_package");
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
+
+        mTestableLooper.processAllMessages();
+
+        assertNull(mAuthController.mCurrentDialog);
+        assertNull(mAuthController.mReceiver);
+        verify(mDialog1).dismissWithoutCallback(true /* animate */);
+        verify(mReceiver).onDialogDismissed(
+                eq(BiometricPrompt.DISMISSED_REASON_USER_CANCEL),
+                eq(null) /* credentialAttestation */);
     }
 
     @Test
     public void testClientNotified_whenTaskStackChangesDuringAuthentication() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
 
-        List<ActivityManager.RunningTaskInfo> tasks = new ArrayList<>();
-        ActivityManager.RunningTaskInfo taskInfo = mock(ActivityManager.RunningTaskInfo.class);
-        taskInfo.topActivity = mock(ComponentName.class);
-        when(taskInfo.topActivity.getPackageName()).thenReturn("other_package");
-        tasks.add(taskInfo);
-        when(mAuthController.mActivityTaskManager.getTasks(anyInt())).thenReturn(tasks);
+        switchTask("other_package");
 
         mAuthController.mTaskStackListener.onTaskStackChanged();
-        waitForIdleSync();
+        mTestableLooper.processAllMessages();
 
         assertNull(mAuthController.mCurrentDialog);
         assertNull(mAuthController.mReceiver);
@@ -432,7 +636,7 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testDoesNotCrash_whenTryAgainPressedAfterDismissal() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         mAuthController.onDismissed(AuthDialogCallback.DISMISSED_USER_CANCELED,
                 null /* credentialAttestation */);
         mAuthController.onTryAgainPressed();
@@ -440,7 +644,7 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testDoesNotCrash_whenDeviceCredentialPressedAfterDismissal() {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         mAuthController.onDismissed(AuthDialogCallback.DISMISSED_USER_CANCELED,
                 null /* credentialAttestation */);
         mAuthController.onDeviceCredentialPressed();
@@ -448,10 +652,10 @@ public class AuthControllerTest extends SysuiTestCase {
 
     @Test
     public void testActionCloseSystemDialogs_dismissesDialogIfShowing() throws Exception {
-        showDialog(Authenticators.BIOMETRIC_WEAK, BiometricPrompt.TYPE_FACE);
+        showDialog(new int[] {1} /* sensorIds */, false /* credentialAllowed */);
         Intent intent = new Intent(Intent.ACTION_CLOSE_SYSTEM_DIALOGS);
         mAuthController.mBroadcastReceiver.onReceive(mContext, intent);
-        waitForIdleSync();
+        mTestableLooper.processAllMessages();
 
         assertNull(mAuthController.mCurrentDialog);
         assertNull(mAuthController.mReceiver);
@@ -461,34 +665,103 @@ public class AuthControllerTest extends SysuiTestCase {
                 eq(null) /* credentialAttestation */);
     }
 
-    // Helpers
-
-    private void showDialog(int authenticators, int biometricModality) {
-        mAuthController.showAuthenticationDialog(createTestDialogBundle(authenticators),
-                mReceiver /* receiver */,
-                biometricModality,
-                true /* requireConfirmation */,
-                0 /* userId */,
-                "testPackage",
-                0 /* operationId */,
-                0 /* sysUiSessionId */);
+    @Test
+    public void testOnAodInterrupt() {
+        final int pos = 10;
+        final float majorMinor = 5f;
+        mAuthController.onAodInterrupt(pos, pos, majorMinor, majorMinor);
+        verify(mUdfpsController).onAodInterrupt(eq(pos), eq(pos), eq(majorMinor), eq(majorMinor));
     }
 
-    private Bundle createTestDialogBundle(int authenticators) {
-        Bundle bundle = new Bundle();
+    @Test
+    public void testSubscribesToOrientationChangesWhenShowingDialog() {
+        showDialog(new int[]{1} /* sensorIds */, false /* credentialAllowed */);
 
-        bundle.putCharSequence(BiometricPrompt.KEY_TITLE, "Title");
-        bundle.putCharSequence(BiometricPrompt.KEY_SUBTITLE, "Subtitle");
-        bundle.putCharSequence(BiometricPrompt.KEY_DESCRIPTION, "Description");
-        bundle.putCharSequence(BiometricPrompt.KEY_NEGATIVE_TEXT, "Negative Button");
+        verify(mDisplayManager).registerDisplayListener(any(), eq(mHandler), anyLong());
+
+        mAuthController.hideAuthenticationDialog(REQUEST_ID);
+        verify(mDisplayManager).unregisterDisplayListener(any());
+    }
+
+    @Test
+    public void testOnBiometricPromptShownCallback() {
+        // GIVEN a callback is registered
+        AuthController.Callback callback = mock(AuthController.Callback.class);
+        mAuthController.addCallback(callback);
+
+        // WHEN dialog is shown
+        showDialog(new int[]{1} /* sensorIds */, false /* credentialAllowed */);
+
+        // THEN callback should be received
+        verify(callback).onBiometricPromptShown();
+    }
+
+    @Test
+    public void testOnBiometricPromptDismissedCallback() {
+        // GIVEN a callback is registered
+        AuthController.Callback callback = mock(AuthController.Callback.class);
+        mAuthController.addCallback(callback);
+
+        // WHEN dialog is shown and then dismissed
+        showDialog(new int[]{1} /* sensorIds */, false /* credentialAllowed */);
+        mAuthController.onDismissed(AuthDialogCallback.DISMISSED_USER_CANCELED,
+                null /* credentialAttestation */);
+
+        // THEN callback should be received
+        verify(callback).onBiometricPromptDismissed();
+    }
+
+    @Test
+    public void testForwardsDozeEvent() throws RemoteException {
+        mAuthController.setBiometicContextListener(mContextListener);
+
+        mStatusBarStateListenerCaptor.getValue().onDozingChanged(false);
+        mStatusBarStateListenerCaptor.getValue().onDozingChanged(true);
+
+        InOrder order = inOrder(mContextListener);
+        // invoked twice since the initial state is false
+        order.verify(mContextListener, times(2)).onDozeChanged(eq(false));
+        order.verify(mContextListener).onDozeChanged(eq(true));
+    }
+
+    // Helpers
+
+    private void showDialog(int[] sensorIds, boolean credentialAllowed) {
+        mAuthController.showAuthenticationDialog(createTestPromptInfo(),
+                mReceiver /* receiver */,
+                sensorIds,
+                credentialAllowed,
+                true /* requireConfirmation */,
+                0 /* userId */,
+                0 /* operationId */,
+                "testPackage",
+                REQUEST_ID,
+                BIOMETRIC_MULTI_SENSOR_FINGERPRINT_AND_FACE);
+    }
+
+    private void switchTask(String packageName) {
+        final List<ActivityManager.RunningTaskInfo> tasks = new ArrayList<>();
+        final ActivityManager.RunningTaskInfo taskInfo =
+                mock(ActivityManager.RunningTaskInfo.class);
+        taskInfo.topActivity = mock(ComponentName.class);
+        when(taskInfo.topActivity.getPackageName()).thenReturn(packageName);
+        tasks.add(taskInfo);
+        when(mActivityTaskManager.getTasks(anyInt())).thenReturn(tasks);
+    }
+
+    private PromptInfo createTestPromptInfo() {
+        PromptInfo promptInfo = new PromptInfo();
+
+        promptInfo.setTitle("Title");
+        promptInfo.setSubtitle("Subtitle");
+        promptInfo.setDescription("Description");
+        promptInfo.setNegativeButtonText("Negative Button");
 
         // RequireConfirmation is a hint to BiometricService. This can be forced to be required
         // by user settings, and should be tested in BiometricService.
-        bundle.putBoolean(BiometricPrompt.KEY_REQUIRE_CONFIRMATION, true);
+        promptInfo.setConfirmationRequested(true);
 
-        bundle.putInt(BiometricPrompt.KEY_AUTHENTICATORS_ALLOWED, authenticators);
-
-        return bundle;
+        return promptInfo;
     }
 
     private byte[] generateRandomHAT() {
@@ -500,18 +773,34 @@ public class AuthControllerTest extends SysuiTestCase {
 
     private final class TestableAuthController extends AuthController {
         private int mBuildCount = 0;
-        private Bundle mLastBiometricPromptBundle;
+        private PromptInfo mLastBiometricPromptInfo;
 
-        TestableAuthController(Context context, CommandQueue commandQueue, Injector injector) {
-            super(context, commandQueue, injector);
+        TestableAuthController(Context context,
+                Execution execution,
+                CommandQueue commandQueue,
+                ActivityTaskManager activityTaskManager,
+                WindowManager windowManager,
+                FingerprintManager fingerprintManager,
+                FaceManager faceManager,
+                Provider<UdfpsController> udfpsControllerFactory,
+                Provider<SidefpsController> sidefpsControllerFactory,
+                StatusBarStateController statusBarStateController) {
+            super(context, execution, commandQueue, activityTaskManager, windowManager,
+                    fingerprintManager, faceManager, udfpsControllerFactory,
+                    sidefpsControllerFactory, mDisplayManager, mWakefulnessLifecycle,
+                    mUserManager, mLockPatternUtils, statusBarStateController, mHandler,
+                    mBackgroundExecutor);
         }
 
         @Override
-        protected AuthDialog buildDialog(Bundle biometricPromptBundle,
-                boolean requireConfirmation, int userId, int type, String opPackageName,
-                boolean skipIntro, long operationId, int sysUiSessionId) {
+        protected AuthDialog buildDialog(DelayableExecutor bgExecutor, PromptInfo promptInfo,
+                boolean requireConfirmation, int userId, int[] sensorIds,
+                String opPackageName, boolean skipIntro, long operationId, long requestId,
+                @BiometricManager.BiometricMultiSensorMode int multiSensorConfig,
+                WakefulnessLifecycle wakefulnessLifecycle, UserManager userManager,
+                LockPatternUtils lockPatternUtils) {
 
-            mLastBiometricPromptBundle = biometricPromptBundle;
+            mLastBiometricPromptInfo = promptInfo;
 
             AuthDialog dialog;
             if (mBuildCount == 0) {
@@ -523,13 +812,6 @@ public class AuthControllerTest extends SysuiTestCase {
             }
             mBuildCount++;
             return dialog;
-        }
-    }
-
-    private final class MockInjector extends AuthController.Injector {
-        @Override
-        IActivityTaskManager getActivityTaskManager() {
-            return mock(IActivityTaskManager.class);
         }
     }
 }

@@ -17,6 +17,7 @@
 package com.android.settingslib.net;
 
 import android.app.AppGlobals;
+import android.app.usage.NetworkStats;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
@@ -26,7 +27,7 @@ import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.UserInfo;
 import android.content.res.Resources;
 import android.graphics.drawable.Drawable;
-import android.net.ConnectivityManager;
+import android.net.TetheringManager;
 import android.net.TrafficStats;
 import android.os.Process;
 import android.os.RemoteException;
@@ -116,16 +117,15 @@ public class UidDetailProvider {
                 detail.label = res.getString(R.string.process_kernel_label);
                 detail.icon = pm.getDefaultActivityIcon();
                 return detail;
-            case TrafficStats.UID_REMOVED:
+            case NetworkStats.Bucket.UID_REMOVED:
                 detail.label = res.getString(UserManager.supportsMultipleUsers()
                         ? R.string.data_usage_uninstalled_apps_users
                         : R.string.data_usage_uninstalled_apps);
                 detail.icon = pm.getDefaultActivityIcon();
                 return detail;
-            case TrafficStats.UID_TETHERING:
-                final ConnectivityManager cm = (ConnectivityManager) mContext.getSystemService(
-                        Context.CONNECTIVITY_SERVICE);
-                detail.label = res.getString(Utils.getTetheringLabel(cm));
+            case NetworkStats.Bucket.UID_TETHERING:
+                final TetheringManager tm = mContext.getSystemService(TetheringManager.class);
+                detail.label = res.getString(Utils.getTetheringLabel(tm));
                 detail.icon = pm.getDefaultActivityIcon();
                 return detail;
             case Process.OTA_UPDATE_UID:

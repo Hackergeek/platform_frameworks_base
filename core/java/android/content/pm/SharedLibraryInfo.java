@@ -20,6 +20,7 @@ import android.annotation.IntDef;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.TestApi;
 import android.os.Parcel;
 import android.os.Parcelable;
 
@@ -29,12 +30,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * This class provides information for a shared library. There are
- * three types of shared libraries: builtin - non-updatable part of
+ * four types of shared libraries: builtin - non-updatable part of
  * the OS; dynamic - updatable backwards-compatible dynamically linked;
- * static - non backwards-compatible emulating static linking.
+ * static - non backwards-compatible emulating static linking;
+ * SDK - updatable backwards-incompatible dynamically loaded.
  */
 public final class SharedLibraryInfo implements Parcelable {
 
@@ -43,6 +46,7 @@ public final class SharedLibraryInfo implements Parcelable {
             TYPE_BUILTIN,
             TYPE_DYNAMIC,
             TYPE_STATIC,
+            TYPE_SDK_PACKAGE,
     })
     @Retention(RetentionPolicy.SOURCE)
     @interface Type{}
@@ -64,8 +68,21 @@ public final class SharedLibraryInfo implements Parcelable {
      * Shared library type: this library is <strong>not</strong> backwards
      * -compatible, can be updated and updates can be uninstalled. Clients
      * link against a specific version of the library.
+     *
+     * Static shared libraries simulate static linking while allowing for
+     * multiple clients to reuse the same instance of the library.
      */
     public static final int TYPE_STATIC = 2;
+
+    /**
+     * SDK package shared library type: this library is <strong>not</strong>
+     * compatible between versions, can be updated and updates can be
+     * uninstalled. Clients depend on a specific version of the library.
+     *
+     * SDK packages are not loaded automatically by the OS and rely
+     * e.g. on 3P libraries to make them available for the clients.
+     */
+    public static final int TYPE_SDK_PACKAGE = 3;
 
     /**
      * Constant for referring to an undefined version.
@@ -79,6 +96,7 @@ public final class SharedLibraryInfo implements Parcelable {
 
     private final long mVersion;
     private final @Type int mType;
+    private final boolean mIsNative;
     private final VersionedPackage mDeclaringPackage;
     private final List<VersionedPackage> mDependentPackages;
     private List<SharedLibraryInfo> mDependencies;
@@ -93,13 +111,14 @@ public final class SharedLibraryInfo implements Parcelable {
      * @param type The lib type.
      * @param declaringPackage The package that declares the library.
      * @param dependentPackages The packages that depend on the library.
+     * @param isNative indicate if this shared lib is a native lib or not (i.e. java)
      *
      * @hide
      */
     public SharedLibraryInfo(String path, String packageName, List<String> codePaths,
             String name, long version, int type,
             VersionedPackage declaringPackage, List<VersionedPackage> dependentPackages,
-            List<SharedLibraryInfo> dependencies) {
+            List<SharedLibraryInfo> dependencies, boolean isNative) {
         mPath = path;
         mPackageName = packageName;
         mCodePaths = codePaths;
@@ -109,6 +128,7 @@ public final class SharedLibraryInfo implements Parcelable {
         mDeclaringPackage = declaringPackage;
         mDependentPackages = dependentPackages;
         mDependencies = dependencies;
+        mIsNative = isNative;
     }
 
     private SharedLibraryInfo(Parcel parcel) {
@@ -122,9 +142,10 @@ public final class SharedLibraryInfo implements Parcelable {
         mName = parcel.readString8();
         mVersion = parcel.readLong();
         mType = parcel.readInt();
-        mDeclaringPackage = parcel.readParcelable(null);
-        mDependentPackages = parcel.readArrayList(null);
+        mDeclaringPackage = parcel.readParcelable(null, android.content.pm.VersionedPackage.class);
+        mDependentPackages = parcel.readArrayList(null, android.content.pm.VersionedPackage.class);
         mDependencies = parcel.createTypedArrayList(SharedLibraryInfo.CREATOR);
+        mIsNative = parcel.readBoolean();
     }
 
     /**
@@ -134,6 +155,16 @@ public final class SharedLibraryInfo implements Parcelable {
      */
     public @Type int getType() {
         return mType;
+    }
+
+    /**
+     * Tells whether this library is a native shared library or not.
+     *
+     * @hide
+     */
+    @TestApi
+    public boolean isNative() {
+        return mIsNative;
     }
 
     /**
@@ -177,7 +208,8 @@ public final class SharedLibraryInfo implements Parcelable {
      *
      * @hide
      */
-    public List<String> getAllCodePaths() {
+    @TestApi
+    public @NonNull List<String> getAllCodePaths() {
         if (getPath() != null) {
             // Builtin library.
             ArrayList<String> list = new ArrayList<>();
@@ -185,7 +217,7 @@ public final class SharedLibraryInfo implements Parcelable {
             return list;
         } else {
             // Static or dynamic library.
-            return mCodePaths;
+            return Objects.requireNonNull(mCodePaths);
         }
     }
 
@@ -272,6 +304,13 @@ public final class SharedLibraryInfo implements Parcelable {
     }
 
     /**
+     * @hide
+     */
+    public boolean isSdk() {
+        return mType == TYPE_SDK_PACKAGE;
+    }
+
+    /**
      * Gets the package that declares the library.
      *
      * @return The package declaring the library.
@@ -320,6 +359,7 @@ public final class SharedLibraryInfo implements Parcelable {
         parcel.writeParcelable(mDeclaringPackage, flags);
         parcel.writeList(mDependentPackages);
         parcel.writeTypedList(mDependencies);
+        parcel.writeBoolean(mIsNative);
     }
 
     private static String typeToString(int type) {
@@ -332,6 +372,9 @@ public final class SharedLibraryInfo implements Parcelable {
             }
             case TYPE_STATIC: {
                 return "static";
+            }
+            case TYPE_SDK_PACKAGE: {
+                return "sdk";
             }
             default: {
                 return "unknown";

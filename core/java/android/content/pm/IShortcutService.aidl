@@ -21,9 +21,9 @@ import android.content.IntentSender;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.ShortcutInfo;
 
-/**
- * {@hide}
- */
+import com.android.internal.infra.AndroidFuture;
+
+/** {@hide} */
 interface IShortcutService {
 
     boolean setDynamicShortcuts(String packageName, in ParceledListSlice shortcutInfoList,
@@ -32,21 +32,22 @@ interface IShortcutService {
     boolean addDynamicShortcuts(String packageName, in ParceledListSlice shortcutInfoList,
             int userId);
 
-    void removeDynamicShortcuts(String packageName, in List shortcutIds, int userId);
+    void removeDynamicShortcuts(String packageName, in List<String> shortcutIds, int userId);
 
     void removeAllDynamicShortcuts(String packageName, int userId);
 
     boolean updateShortcuts(String packageName, in ParceledListSlice shortcuts, int userId);
 
-    boolean requestPinShortcut(String packageName, in ShortcutInfo shortcut,
-            in IntentSender resultIntent, int userId);
+    void requestPinShortcut(String packageName, in ShortcutInfo shortcut,
+            in IntentSender resultIntent, int userId, in AndroidFuture<String> ret);
 
-    Intent createShortcutResultIntent(String packageName, in ShortcutInfo shortcut, int userId);
+    void createShortcutResultIntent(String packageName, in ShortcutInfo shortcut, int userId,
+            in AndroidFuture<Intent> ret);
 
-    void disableShortcuts(String packageName, in List shortcutIds, CharSequence disabledMessage,
-            int disabledMessageResId, int userId);
+    void disableShortcuts(String packageName, in List<String> shortcutIds,
+            CharSequence disabledMessage, int disabledMessageResId, int userId);
 
-    void enableShortcuts(String packageName, in List shortcutIds, int userId);
+    void enableShortcuts(String packageName, in List<String> shortcutIds, int userId);
 
     int getMaxShortcutCountPerActivity(String packageName, int userId);
 
@@ -73,7 +74,7 @@ interface IShortcutService {
 
     boolean hasShareTargets(String packageName, String packageToCheck, int userId);
 
-    void removeLongLivedShortcuts(String packageName, in List shortcutIds, int userId);
+    void removeLongLivedShortcuts(String packageName, in List<String> shortcutIds, int userId);
 
     ParceledListSlice getShortcuts(String packageName, int matchFlags, int userId);
 

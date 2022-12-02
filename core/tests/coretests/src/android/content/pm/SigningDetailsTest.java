@@ -15,19 +15,24 @@
  */
 package android.content.pm;
 
-import static android.content.pm.PackageParser.SigningDetails.CertCapabilities.AUTH;
-import static android.content.pm.PackageParser.SigningDetails.CertCapabilities.INSTALLED_DATA;
-import static android.content.pm.PackageParser.SigningDetails.CertCapabilities.PERMISSION;
-import static android.content.pm.PackageParser.SigningDetails.CertCapabilities.ROLLBACK;
-import static android.content.pm.PackageParser.SigningDetails.CertCapabilities.SHARED_USER_ID;
-import static android.content.pm.PackageParser.SigningDetails.SignatureSchemeVersion.SIGNING_BLOCK_V3;
+import static android.content.pm.SigningDetails.CapabilityMergeRule.MERGE_OTHER_CAPABILITY;
+import static android.content.pm.SigningDetails.CapabilityMergeRule.MERGE_RESTRICTED_CAPABILITY;
+import static android.content.pm.SigningDetails.CapabilityMergeRule.MERGE_SELF_CAPABILITY;
+import static android.content.pm.SigningDetails.CertCapabilities.AUTH;
+import static android.content.pm.SigningDetails.CertCapabilities.INSTALLED_DATA;
+import static android.content.pm.SigningDetails.CertCapabilities.PERMISSION;
+import static android.content.pm.SigningDetails.CertCapabilities.ROLLBACK;
+import static android.content.pm.SigningDetails.CertCapabilities.SHARED_USER_ID;
+import static android.content.pm.SigningDetails.SignatureSchemeVersion.SIGNING_BLOCK_V3;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import android.content.pm.PackageParser.SigningDetails;
+import android.platform.test.annotations.Presubmit;
+import android.util.ArraySet;
+import android.util.PackageUtils;
 
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.filters.SmallTest;
@@ -35,11 +40,15 @@ import androidx.test.filters.SmallTest;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.util.Set;
+
+@Presubmit
 @RunWith(AndroidJUnit4.class)
 @SmallTest
 public class SigningDetailsTest {
     private static final int DEFAULT_CAPABILITIES =
             INSTALLED_DATA | SHARED_USER_ID | PERMISSION | AUTH;
+    private static final int CURRENT_SIGNER_CAPABILITIES = DEFAULT_CAPABILITIES | ROLLBACK;
 
     // Some of the tests in this class require valid certificate encodings from which to pull the
     // public key for the SigningDetails; the following are all DER encoded EC X.509 certificates.
@@ -208,8 +217,8 @@ public class SigningDetailsTest {
         SigningDetails result1 = noLineageDetails.mergeLineageWith(lineageDetails);
         SigningDetails result2 = lineageDetails.mergeLineageWith(noLineageDetails);
 
-        assertTrue(result1 == lineageDetails);
-        assertTrue(result2 == lineageDetails);
+        assertSigningDetailsContainsLineage(result1, FIRST_SIGNATURE, SECOND_SIGNATURE);
+        assertSigningDetailsContainsLineage(result2, FIRST_SIGNATURE, SECOND_SIGNATURE);
     }
 
     @Test
@@ -271,8 +280,10 @@ public class SigningDetailsTest {
         SigningDetails result1 = singleSignerDetails.mergeLineageWith(fullLineageDetails);
         SigningDetails result2 = fullLineageDetails.mergeLineageWith(singleSignerDetails);
 
-        assertTrue(result1 == fullLineageDetails);
-        assertTrue(result2 == fullLineageDetails);
+        assertSigningDetailsContainsLineage(result1, FIRST_SIGNATURE, SECOND_SIGNATURE,
+                THIRD_SIGNATURE);
+        assertSigningDetailsContainsLineage(result2, FIRST_SIGNATURE, SECOND_SIGNATURE,
+                THIRD_SIGNATURE);
     }
 
     @Test
@@ -361,10 +372,10 @@ public class SigningDetailsTest {
     }
 
     @Test
-    public void mergeLineageWith_sameLineageDifferentCaps_returnsLineageWithModifiedCaps()
+    public void mergeLineageWith_sameLineageDifferentCaps_returnsLineageWithProvidedCaps()
             throws Exception {
         // This test verifies when two lineages consist of the same signers but have different
-        // capabilities the more restrictive capabilities are returned.
+        // capabilities, the capabilities of the provided lineage are returned.
         SigningDetails defaultCapabilitiesDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
                 SECOND_SIGNATURE, THIRD_SIGNATURE);
         SigningDetails modifiedCapabilitiesDetails = createSigningDetailsWithLineageAndCapabilities(
@@ -377,68 +388,135 @@ public class SigningDetailsTest {
                 defaultCapabilitiesDetails);
 
         assertEquals(modifiedCapabilitiesDetails, result1);
-        assertTrue(result2 == modifiedCapabilitiesDetails);
+        assertEquals(defaultCapabilitiesDetails, result2);
+    }
+
+    @Test
+    public void
+            mergeLineageWith_sameLineageDifferentCapsRestrictedRule_returnsLineageWithModifiedCaps()
+            throws Exception {
+        // This test verifies when two lineages consist of the same signers but have different
+        // capabilities, and the restricted merge rule is used, the more restrictive capabilities
+        // are returned.
+        SigningDetails defaultCapabilitiesDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
+                SECOND_SIGNATURE, THIRD_SIGNATURE);
+        SigningDetails modifiedCapabilitiesDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
+                new int[]{INSTALLED_DATA, INSTALLED_DATA, INSTALLED_DATA});
+
+        SigningDetails result1 = defaultCapabilitiesDetails.mergeLineageWith(
+                modifiedCapabilitiesDetails, MERGE_RESTRICTED_CAPABILITY);
+        SigningDetails result2 = modifiedCapabilitiesDetails.mergeLineageWith(
+                defaultCapabilitiesDetails, MERGE_RESTRICTED_CAPABILITY);
+
+        assertEquals(modifiedCapabilitiesDetails, result1);
+        assertEquals(modifiedCapabilitiesDetails, result2);
     }
 
     @Test
     public void mergeLineageWith_overlappingLineageDiffCaps_returnsFullLineageWithModifiedCaps()
             throws Exception {
-        // This test verifies the following scenario:
-        // - First lineage has signers A -> B with modified capabilities for A and B
-        // - Second lineage has signers B -> C with modified capabilities for B and C
-        // The merged lineage should be A -> B -> C with the most restrictive capabilities for B
-        // since it is in both lineages.
+        // This test verifies the merge of two lineages with overlapping signers and modified caps
+        // returns the full lineage with expected capabilities based on the provided merge rule.
         int[] firstCapabilities =
                 new int[]{INSTALLED_DATA | AUTH, INSTALLED_DATA | SHARED_USER_ID | PERMISSION};
         int[] secondCapabilities = new int[]{INSTALLED_DATA | SHARED_USER_ID | AUTH,
                 INSTALLED_DATA | SHARED_USER_ID | AUTH};
-        int[] expectedCapabilities =
+        int[] expectedRestrictedCapabilities =
                 new int[]{firstCapabilities[0], firstCapabilities[1] & secondCapabilities[0],
                         secondCapabilities[1]};
+        int[] expectedCapabilities1 =
+                new int[]{firstCapabilities[0], secondCapabilities[0], secondCapabilities[1]};
+        int[] expectedCapabilities2 =
+                new int[]{firstCapabilities[0], firstCapabilities[1], secondCapabilities[1]};
         SigningDetails firstDetails = createSigningDetailsWithLineageAndCapabilities(
                 new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE}, firstCapabilities);
         SigningDetails secondDetails = createSigningDetailsWithLineageAndCapabilities(
                 new String[]{SECOND_SIGNATURE, THIRD_SIGNATURE}, secondCapabilities);
-        SigningDetails expectedDetails = createSigningDetailsWithLineageAndCapabilities(
+        SigningDetails expectedRestrictedDetails = createSigningDetailsWithLineageAndCapabilities(
                 new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
-                expectedCapabilities);
+                expectedRestrictedCapabilities);
+        SigningDetails expectedDetails1 = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
+                expectedCapabilities1);
+        SigningDetails expectedDetails2 = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
+                expectedCapabilities2);
 
-        SigningDetails result1 = firstDetails.mergeLineageWith(secondDetails);
-        SigningDetails result2 = secondDetails.mergeLineageWith(firstDetails);
+        SigningDetails result1 = firstDetails.mergeLineageWith(secondDetails,
+                MERGE_OTHER_CAPABILITY);
+        SigningDetails result2 = secondDetails.mergeLineageWith(firstDetails,
+                MERGE_SELF_CAPABILITY);
+        SigningDetails result3 = firstDetails.mergeLineageWith(secondDetails,
+                MERGE_SELF_CAPABILITY);
+        SigningDetails result4 = secondDetails.mergeLineageWith(firstDetails,
+                MERGE_OTHER_CAPABILITY);
+        SigningDetails result5 = firstDetails.mergeLineageWith(secondDetails,
+                MERGE_RESTRICTED_CAPABILITY);
+        SigningDetails result6 = secondDetails.mergeLineageWith(firstDetails,
+                MERGE_RESTRICTED_CAPABILITY);
 
-        assertEquals(expectedDetails, result1);
-        assertEquals(expectedDetails, result2);
+        assertEquals(expectedDetails1, result1);
+        assertEquals(expectedDetails1, result2);
+        assertEquals(expectedDetails2, result3);
+        assertEquals(expectedDetails2, result4);
+        assertEquals(expectedRestrictedDetails, result5);
+        assertEquals(expectedRestrictedDetails, result6);
     }
 
     @Test
     public void mergeLineageWith_subLineageModifiedCaps_returnsFullLineageWithModifiedCaps()
             throws Exception {
-        // This test verifies the following scenario:
-        // - First lineage has signers B -> C with modified capabilities
-        // - Second lineage has signers A -> B -> C -> D with modified capabilities
-        // The merged lineage should be A -> B -> C -> D with the most restrictive capabilities for
-        // B and C since they are in both lineages.
+        // This test verifies the merge of a full lineage and a subset of that lineage with
+        // modified caps returns the full lineage with expected capabilities based on the
+        // provided merge rule.
         int[] subCapabilities = new int[]{INSTALLED_DATA | SHARED_USER_ID | PERMISSION,
                 DEFAULT_CAPABILITIES | ROLLBACK};
         int[] fullCapabilities =
                 new int[]{0, SHARED_USER_ID, DEFAULT_CAPABILITIES, DEFAULT_CAPABILITIES};
-        int[] expectedCapabilities =
+        int[] expectedRestrictedCapabilities =
                 new int[]{fullCapabilities[0], subCapabilities[0] & fullCapabilities[1],
                         subCapabilities[1] & fullCapabilities[2], fullCapabilities[3]};
+        int[] expectedCapabilities1 =
+                new int[]{fullCapabilities[0], fullCapabilities[1], fullCapabilities[2],
+                        fullCapabilities[3]};
+        int[] expectedCapabilities2 =
+                new int[]{fullCapabilities[0], subCapabilities[0], subCapabilities[1],
+                        fullCapabilities[3]};
         SigningDetails subLineageDetails = createSigningDetailsWithLineageAndCapabilities(
                 new String[]{SECOND_SIGNATURE, THIRD_SIGNATURE}, subCapabilities);
         SigningDetails fullLineageDetails = createSigningDetailsWithLineageAndCapabilities(
                 new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE, FOURTH_SIGNATURE},
                 fullCapabilities);
-        SigningDetails expectedDetails = createSigningDetailsWithLineageAndCapabilities(
+        SigningDetails expectedRestrictedDetails = createSigningDetailsWithLineageAndCapabilities(
                 new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE, FOURTH_SIGNATURE},
-                expectedCapabilities);
+                expectedRestrictedCapabilities);
+        SigningDetails expectedDetails1 = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE, FOURTH_SIGNATURE},
+                expectedCapabilities1);
+        SigningDetails expectedDetails2 = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE, FOURTH_SIGNATURE},
+                expectedCapabilities2);
 
-        SigningDetails result1 = subLineageDetails.mergeLineageWith(fullLineageDetails);
-        SigningDetails result2 = fullLineageDetails.mergeLineageWith(subLineageDetails);
+        SigningDetails result1 = subLineageDetails.mergeLineageWith(fullLineageDetails,
+                MERGE_OTHER_CAPABILITY);
+        SigningDetails result2 = fullLineageDetails.mergeLineageWith(subLineageDetails,
+                MERGE_SELF_CAPABILITY);
+        SigningDetails result3 = subLineageDetails.mergeLineageWith(fullLineageDetails,
+                MERGE_SELF_CAPABILITY);
+        SigningDetails result4 = fullLineageDetails.mergeLineageWith(subLineageDetails,
+                MERGE_OTHER_CAPABILITY);
+        SigningDetails result5 = subLineageDetails.mergeLineageWith(fullLineageDetails,
+                MERGE_RESTRICTED_CAPABILITY);
+        SigningDetails result6 = fullLineageDetails.mergeLineageWith(subLineageDetails,
+                MERGE_RESTRICTED_CAPABILITY);
 
-        assertEquals(expectedDetails, result1);
-        assertEquals(expectedDetails, result2);
+        assertEquals(expectedDetails1, result1);
+        assertEquals(expectedDetails1, result2);
+        assertEquals(expectedDetails2, result3);
+        assertEquals(expectedDetails2, result4);
+        assertEquals(expectedRestrictedDetails, result5);
+        assertEquals(expectedRestrictedDetails, result6);
     }
 
     @Test
@@ -456,6 +534,39 @@ public class SigningDetailsTest {
 
         assertTrue(result1 == firstLineageDetails);
         assertTrue(result2 == secondLineageDetails);
+    }
+
+    @Test
+    public void mergeLineageWith_modifiedCaps_returnsCapsFromProvidedLineage()
+            throws Exception {
+        // By default, when merging two lineage instances, the initial instance should represent a
+        // shared lineage while the provided lineage represents that of a newly installed / updated
+        // package. The shared lineage should contain any previous capability modifications from
+        // the default while the provided lineage has an opportunity to modify what was previously
+        // set. Initially, the most restrictive capabilities were always retained by the returned
+        // lineage, so apps had no mechanism to roll back a restriction to a previous signer. To
+        // allow this, a merge rule can be specified to indicate how differences in capabilities
+        // in common signers should be handled with the default using the capabilities from the
+        // provided lineage.
+        int[] firstCapabilities = new int[]{INSTALLED_DATA | PERMISSION | AUTH,
+                CURRENT_SIGNER_CAPABILITIES};
+        int[] secondCapabilities =
+                new int[]{DEFAULT_CAPABILITIES, CURRENT_SIGNER_CAPABILITIES};
+        SigningDetails firstDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE}, firstCapabilities);
+        SigningDetails secondDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE}, secondCapabilities);
+        // By default, the resulting capabilities should be that of the provided lineage.
+        SigningDetails expectedDetails1 = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE}, secondCapabilities);
+        SigningDetails expectedDetails2 = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE}, firstCapabilities);
+
+        SigningDetails result1 = firstDetails.mergeLineageWith(secondDetails);
+        SigningDetails result2 = secondDetails.mergeLineageWith(firstDetails);
+
+        assertEquals(expectedDetails1, result1);
+        assertEquals(expectedDetails2, result2);
     }
 
     @Test
@@ -605,6 +716,331 @@ public class SigningDetailsTest {
         assertTrue(secondLineageDetails.hasCommonAncestor(firstLineageDetails));
     }
 
+    @Test
+    public void hasCommonSignerWithCapabilities_singleMatchingSigner_returnsTrue()
+            throws Exception {
+        // The hasCommonSignerWithCapabilities method is intended to grant the specified
+        // capabilities to a requesting package that has a common signer in the lineage (or as the
+        // current signer) even if their signing identities have diverged. This test verifies if the
+        // two SigningDetails have the same single signer then the requested capability can be
+        // granted since the current signer always has all capabilities granted.
+        SigningDetails firstDetails = createSigningDetails(FIRST_SIGNATURE);
+        SigningDetails secondSignerDetails = createSigningDetails(FIRST_SIGNATURE);
+
+        assertTrue(firstDetails.hasCommonSignerWithCapability(secondSignerDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_singleDifferentSigners_returnsFalse()
+            throws Exception {
+        // If each package is signed by a single different signer then the method should return
+        // false since there is no shared signer.
+        SigningDetails firstDetails = createSigningDetails(FIRST_SIGNATURE);
+        SigningDetails secondDetails = createSigningDetails(SECOND_SIGNATURE);
+
+        assertFalse(firstDetails.hasCommonSignerWithCapability(secondDetails, PERMISSION));
+        assertFalse(secondDetails.hasCommonSignerWithCapability(firstDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_oneWithMultipleSigners_returnsFalse()
+            throws Exception {
+        // If one of the packages is signed with multiple signers and the other only a single signer
+        // this method should return false since all signers must match exactly for multiple signer
+        // cases.
+        SigningDetails firstDetails = createSigningDetails(FIRST_SIGNATURE, SECOND_SIGNATURE);
+        SigningDetails secondDetails = createSigningDetails(FIRST_SIGNATURE);
+
+        assertFalse(firstDetails.hasCommonSignerWithCapability(secondDetails, PERMISSION));
+        assertFalse(secondDetails.hasCommonSignerWithCapability(firstDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_multipleMatchingSigners_returnsTrue()
+            throws Exception {
+        // if both packages are signed by the same multiple signers then this method should return
+        // true since the current signer is granted all capabilities.
+        SigningDetails firstDetails = createSigningDetails(FIRST_SIGNATURE, SECOND_SIGNATURE);
+        SigningDetails secondDetails = createSigningDetails(SECOND_SIGNATURE, FIRST_SIGNATURE);
+
+        assertTrue(firstDetails.hasCommonSignerWithCapability(secondDetails, PERMISSION));
+        assertTrue(secondDetails.hasCommonSignerWithCapability(firstDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_singleSignerInLineage_returnsTrue()
+            throws Exception {
+        // if a single signer is in the lineage and that previous signer has the requested
+        // capability then this method should return true.
+        SigningDetails lineageDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE},
+                new int[]{DEFAULT_CAPABILITIES, DEFAULT_CAPABILITIES});
+        SigningDetails singleSignerDetails = createSigningDetails(FIRST_SIGNATURE);
+
+        assertTrue(lineageDetails.hasCommonSignerWithCapability(singleSignerDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_singleSignerInLineageWOCapability_returnsFalse()
+            throws Exception {
+        // If a single signer is in the lineage and that previous signer does not have the requested
+        // capability then this method should return false.
+        SigningDetails lineageDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE},
+                new int[]{SHARED_USER_ID, DEFAULT_CAPABILITIES});
+        SigningDetails singleSignerDetails = createSigningDetails(FIRST_SIGNATURE);
+
+        assertFalse(lineageDetails.hasCommonSignerWithCapability(singleSignerDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_singleSignerMatchesCurrentSigner_returnsTrue()
+            throws Exception {
+        // If a requesting app is signed by the same current signer as an app with a lineage the
+        // method should return true since the current signer is granted all capabilities.
+        SigningDetails lineageDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE},
+                new int[]{SHARED_USER_ID, DEFAULT_CAPABILITIES});
+        SigningDetails singleSignerDetails = createSigningDetails(SECOND_SIGNATURE);
+
+        assertTrue(lineageDetails.hasCommonSignerWithCapability(singleSignerDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_divergingSignersWithCommonSigner_returnsTrue()
+            throws Exception {
+        // This method is intended to allow granting a capability to another app that has a common
+        // signer in the lineage with the capability still granted; this test verifies when the
+        // current signers diverge but a common ancestor has the requested capability this method
+        // returns true.
+        SigningDetails firstLineageDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
+                new int[]{DEFAULT_CAPABILITIES, DEFAULT_CAPABILITIES, DEFAULT_CAPABILITIES});
+        SigningDetails secondLineageDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
+                SECOND_SIGNATURE, FOURTH_SIGNATURE);
+
+        assertTrue(firstLineageDetails.hasCommonSignerWithCapability(secondLineageDetails,
+                PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_divergingSignersOneGrantsCapability_returnsTrue()
+            throws Exception {
+        // If apps have multiple common signers in the lineage with one denying the requested
+        // capability but the other granting it this method should return true.
+        SigningDetails firstLineageDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
+                new int[]{SHARED_USER_ID, DEFAULT_CAPABILITIES, DEFAULT_CAPABILITIES});
+        SigningDetails secondLineageDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
+                SECOND_SIGNATURE, FOURTH_SIGNATURE);
+
+        assertTrue(firstLineageDetails.hasCommonSignerWithCapability(secondLineageDetails,
+                PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_divergingSignersNoneGrantCapability_returnsFalse()
+            throws Exception {
+        // If apps have multiple common signers in the lineage with all denying the requested
+        // capability this method should return false.
+        SigningDetails firstLineageDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
+                new int[]{SHARED_USER_ID, AUTH, DEFAULT_CAPABILITIES});
+        SigningDetails secondLineageDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
+                SECOND_SIGNATURE, FOURTH_SIGNATURE);
+
+        assertFalse(firstLineageDetails.hasCommonSignerWithCapability(secondLineageDetails,
+                PERMISSION));
+    }
+
+    @Test
+    public void
+            hasCommonSignerWithCapabilities_divergingSignersNoneGrantsAllCapabilities_returnsTrue()
+            throws Exception {
+        // If an app has multiple common signers in the lineage, each granting one of the requested
+        // capabilities but neither granting all this method should return false since a single
+        // common ancestor must grant all requested capabilities.
+        SigningDetails firstLineageDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
+                new int[]{SHARED_USER_ID, PERMISSION, DEFAULT_CAPABILITIES});
+        SigningDetails secondLineageDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
+                SECOND_SIGNATURE, FOURTH_SIGNATURE);
+
+        assertFalse(firstLineageDetails.hasCommonSignerWithCapability(secondLineageDetails,
+                PERMISSION | SHARED_USER_ID));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_currentSignerInLineageOfRequestingApp_returnsTrue()
+            throws Exception {
+        // If the current signer of an app is in the lineage of the requesting app then this method
+        // should return true since the current signer is granted all capabilities.
+        SigningDetails firstLineageDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
+                SECOND_SIGNATURE);
+        SigningDetails secondLineageDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
+                SECOND_SIGNATURE, THIRD_SIGNATURE);
+
+        assertTrue(firstLineageDetails.hasCommonSignerWithCapability(secondLineageDetails,
+                PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_currentSignerInLineageOfDeclaringApp_returnsTrue()
+            throws Exception {
+        // If the current signer of a requesting app with a lineage is in the lineage of the
+        // declaring app and that previous signature is granted the requested capability the method
+        // should return true.
+        SigningDetails declaringDetails = createSigningDetailsWithLineageAndCapabilities(
+                new String[]{FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE},
+                new int[]{SHARED_USER_ID, DEFAULT_CAPABILITIES, DEFAULT_CAPABILITIES});
+        SigningDetails requestingDetails = createSigningDetailsWithLineage(FIRST_SIGNATURE,
+                SECOND_SIGNATURE);
+
+        assertTrue(declaringDetails.hasCommonSignerWithCapability(requestingDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_oneSignerNullLineage_returns() throws Exception {
+        // While the pastSigningCertificates should only be null in the case of multiple current
+        // signers there are instances where this can be null with a single signer; verify that a
+        // null pastSigningCertificates array in either SigningDetails does not result in a
+        // NullPointerException.
+        SigningDetails firstDetails = createSigningDetails(true, FIRST_SIGNATURE);
+        SigningDetails secondDetails = createSigningDetails(SECOND_SIGNATURE);
+
+        assertFalse(firstDetails.hasCommonSignerWithCapability(secondDetails, PERMISSION));
+        assertFalse(secondDetails.hasCommonSignerWithCapability(firstDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasCommonSignerWithCapabilities_unknownSigner_returnsFalse() throws Exception {
+        // An unknown SigningDetails for either instance should immediately result in false being
+        // returned.
+        SigningDetails firstDetails = SigningDetails.UNKNOWN;
+        SigningDetails secondDetails = createSigningDetails(FIRST_SIGNATURE);
+
+        assertFalse(firstDetails.hasCommonSignerWithCapability(secondDetails, PERMISSION));
+        assertFalse(secondDetails.hasCommonSignerWithCapability(firstDetails, PERMISSION));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_nullSet_returnsFalse() throws Exception {
+        // The hasAncestorOrSelfWithDigest method is intended to verify whether the SigningDetails
+        // is currently signed, or has previously been signed, by any of the certificate digests
+        // in the provided Set. This test verifies if a null Set is provided then false is returned.
+        SigningDetails details = createSigningDetails(FIRST_SIGNATURE);
+
+        assertFalse(details.hasAncestorOrSelfWithDigest(null));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_unknownDetails_returnsFalse() throws Exception {
+        // If hasAncestorOrSelfWithDigest is invoked against an UNKNOWN
+        // instance of the SigningDetails then false is returned.
+        SigningDetails details = SigningDetails.UNKNOWN;
+        Set<String> digests = createDigestSet(FIRST_SIGNATURE);
+
+        assertFalse(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_singleSignerInSet_returnsTrue() throws Exception {
+        // If the single signer of an app is in the provided digest Set then
+        // the method should return true.
+        SigningDetails details = createSigningDetails(FIRST_SIGNATURE);
+        Set<String> digests = createDigestSet(FIRST_SIGNATURE, SECOND_SIGNATURE);
+
+        assertTrue(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_singleSignerNotInSet_returnsFalse() throws Exception {
+        // If the single signer of an app is not in the provided digest Set then
+        // the method should return false.
+        SigningDetails details = createSigningDetails(FIRST_SIGNATURE);
+        Set<String> digests = createDigestSet(SECOND_SIGNATURE, THIRD_SIGNATURE);
+
+        assertFalse(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_multipleSignersInSet_returnsTrue() throws Exception {
+        // If an app is signed by multiple signers and all of the signers are in
+        // the digest Set then the method should return true.
+        SigningDetails details = createSigningDetails(FIRST_SIGNATURE, SECOND_SIGNATURE);
+        Set<String> digests = createDigestSet(FIRST_SIGNATURE, SECOND_SIGNATURE, THIRD_SIGNATURE);
+
+        assertTrue(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_multipleSignersNotInSet_returnsFalse()
+            throws Exception {
+        // If an app is signed by multiple signers then all signers must be in the digest Set; if
+        // only a subset of the signers are in the Set then the method should return false.
+        SigningDetails details = createSigningDetails(FIRST_SIGNATURE, SECOND_SIGNATURE);
+        Set<String> digests = createDigestSet(FIRST_SIGNATURE, THIRD_SIGNATURE);
+
+        assertFalse(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_multipleSignersOneInSet_returnsFalse()
+            throws Exception {
+        // If an app is signed by multiple signers and the Set size is smaller than the number of
+        // signers then the method should immediately return false since there's no way for the
+        // requirement of all signers in the Set to be met.
+        SigningDetails details = createSigningDetails(FIRST_SIGNATURE, SECOND_SIGNATURE);
+        Set<String> digests = createDigestSet(FIRST_SIGNATURE);
+
+        assertFalse(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_lineageSignerInSet_returnsTrue() throws Exception {
+        // If an app has a rotated signing key and a previous key in the lineage is in the digest
+        // Set then this method should return true.
+        SigningDetails details = createSigningDetailsWithLineage(FIRST_SIGNATURE, SECOND_SIGNATURE);
+        Set<String> digests = createDigestSet(FIRST_SIGNATURE, THIRD_SIGNATURE);
+
+        assertTrue(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_lineageSignerNotInSet_returnsFalse() throws Exception {
+        // If an app has a rotated signing key, but neither the current key nor any of the signers
+        // in the lineage are in the digest set then the method should return false.
+        SigningDetails details = createSigningDetailsWithLineage(FIRST_SIGNATURE, SECOND_SIGNATURE);
+        Set<String> digests = createDigestSet(THIRD_SIGNATURE, FOURTH_SIGNATURE);
+
+        assertFalse(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_lastSignerInLineageInSet_returnsTrue()
+            throws Exception {
+        // If an app has multiple signers in the lineage only one of those signers must be in the
+        // Set for this method to return true. This test verifies if the last signer in the lineage
+        // is in the set then the method returns true.
+        SigningDetails details = createSigningDetailsWithLineage(FIRST_SIGNATURE, SECOND_SIGNATURE,
+                THIRD_SIGNATURE);
+        Set<String> digests = createDigestSet(SECOND_SIGNATURE);
+
+        assertTrue(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
+    @Test
+    public void hasAncestorOrSelfWithDigest_nullLineageSingleSIgner_returnsFalse()
+            throws Exception {
+        // Under some instances an app with only a single signer can have a null lineage; this
+        // test verifies that null lineage does not result in a NullPointerException and instead the
+        // method returns false if the single signer is not in the Set.
+        SigningDetails details = createSigningDetails(true, FIRST_SIGNATURE);
+        Set<String> digests = createDigestSet(SECOND_SIGNATURE, THIRD_SIGNATURE);
+
+        assertFalse(details.hasAncestorOrSelfWithDigest(digests));
+    }
+
     private SigningDetails createSigningDetailsWithLineage(String... signers) throws Exception {
         int[] capabilities = new int[signers.length];
         for (int i = 0; i < capabilities.length; i++) {
@@ -629,10 +1065,43 @@ public class SigningDetailsTest {
     }
 
     private SigningDetails createSigningDetails(String... signers) throws Exception {
+        return createSigningDetails(false, signers);
+    }
+
+    private SigningDetails createSigningDetails(boolean useNullPastSigners, String... signers)
+            throws Exception {
         Signature[] currentSignatures = new Signature[signers.length];
         for (int i = 0; i < signers.length; i++) {
             currentSignatures[i] = new Signature(signers[i]);
         }
-        return new SigningDetails(currentSignatures, SIGNING_BLOCK_V3, null);
+        // If there are multiple signers then the pastSigningCertificates should be set to null, but
+        // if there is only a single signer both the current signer and the past signers should be
+        // set to that one signer.
+        if (signers.length > 1 || useNullPastSigners) {
+            return new SigningDetails(currentSignatures, SIGNING_BLOCK_V3, null);
+        }
+        return new SigningDetails(currentSignatures, SIGNING_BLOCK_V3, currentSignatures);
+    }
+
+    private Set<String> createDigestSet(String... signers) {
+        Set<String> digests = new ArraySet<>();
+        for (String signer : signers) {
+            String digest = PackageUtils.computeSha256Digest(new Signature(signer).toByteArray());
+            digests.add(digest);
+        }
+        return digests;
+    }
+
+    private void assertSigningDetailsContainsLineage(SigningDetails details,
+            String... pastSigners) {
+        // This method should only be invoked for results that contain a single signer.
+        assertEquals(1, details.getSignatures().length);
+        assertTrue(details.getSignatures()[0].toCharsString().equalsIgnoreCase(
+                pastSigners[pastSigners.length - 1]));
+        Set<String> signatures = new ArraySet<>(pastSigners);
+        for (Signature pastSignature : details.getPastSigningCertificates()) {
+            assertTrue(signatures.remove(pastSignature.toCharsString()));
+        }
+        assertEquals(0, signatures.size());
     }
 }

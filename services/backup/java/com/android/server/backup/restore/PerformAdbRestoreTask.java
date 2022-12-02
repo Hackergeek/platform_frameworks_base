@@ -24,13 +24,18 @@ import static com.android.server.backup.BackupPasswordManager.PBKDF_FALLBACK;
 import static com.android.server.backup.UserBackupManagerService.BACKUP_FILE_HEADER_MAGIC;
 import static com.android.server.backup.UserBackupManagerService.BACKUP_FILE_VERSION;
 
+import android.app.backup.BackupManager;
 import android.app.backup.IFullBackupRestoreObserver;
+import android.content.pm.PackageManagerInternal;
 import android.os.ParcelFileDescriptor;
 import android.util.Slog;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.server.LocalServices;
+import com.android.server.backup.OperationStorage;
 import com.android.server.backup.UserBackupManagerService;
 import com.android.server.backup.fullbackup.FullBackupObbConnection;
+import com.android.server.backup.utils.BackupEligibilityRules;
 import com.android.server.backup.utils.FullBackupRestoreObserverUtils;
 import com.android.server.backup.utils.PasswordUtils;
 
@@ -56,6 +61,7 @@ import javax.crypto.spec.SecretKeySpec;
 public class PerformAdbRestoreTask implements Runnable {
 
     private final UserBackupManagerService mBackupManagerService;
+    private final OperationStorage mOperationStorage;
     private final ParcelFileDescriptor mInputFile;
     private final String mCurrentPassword;
     private final String mDecryptPassword;
@@ -64,10 +70,12 @@ public class PerformAdbRestoreTask implements Runnable {
 
     private IFullBackupRestoreObserver mObserver;
 
-    public PerformAdbRestoreTask(UserBackupManagerService backupManagerService,
+    public PerformAdbRestoreTask(
+            UserBackupManagerService backupManagerService, OperationStorage operationStorage,
             ParcelFileDescriptor fd, String curPassword, String decryptPassword,
             IFullBackupRestoreObserver observer, AtomicBoolean latch) {
         this.mBackupManagerService = backupManagerService;
+        mOperationStorage = operationStorage;
         mInputFile = fd;
         mCurrentPassword = curPassword;
         mDecryptPassword = decryptPassword;
@@ -101,8 +109,13 @@ public class PerformAdbRestoreTask implements Runnable {
                 return;
             }
 
-            FullRestoreEngine mEngine = new FullRestoreEngine(mBackupManagerService, null,
-                    mObserver, null, null, true, 0 /*unused*/, true);
+            BackupEligibilityRules eligibilityRules = new BackupEligibilityRules(
+                    mBackupManagerService.getPackageManager(),
+                    LocalServices.getService(PackageManagerInternal.class),
+                    mBackupManagerService.getUserId(), BackupManager.OperationType.ADB_BACKUP);
+            FullRestoreEngine mEngine = new FullRestoreEngine(mBackupManagerService,
+                    mOperationStorage, null, mObserver, null, null,
+                    true, 0 /*unused*/, true, eligibilityRules);
             FullRestoreEngineThread mEngineThread = new FullRestoreEngineThread(mEngine,
                     tarInputStream);
             mEngineThread.run();
@@ -212,10 +225,9 @@ public class PerformAdbRestoreTask implements Runnable {
         return buffer.toString();
     }
 
-    private static InputStream attemptMasterKeyDecryption(String decryptPassword, String algorithm,
-            byte[] userSalt, byte[] ckSalt,
-            int rounds, String userIvHex, String masterKeyBlobHex, InputStream rawInStream,
-            boolean doLog) {
+    private static InputStream attemptEncryptionKeyDecryption(String decryptPassword,
+            String algorithm, byte[] userSalt, byte[] ckSalt, int rounds, String userIvHex,
+            String encryptionKeyBlobHex, InputStream rawInStream, boolean doLog) {
         InputStream result = null;
 
         try {
@@ -228,31 +240,31 @@ public class PerformAdbRestoreTask implements Runnable {
             c.init(Cipher.DECRYPT_MODE,
                     new SecretKeySpec(userKey.getEncoded(), "AES"),
                     ivSpec);
-            byte[] mkCipher = PasswordUtils.hexToByteArray(masterKeyBlobHex);
+            byte[] mkCipher = PasswordUtils.hexToByteArray(encryptionKeyBlobHex);
             byte[] mkBlob = c.doFinal(mkCipher);
 
-            // first, the master key IV
+            // first, the encryption key IV
             int offset = 0;
             int len = mkBlob[offset++];
             IV = Arrays.copyOfRange(mkBlob, offset, offset + len);
             offset += len;
-            // then the master key itself
+            // then the encryption key itself
             len = mkBlob[offset++];
-            byte[] mk = Arrays.copyOfRange(mkBlob,
+            byte[] encryptionKey = Arrays.copyOfRange(mkBlob,
                     offset, offset + len);
             offset += len;
-            // and finally the master key checksum hash
+            // and finally the encryption key checksum hash
             len = mkBlob[offset++];
             byte[] mkChecksum = Arrays.copyOfRange(mkBlob,
                     offset, offset + len);
 
-            // now validate the decrypted master key against the checksum
-            byte[] calculatedCk = PasswordUtils.makeKeyChecksum(algorithm, mk, ckSalt,
+            // now validate the decrypted encryption key against the checksum
+            byte[] calculatedCk = PasswordUtils.makeKeyChecksum(algorithm, encryptionKey, ckSalt,
                     rounds);
             if (Arrays.equals(calculatedCk, mkChecksum)) {
                 ivSpec = new IvParameterSpec(IV);
                 c.init(Cipher.DECRYPT_MODE,
-                        new SecretKeySpec(mk, "AES"),
+                        new SecretKeySpec(encryptionKey, "AES"),
                         ivSpec);
                 // Only if all of the above worked properly will 'result' be assigned
                 result = new CipherInputStream(rawInStream, c);
@@ -265,7 +277,7 @@ public class PerformAdbRestoreTask implements Runnable {
             }
         } catch (BadPaddingException e) {
             // This case frequently occurs when the wrong password is used to decrypt
-            // the master key.  Use the identical "incorrect password" log text as is
+            // the encryption key.  Use the identical "incorrect password" log text as is
             // used in the checksum failure log in order to avoid providing additional
             // information to an attacker.
             if (doLog) {
@@ -273,7 +285,7 @@ public class PerformAdbRestoreTask implements Runnable {
             }
         } catch (IllegalBlockSizeException e) {
             if (doLog) {
-                Slog.w(TAG, "Invalid block size in master key");
+                Slog.w(TAG, "Invalid block size in encryption key");
             }
         } catch (NoSuchAlgorithmException e) {
             if (doLog) {
@@ -309,15 +321,15 @@ public class PerformAdbRestoreTask implements Runnable {
                 int rounds = Integer.parseInt(readHeaderLine(rawInStream)); // 7
                 String userIvHex = readHeaderLine(rawInStream); // 8
 
-                String masterKeyBlobHex = readHeaderLine(rawInStream); // 9
+                String encryptionKeyBlobHex = readHeaderLine(rawInStream); // 9
 
-                // decrypt the master key blob
-                result = attemptMasterKeyDecryption(decryptPassword, PBKDF_CURRENT,
-                        userSalt, ckSalt, rounds, userIvHex, masterKeyBlobHex, rawInStream, false);
+                // decrypt the encryption key blob
+                result = attemptEncryptionKeyDecryption(decryptPassword, PBKDF_CURRENT, userSalt,
+                        ckSalt, rounds, userIvHex, encryptionKeyBlobHex, rawInStream, false);
                 if (result == null && pbkdf2Fallback) {
-                    result = attemptMasterKeyDecryption(
+                    result = attemptEncryptionKeyDecryption(
                             decryptPassword, PBKDF_FALLBACK, userSalt, ckSalt,
-                            rounds, userIvHex, masterKeyBlobHex, rawInStream, true);
+                            rounds, userIvHex, encryptionKeyBlobHex, rawInStream, true);
                 }
             } else {
                 Slog.w(TAG, "Unsupported encryption method: " + encryptionName);

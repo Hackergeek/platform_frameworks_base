@@ -19,6 +19,7 @@ package com.android.externalstorage;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.usage.StorageStatsManager;
+import android.content.AttributionSource;
 import android.content.ContentResolver;
 import android.content.UriPermission;
 import android.database.Cursor;
@@ -28,7 +29,6 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Environment;
-import android.os.IBinder;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.os.storage.DiskInfo;
@@ -61,6 +61,7 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -141,17 +142,17 @@ public class ExternalStorageProvider extends FileSystemProvider {
     }
 
     @Override
-    protected int enforceReadPermissionInner(Uri uri, String callingPkg,
-            @Nullable String featureId, IBinder callerToken) throws SecurityException {
+    protected int enforceReadPermissionInner(Uri uri,
+            @NonNull AttributionSource attributionSource) throws SecurityException {
         enforceShellRestrictions();
-        return super.enforceReadPermissionInner(uri, callingPkg, featureId, callerToken);
+        return super.enforceReadPermissionInner(uri, attributionSource);
     }
 
     @Override
-    protected int enforceWritePermissionInner(Uri uri, String callingPkg,
-            @Nullable String featureId, IBinder callerToken) throws SecurityException {
+    protected int enforceWritePermissionInner(Uri uri,
+            @NonNull AttributionSource attributionSource) throws SecurityException {
         enforceShellRestrictions();
-        return super.enforceWritePermissionInner(uri, callingPkg, featureId, callerToken);
+        return super.enforceWritePermissionInner(uri, attributionSource);
     }
 
     public void updateVolumes() {
@@ -236,7 +237,8 @@ public class ExternalStorageProvider extends FileSystemProvider {
                 root.flags |= Root.FLAG_REMOVABLE_USB;
             }
 
-            if (volume.getType() != VolumeInfo.TYPE_EMULATED) {
+            if (volume.getType() != VolumeInfo.TYPE_EMULATED
+                    && volume.getType() != VolumeInfo.TYPE_STUB) {
                 root.flags |= Root.FLAG_SUPPORTS_EJECT;
             }
 
@@ -251,7 +253,7 @@ public class ExternalStorageProvider extends FileSystemProvider {
             if (volume.getType() == VolumeInfo.TYPE_PUBLIC) {
                 root.flags |= Root.FLAG_HAS_SETTINGS;
             }
-            if (volume.isVisibleForRead(userId)) {
+            if (volume.isVisibleForUser(userId)) {
                 root.visiblePath = volume.getPathForUser(userId);
             } else {
                 root.visiblePath = null;
@@ -317,8 +319,19 @@ public class ExternalStorageProvider extends FileSystemProvider {
             }
 
             // Block Download folder from tree
-            if (TextUtils.equals(Environment.DIRECTORY_DOWNLOADS.toLowerCase(),
-                    path.toLowerCase())) {
+            if (TextUtils.equals(Environment.DIRECTORY_DOWNLOADS.toLowerCase(Locale.ROOT),
+                    path.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+
+            // Block /Android
+            if (TextUtils.equals(Environment.DIRECTORY_ANDROID.toLowerCase(Locale.ROOT),
+                    path.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+
+            // Block /Android/data, /Android/obb, /Android/sandbox and sub dirs
+            if (shouldHide(dir)) {
                 return true;
             }
 
@@ -414,19 +427,21 @@ public class ExternalStorageProvider extends FileSystemProvider {
     }
 
     @VisibleForTesting
-    static String getPathFromDocId(String docId) {
+    static String getPathFromDocId(String docId) throws IOException {
         final int splitIndex = docId.indexOf(':', 1);
-        final String path = docId.substring(splitIndex + 1);
+        final String docIdPath = docId.substring(splitIndex + 1);
+        // Get CanonicalPath and remove the first "/"
+        final String canonicalPath = new File(docIdPath).getCanonicalPath().substring(1);
 
-        if (path.isEmpty()) {
-            return path;
+        if (canonicalPath.isEmpty()) {
+            return canonicalPath;
         }
 
         // remove trailing "/"
-        if (path.charAt(path.length() - 1) == '/') {
-            return path.substring(0, path.length() - 1);
+        if (canonicalPath.charAt(canonicalPath.length() - 1) == '/') {
+            return canonicalPath.substring(0, canonicalPath.length() - 1);
         } else {
-            return path;
+            return canonicalPath;
         }
     }
 
@@ -457,7 +472,12 @@ public class ExternalStorageProvider extends FileSystemProvider {
         if (!target.exists()) {
             target.mkdirs();
         }
-        target = new File(target, path);
+        try {
+            target = new File(target, path).getCanonicalFile();
+        } catch (IOException e) {
+            throw new FileNotFoundException("Failed to canonicalize path " + path);
+        }
+
         if (mustExist && !target.exists()) {
             throw new FileNotFoundException("Missing file for " + docId + " at " + target);
         }
@@ -481,6 +501,13 @@ public class ExternalStorageProvider extends FileSystemProvider {
         } catch (FileNotFoundException | ErrnoException ignored) {
         }
     }
+
+    @Override
+    protected void onDocIdDeleted(String docId) {
+        Uri uri = DocumentsContract.buildDocumentUri(AUTHORITY, docId);
+        getContext().revokeUriPermission(uri, ~0);
+    }
+
 
     @Override
     public Cursor queryRoots(String[] projection) throws FileNotFoundException {

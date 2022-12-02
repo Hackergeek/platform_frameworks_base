@@ -18,8 +18,8 @@ package com.android.settingslib.drawer;
 
 import static com.android.settingslib.drawer.TileUtils.META_DATA_KEY_ORDER;
 import static com.android.settingslib.drawer.TileUtils.META_DATA_KEY_PROFILE;
+import static com.android.settingslib.drawer.TileUtils.META_DATA_NEW_TASK;
 import static com.android.settingslib.drawer.TileUtils.META_DATA_PREFERENCE_ICON;
-import static com.android.settingslib.drawer.TileUtils.META_DATA_PREFERENCE_ICON_URI;
 import static com.android.settingslib.drawer.TileUtils.META_DATA_PREFERENCE_KEYHINT;
 import static com.android.settingslib.drawer.TileUtils.META_DATA_PREFERENCE_SUMMARY;
 import static com.android.settingslib.drawer.TileUtils.META_DATA_PREFERENCE_SUMMARY_URI;
@@ -71,16 +71,19 @@ public abstract class Tile implements Parcelable {
     private Bundle mMetaData;
     private String mCategory;
 
-    public Tile(ComponentInfo info, String category) {
+    public Tile(ComponentInfo info, String category, Bundle metaData) {
         mComponentInfo = info;
         mComponentPackage = mComponentInfo.packageName;
         mComponentName = mComponentInfo.name;
         mCategory = category;
+        mMetaData = metaData;
         mIntent = new Intent().setClassName(mComponentPackage, mComponentName);
+        if (isNewTask()) {
+            mIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
     }
 
     Tile(Parcel in) {
-        final boolean isProviderTile = in.readBoolean();
         mComponentPackage = in.readString();
         mComponentName = in.readString();
         mIntent = new Intent().setClassName(mComponentPackage, mComponentName);
@@ -90,6 +93,9 @@ public abstract class Tile implements Parcelable {
         }
         mCategory = in.readString();
         mMetaData = in.readBundle();
+        if (isNewTask()) {
+            mIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        }
     }
 
     @Override
@@ -301,16 +307,8 @@ public abstract class Tile implements Parcelable {
         }
 
         int iconResId = mMetaData.getInt(META_DATA_PREFERENCE_ICON);
-        // Set the icon
-        if (iconResId == 0) {
-            // Only fallback to componentInfo.icon if metadata does not contain ICON_URI.
-            // ICON_URI should be loaded in app UI when need the icon object. Handling IPC at this
-            // level is too complex because we don't have a strong threading contract for this class
-            if (!mMetaData.containsKey(META_DATA_PREFERENCE_ICON_URI)) {
-                iconResId = getComponentIcon(componentInfo);
-            }
-        }
-        if (iconResId != 0) {
+        // Set the icon. Skip the transparent color for backward compatibility since Android S.
+        if (iconResId != 0 && iconResId != android.R.color.transparent) {
             final Icon icon = Icon.createWithResource(componentInfo.packageName, iconResId);
             if (isIconTintable(context)) {
                 final TypedArray a = context.obtainStyledAttributes(new int[]{
@@ -333,6 +331,17 @@ public abstract class Tile implements Parcelable {
         if (mMetaData != null
                 && mMetaData.containsKey(TileUtils.META_DATA_PREFERENCE_ICON_TINTABLE)) {
             return mMetaData.getBoolean(TileUtils.META_DATA_PREFERENCE_ICON_TINTABLE);
+        }
+        return false;
+    }
+
+    /**
+     * Whether the {@link Activity} should be launched in a separate task.
+     */
+    public boolean isNewTask() {
+        if (mMetaData != null
+                && mMetaData.containsKey(META_DATA_NEW_TASK)) {
+            return mMetaData.getBoolean(META_DATA_NEW_TASK);
         }
         return false;
     }
@@ -376,8 +385,12 @@ public abstract class Tile implements Parcelable {
      * Check whether tile only has primary profile.
      */
     public boolean isPrimaryProfileOnly() {
-        String profile = mMetaData != null
-                ? mMetaData.getString(META_DATA_KEY_PROFILE) : PROFILE_ALL;
+        return isPrimaryProfileOnly(mMetaData);
+    }
+
+    static boolean isPrimaryProfileOnly(Bundle metaData) {
+        String profile = metaData != null
+                ? metaData.getString(META_DATA_KEY_PROFILE) : PROFILE_ALL;
         profile = (profile != null ? profile : PROFILE_ALL);
         return TextUtils.equals(profile, PROFILE_PRIMARY);
     }

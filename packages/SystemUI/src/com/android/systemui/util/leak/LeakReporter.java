@@ -34,6 +34,8 @@ import android.util.Log;
 
 import androidx.core.content.FileProvider;
 
+import com.android.systemui.dagger.SysUISingleton;
+
 import com.google.android.collect.Lists;
 
 import java.io.File;
@@ -44,12 +46,11 @@ import java.util.ArrayList;
 
 import javax.inject.Inject;
 import javax.inject.Named;
-import javax.inject.Singleton;
 
 /**
  * Dumps data to debug leaks and posts a notification to share the data.
  */
-@Singleton
+@SysUISingleton
 public class LeakReporter {
 
     static final String TAG = "LeakReporter";
@@ -86,7 +87,7 @@ public class LeakReporter {
                 w.print("Build: "); w.println(SystemProperties.get("ro.build.description"));
                 w.println();
                 w.flush();
-                mLeakDetector.dump(fos.getFD(), w, new String[0]);
+                mLeakDetector.dump(w, new String[0]);
                 w.close();
             }
 

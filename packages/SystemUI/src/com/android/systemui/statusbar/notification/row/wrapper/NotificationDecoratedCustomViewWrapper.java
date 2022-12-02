@@ -20,6 +20,7 @@ import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
 
+import com.android.systemui.statusbar.notification.NotificationFadeAware;
 import com.android.systemui.statusbar.notification.row.ExpandableNotificationRow;
 
 /**
@@ -29,6 +30,30 @@ public class NotificationDecoratedCustomViewWrapper extends NotificationTemplate
 
     private View mWrappedView = null;
 
+    /**
+     * Determines if the standard template contains a custom view, injected by Notification.Builder
+     */
+    public static boolean hasCustomView(View v) {
+        return getWrappedCustomView(v) != null;
+    }
+
+    private static View getWrappedCustomView(View view) {
+        if (view == null) {
+            return null;
+        }
+        ViewGroup container = view.findViewById(
+                com.android.internal.R.id.notification_main_column);
+        if (container == null) {
+            return null;
+        }
+        Integer childIndex = (Integer) container.getTag(
+                com.android.internal.R.id.notification_custom_view_index_tag);
+        if (childIndex == null || childIndex == -1) {
+            return null;
+        }
+        return container.getChildAt(childIndex);
+    }
+
     protected NotificationDecoratedCustomViewWrapper(Context ctx, View view,
             ExpandableNotificationRow row) {
         super(ctx, view, row);
@@ -36,16 +61,21 @@ public class NotificationDecoratedCustomViewWrapper extends NotificationTemplate
 
     @Override
     public void onContentUpdated(ExpandableNotificationRow row) {
-        ViewGroup container = mView.findViewById(
-                com.android.internal.R.id.notification_main_column);
-        Integer childIndex = (Integer) container.getTag(
-                com.android.internal.R.id.notification_custom_view_index_tag);
-        if (childIndex != null && childIndex != -1) {
-            mWrappedView = container.getChildAt(childIndex);
-        }
+        mWrappedView = getWrappedCustomView(mView);
+
         if (needsInversion(resolveBackgroundColor(), mWrappedView)) {
             invertViewLuminosity(mWrappedView);
         }
         super.onContentUpdated(row);
+    }
+
+    /**
+     * Apply the faded state as a layer type change to the custom view which needs to have
+     * overlapping contents render precisely.
+     */
+    @Override
+    public void setNotificationFaded(boolean faded) {
+        super.setNotificationFaded(faded);
+        NotificationFadeAware.setLayerTypeForFaded(mWrappedView, faded);
     }
 }

@@ -32,6 +32,7 @@ import android.os.ServiceManager;
 import android.os.UserHandle;
 import android.os.UserManager;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.pm.UserManagerService;
 
 import java.io.PrintWriter;
@@ -70,10 +71,18 @@ public abstract class SystemService {
     /** @hide */
     protected static final boolean DEBUG_USER = false;
 
-    /*
+    /**
      * The earliest boot phase the system send to system services on boot.
      */
     public static final int PHASE_WAIT_FOR_DEFAULT_DISPLAY = 100;
+
+    /**
+     * Boot phase that blocks on SensorService availability. The service gets started
+     * asynchronously since it may take awhile to actually finish initializing.
+     *
+     * @hide
+     */
+    public static final int PHASE_WAIT_FOR_SENSOR_SERVICE = 200;
 
     /**
      * After receiving this boot phase, services can obtain lock settings data.
@@ -132,45 +141,169 @@ public abstract class SystemService {
      */
     @SystemApi(client = Client.SYSTEM_SERVER)
     public static final class TargetUser {
-        @NonNull
-        private final UserInfo mUserInfo;
+
+        // NOTE: attributes below must be immutable while ther user is running (i.e., from the
+        // moment it's started until after it's shutdown).
+        private final @UserIdInt int mUserId;
+        private final boolean mFull;
+        private final boolean mManagedProfile;
+        private final boolean mPreCreated;
 
         /** @hide */
         public TargetUser(@NonNull UserInfo userInfo) {
-            mUserInfo = userInfo;
+            mUserId = userInfo.id;
+            mFull = userInfo.isFull();
+            mManagedProfile = userInfo.isManagedProfile();
+            mPreCreated = userInfo.preCreated;
         }
 
         /**
-         * @return The information about the user. <b>NOTE: </b> this is a "live" object
-         * referenced by {@link UserManagerService} and hence should not be modified.
+         * Checks if the target user is {@link UserInfo#isFull() full}.
          *
          * @hide
          */
-        @NonNull
-        public UserInfo getUserInfo() {
-            return mUserInfo;
+        public boolean isFull() {
+            return mFull;
         }
 
         /**
-         * @return the target {@link UserHandle}.
+         * Checks if the target user is a managed profile.
+         *
+         * @hide
+         */
+        public boolean isManagedProfile() {
+            return mManagedProfile;
+        }
+
+        /**
+         * Checks if the target user is a pre-created user.
+         *
+         * @hide
+         */
+        public boolean isPreCreated() {
+            return mPreCreated;
+        }
+
+        /**
+         * Gets the target user's {@link UserHandle}.
          */
         @NonNull
         public UserHandle getUserHandle() {
-            return mUserInfo.getUserHandle();
+            return UserHandle.of(mUserId);
         }
 
         /**
-         * @return the integer user id
+         * Gets the target user's id.
          *
          * @hide
          */
-        public int getUserIdentifier() {
-            return mUserInfo.id;
+        public @UserIdInt int getUserIdentifier() {
+            return mUserId;
         }
 
         @Override
         public String toString() {
-            return Integer.toString(getUserIdentifier());
+            return Integer.toString(mUserId);
+        }
+
+        /**
+         * @hide
+         */
+        public void dump(@NonNull PrintWriter pw) {
+            pw.print(getUserIdentifier());
+
+            if (!isFull() && !isManagedProfile()) return;
+
+            pw.print('(');
+            boolean addComma = false;
+            if (isFull()) {
+                pw.print("full");
+            }
+            if (isManagedProfile()) {
+                if (addComma) pw.print(',');
+                pw.print("mp");
+            }
+            pw.print(')');
+        }
+    }
+
+    /**
+     * Class representing the types of "onUser" events that we are being informed about as having
+     * finished.
+     *
+     * @hide
+     */
+    public static final class UserCompletedEventType {
+        /**
+         * Flag representing the {@link #onUserStarting} event.
+         * @hide
+         */
+        public static final int EVENT_TYPE_USER_STARTING = 1 << 0;
+        /**
+         * Flag representing the {@link #onUserUnlocked} event.
+         * @hide
+         */
+        public static final int EVENT_TYPE_USER_UNLOCKED = 1 << 1;
+        /**
+         * Flag representing the {@link #onUserSwitching} event.
+         * @hide
+         */
+        public static final int EVENT_TYPE_USER_SWITCHING = 1 << 2;
+
+        /**
+         * @hide
+         */
+        @IntDef(flag = true, prefix = "EVENT_TYPE_USER_", value = {
+                EVENT_TYPE_USER_STARTING,
+                EVENT_TYPE_USER_UNLOCKED,
+                EVENT_TYPE_USER_SWITCHING
+        })
+        @Retention(RetentionPolicy.SOURCE)
+        public @interface EventTypesFlag {
+        }
+
+        private final @EventTypesFlag int mEventType;
+
+        /** @hide */
+        UserCompletedEventType(@EventTypesFlag int eventType) {
+            mEventType = eventType;
+        }
+
+        /**
+         * Creates a new instance of {@link UserCompletedEventType}.
+         * @hide
+         */
+        @VisibleForTesting
+        public static UserCompletedEventType newUserCompletedEventTypeForTest(
+                @EventTypesFlag int eventType) {
+            return new UserCompletedEventType(eventType);
+        }
+
+        /** Returns whether one of the events is {@link #onUserStarting}. */
+        public boolean includesOnUserStarting() {
+            return (mEventType & EVENT_TYPE_USER_STARTING) != 0;
+        }
+
+        /** Returns whether one of the events is {@link #onUserUnlocked}. */
+        public boolean includesOnUserUnlocked() {
+            return (mEventType & EVENT_TYPE_USER_UNLOCKED) != 0;
+        }
+
+        /** Returns whether one of the events is {@link #onUserSwitching}. */
+        public boolean includesOnUserSwitching() {
+            return (mEventType & EVENT_TYPE_USER_SWITCHING) != 0;
+        }
+
+        @Override
+        public String toString() {
+            final StringBuilder sb = new StringBuilder("{");
+            // List each in reverse order (to line up with binary better).
+            if (includesOnUserSwitching()) sb.append("|Switching");
+            if (includesOnUserUnlocked()) sb.append("|Unlocked");
+            if (includesOnUserStarting()) sb.append("|Starting");
+            if (sb.length() > 1) sb.append("|");
+            sb.append("}");
+            return sb.toString();
         }
     }
 
@@ -249,37 +382,20 @@ public abstract class SystemService {
     protected void dumpSupportedUsers(@NonNull PrintWriter pw, @NonNull String prefix) {
         final List<UserInfo> allUsers = UserManager.get(mContext).getUsers();
         final List<Integer> supportedUsers = new ArrayList<>(allUsers.size());
-        for (UserInfo user : allUsers) {
-            supportedUsers.add(user.id);
+        for (int i = 0; i < allUsers.size(); i++) {
+            final UserInfo user = allUsers.get(i);
+            if (isUserSupported(new TargetUser(user))) {
+                supportedUsers.add(user.id);
+            }
         }
-        if (allUsers.isEmpty()) {
+        if (supportedUsers.isEmpty()) {
             pw.print(prefix); pw.println("No supported users");
-        } else {
-            final int size = supportedUsers.size();
-            pw.print(prefix); pw.print(size); pw.print(" supported user");
-            if (size > 1) pw.print("s");
-            pw.print(": "); pw.println(supportedUsers);
+            return;
         }
-    }
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserStarting(TargetUser)} instead
-     * (which by default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onStartUser(@UserIdInt int userId) {}
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserStarting(TargetUser)} instead
-     * (which by default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onStartUser(@NonNull UserInfo userInfo) {
-        onStartUser(userInfo.id);
+        final int size = supportedUsers.size();
+        pw.print(prefix); pw.print(size); pw.print(" supported user");
+        if (size > 1) pw.print("s");
+        pw.print(": "); pw.println(supportedUsers);
     }
 
     /**
@@ -292,27 +408,6 @@ public abstract class SystemService {
      * @param user target user
      */
     public void onUserStarting(@NonNull TargetUser user) {
-        onStartUser(user.getUserInfo());
-    }
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserUnlocking(TargetUser)} instead (which by
-     * default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onUnlockUser(@UserIdInt int userId) {}
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserUnlocking(TargetUser)} instead (which by
-     * default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onUnlockUser(@NonNull UserInfo userInfo) {
-        onUnlockUser(userInfo.id);
     }
 
     /**
@@ -333,7 +428,6 @@ public abstract class SystemService {
      * @param user target user
      */
     public void onUserUnlocking(@NonNull TargetUser user) {
-        onUnlockUser(user.getUserInfo());
     }
 
     /**
@@ -345,26 +439,6 @@ public abstract class SystemService {
      * @param user target user
      */
     public void onUserUnlocked(@NonNull TargetUser user) {
-    }
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserSwitching(TargetUser, TargetUser)} instead
-     * (which by default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onSwitchUser(@UserIdInt int toUserId) {}
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserSwitching(TargetUser, TargetUser)} instead
-     * (which by default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onSwitchUser(@Nullable UserInfo from, @NonNull UserInfo to) {
-        onSwitchUser(to.id);
     }
 
     /**
@@ -382,28 +456,6 @@ public abstract class SystemService {
      * @param to the user switching to
      */
     public void onUserSwitching(@Nullable TargetUser from, @NonNull TargetUser to) {
-        onSwitchUser((from == null ? null : from.getUserInfo()), to.getUserInfo());
-    }
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserStopping(TargetUser)} instead
-     * (which by default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onStopUser(@UserIdInt int userId) {}
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserStopping(TargetUser)} instead
-     * (which by default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onStopUser(@NonNull UserInfo user) {
-        onStopUser(user.id);
-
     }
 
     /**
@@ -420,27 +472,6 @@ public abstract class SystemService {
      * @param user target user
      */
     public void onUserStopping(@NonNull TargetUser user) {
-        onStopUser(user.getUserInfo());
-    }
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserStopped(TargetUser)} instead (which by
-     * default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onCleanupUser(@UserIdInt int userId) {}
-
-    /**
-     * @deprecated subclasses should extend {@link #onUserStopped(TargetUser)} instead (which by
-     * default calls this method).
-     *
-     * @hide
-     */
-    @Deprecated
-    public void onCleanupUser(@NonNull UserInfo user) {
-        onCleanupUser(user.id);
     }
 
     /**
@@ -454,7 +485,33 @@ public abstract class SystemService {
      * @param user target user
      */
     public void onUserStopped(@NonNull TargetUser user) {
-        onCleanupUser(user.getUserInfo());
+    }
+
+    /**
+     * Called some time <i>after</i> an onUser... event has completed, for the events delineated in
+     * {@link UserCompletedEventType}. May include more than one event.
+     *
+     * <p>
+     * This can be useful for processing tasks that must run after such an event but are non-urgent.
+     *
+     * There are no strict guarantees about how long after the event this will be called, only that
+     * it will be called if applicable. There is no guarantee about the order in which each service
+     * is informed, and these calls may be made in parallel using a thread pool.
+     *
+     * <p>Note that if the event is no longer applicable (for example, we switched to user 10, but
+     * before this method was called, we switched to user 11), the event will not be included in the
+     * {@code eventType} (i.e. user 10 won't mention the switch - even though it happened, it is no
+     * longer applicable).
+     *
+     * <p>This method is only called when the service {@link #isUserSupported(TargetUser) supports}
+     * this user.
+     *
+     * @param user target user completing the event (e.g. user being switched to)
+     * @param eventType the types of onUser event applicable (e.g. user starting and being unlocked)
+     *
+     * @hide
+     */
+    public void onUserCompletedEvent(@NonNull TargetUser user, UserCompletedEventType eventType) {
     }
 
     /**

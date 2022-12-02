@@ -16,14 +16,23 @@
 
 package com.android.systemui.biometrics;
 
+import static android.app.admin.DevicePolicyResources.Strings.SystemUi.BIOMETRIC_DIALOG_WORK_LOCK_FAILED_ATTEMPTS;
+import static android.app.admin.DevicePolicyResources.Strings.SystemUi.BIOMETRIC_DIALOG_WORK_PASSWORD_LAST_ATTEMPT;
+import static android.app.admin.DevicePolicyResources.Strings.SystemUi.BIOMETRIC_DIALOG_WORK_PATTERN_LAST_ATTEMPT;
+import static android.app.admin.DevicePolicyResources.Strings.SystemUi.BIOMETRIC_DIALOG_WORK_PIN_LAST_ATTEMPT;
+import static android.app.admin.DevicePolicyResources.UNDEFINED;
+
+import android.annotation.IntDef;
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.app.AlertDialog;
 import android.app.admin.DevicePolicyManager;
 import android.content.Context;
 import android.content.pm.UserInfo;
 import android.graphics.drawable.Drawable;
 import android.hardware.biometrics.BiometricPrompt;
+import android.hardware.biometrics.PromptInfo;
 import android.os.AsyncTask;
-import android.os.Bundle;
 import android.os.CountDownTimer;
 import android.os.Handler;
 import android.os.Looper;
@@ -38,14 +47,14 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import androidx.annotation.IntDef;
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 import androidx.annotation.StringRes;
 
 import com.android.internal.widget.LockPatternUtils;
-import com.android.systemui.Interpolators;
+import com.android.internal.widget.VerifyCredentialResponse;
 import com.android.systemui.R;
+import com.android.systemui.animation.Interpolators;
+import com.android.systemui.dagger.qualifiers.Background;
+import com.android.systemui.util.concurrency.DelayableExecutor;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -72,7 +81,7 @@ public abstract class AuthCredentialView extends LinearLayout {
     private final UserManager mUserManager;
     private final DevicePolicyManager mDevicePolicyManager;
 
-    private Bundle mBiometricPromptBundle;
+    private PromptInfo mPromptInfo;
     private AuthPanelController mPanelController;
     private boolean mShouldAnimatePanel;
     private boolean mShouldAnimateContents;
@@ -91,6 +100,8 @@ public abstract class AuthCredentialView extends LinearLayout {
     protected long mOperationId;
     protected int mEffectiveUserId;
     protected ErrorTimer mErrorTimer;
+
+    protected @Background DelayableExecutor mBackgroundExecutor;
 
     interface Callback {
         void onCredentialMatched(byte[] attestation);
@@ -193,8 +204,8 @@ public abstract class AuthCredentialView extends LinearLayout {
         mCallback = callback;
     }
 
-    void setBiometricPromptBundle(Bundle bundle) {
-        mBiometricPromptBundle = bundle;
+    void setPromptInfo(PromptInfo promptInfo) {
+        mPromptInfo = promptInfo;
     }
 
     void setPanelController(AuthPanelController panelController, boolean animatePanel) {
@@ -210,14 +221,18 @@ public abstract class AuthCredentialView extends LinearLayout {
         mContainerView = containerView;
     }
 
+    void setBackgroundExecutor(@Background DelayableExecutor bgExecutor) {
+        mBackgroundExecutor = bgExecutor;
+    }
+
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
 
-        final CharSequence title = getTitle(mBiometricPromptBundle);
+        final CharSequence title = getTitle(mPromptInfo);
         setText(mTitleView, title);
-        setTextOrHide(mSubtitleView, getSubtitle(mBiometricPromptBundle));
-        setTextOrHide(mDescriptionView, getDescription(mBiometricPromptBundle));
+        setTextOrHide(mSubtitleView, getSubtitle(mPromptInfo));
+        setTextOrHide(mDescriptionView, getDescription(mPromptInfo));
         announceForAccessibility(title);
 
         if (mIconView != null) {
@@ -283,14 +298,20 @@ public abstract class AuthCredentialView extends LinearLayout {
 
     protected void onErrorTimeoutFinish() {}
 
-    protected void onCredentialVerified(byte[] attestation, int timeoutMs) {
-
-        final boolean matched = attestation != null;
-
-        if (matched) {
+    protected void onCredentialVerified(@NonNull VerifyCredentialResponse response, int timeoutMs) {
+        if (response.isMatched()) {
             mClearErrorRunnable.run();
             mLockPatternUtils.userPresent(mEffectiveUserId);
-            mCallback.onCredentialMatched(attestation);
+
+            // The response passed into this method contains the Gatekeeper Password. We still
+            // have to request Gatekeeper to create a Hardware Auth Token with the
+            // Gatekeeper Password and Challenge (keystore operationId in this case)
+            final long pwHandle = response.getGatekeeperPasswordHandle();
+            final VerifyCredentialResponse gkResponse = mLockPatternUtils
+                    .verifyGatekeeperPasswordHandle(pwHandle, mOperationId, mEffectiveUserId);
+
+            mCallback.onCredentialMatched(gkResponse.getGatekeeperHAT());
+            mLockPatternUtils.removeGatekeeperPasswordHandle(pwHandle);
         } else {
             if (timeoutMs > 0) {
                 mHandler.removeCallbacks(mClearErrorRunnable);
@@ -364,25 +385,33 @@ public abstract class AuthCredentialView extends LinearLayout {
     }
 
     private void showLastAttemptBeforeWipeDialog() {
-        final AlertDialog alertDialog = new AlertDialog.Builder(mContext)
-                .setTitle(R.string.biometric_dialog_last_attempt_before_wipe_dialog_title)
-                .setMessage(
-                        getLastAttemptBeforeWipeMessageRes(getUserTypeForWipe(), mCredentialType))
-                .setPositiveButton(android.R.string.ok, null)
-                .create();
-        alertDialog.getWindow().setType(WindowManager.LayoutParams.TYPE_STATUS_BAR_SUB_PANEL);
-        alertDialog.show();
+        mBackgroundExecutor.execute(() -> {
+            final AlertDialog alertDialog = new AlertDialog.Builder(mContext)
+                    .setTitle(R.string.biometric_dialog_last_attempt_before_wipe_dialog_title)
+                    .setMessage(
+                            getLastAttemptBeforeWipeMessage(getUserTypeForWipe(), mCredentialType))
+                    .setPositiveButton(android.R.string.ok, null)
+                    .create();
+            alertDialog.getWindow().setType(WindowManager.LayoutParams.TYPE_STATUS_BAR_SUB_PANEL);
+            mHandler.post(alertDialog::show);
+        });
     }
 
     private void showNowWipingDialog() {
-        final AlertDialog alertDialog = new AlertDialog.Builder(mContext)
-                .setMessage(getNowWipingMessageRes(getUserTypeForWipe()))
-                .setPositiveButton(R.string.biometric_dialog_now_wiping_dialog_dismiss, null)
-                .setOnDismissListener(
-                        dialog -> mContainerView.animateAway(AuthDialogCallback.DISMISSED_ERROR))
-                .create();
-        alertDialog.getWindow().setType(WindowManager.LayoutParams.TYPE_STATUS_BAR_SUB_PANEL);
-        alertDialog.show();
+        mBackgroundExecutor.execute(() -> {
+            String nowWipingMessage = getNowWipingMessage(getUserTypeForWipe());
+            final AlertDialog alertDialog = new AlertDialog.Builder(mContext)
+                    .setMessage(nowWipingMessage)
+                    .setPositiveButton(
+                            com.android.settingslib.R.string.failed_attempts_now_wiping_dialog_dismiss,
+                            null /* OnClickListener */)
+                    .setOnDismissListener(
+                            dialog -> mContainerView.animateAway(
+                                    AuthDialogCallback.DISMISSED_ERROR))
+                    .create();
+            alertDialog.getWindow().setType(WindowManager.LayoutParams.TYPE_STATUS_BAR_SUB_PANEL);
+            mHandler.post(alertDialog::show);
+        });
     }
 
     private @UserType int getUserTypeForWipe() {
@@ -397,93 +426,140 @@ public abstract class AuthCredentialView extends LinearLayout {
         }
     }
 
-    private static @StringRes int getLastAttemptBeforeWipeMessageRes(
+    // This should not be called on the main thread to avoid making an IPC.
+    private String getLastAttemptBeforeWipeMessage(
             @UserType int userType, @Utils.CredentialType int credentialType) {
         switch (userType) {
             case USER_TYPE_PRIMARY:
-                return getLastAttemptBeforeWipeDeviceMessageRes(credentialType);
+                return getLastAttemptBeforeWipeDeviceMessage(credentialType);
             case USER_TYPE_MANAGED_PROFILE:
-                return getLastAttemptBeforeWipeProfileMessageRes(credentialType);
+                return getLastAttemptBeforeWipeProfileMessage(credentialType);
             case USER_TYPE_SECONDARY:
-                return getLastAttemptBeforeWipeUserMessageRes(credentialType);
+                return getLastAttemptBeforeWipeUserMessage(credentialType);
             default:
                 throw new IllegalArgumentException("Unrecognized user type:" + userType);
         }
     }
 
-    private static @StringRes int getLastAttemptBeforeWipeDeviceMessageRes(
+    private String getLastAttemptBeforeWipeDeviceMessage(
             @Utils.CredentialType int credentialType) {
         switch (credentialType) {
             case Utils.CREDENTIAL_PIN:
-                return R.string.biometric_dialog_last_pin_attempt_before_wipe_device;
+                return mContext.getString(
+                        R.string.biometric_dialog_last_pin_attempt_before_wipe_device);
             case Utils.CREDENTIAL_PATTERN:
-                return R.string.biometric_dialog_last_pattern_attempt_before_wipe_device;
+                return mContext.getString(
+                        R.string.biometric_dialog_last_pattern_attempt_before_wipe_device);
             case Utils.CREDENTIAL_PASSWORD:
             default:
-                return R.string.biometric_dialog_last_password_attempt_before_wipe_device;
+                return mContext.getString(
+                        R.string.biometric_dialog_last_password_attempt_before_wipe_device);
         }
     }
 
-    private static @StringRes int getLastAttemptBeforeWipeProfileMessageRes(
+    // This should not be called on the main thread to avoid making an IPC.
+    private String getLastAttemptBeforeWipeProfileMessage(
+            @Utils.CredentialType int credentialType) {
+        return mDevicePolicyManager.getResources().getString(
+                getLastAttemptBeforeWipeProfileUpdatableStringId(credentialType),
+                () -> getLastAttemptBeforeWipeProfileDefaultMessage(credentialType));
+    }
+
+    private static String getLastAttemptBeforeWipeProfileUpdatableStringId(
             @Utils.CredentialType int credentialType) {
         switch (credentialType) {
             case Utils.CREDENTIAL_PIN:
-                return R.string.biometric_dialog_last_pin_attempt_before_wipe_profile;
+                return BIOMETRIC_DIALOG_WORK_PIN_LAST_ATTEMPT;
             case Utils.CREDENTIAL_PATTERN:
-                return R.string.biometric_dialog_last_pattern_attempt_before_wipe_profile;
+                return BIOMETRIC_DIALOG_WORK_PATTERN_LAST_ATTEMPT;
             case Utils.CREDENTIAL_PASSWORD:
             default:
-                return R.string.biometric_dialog_last_password_attempt_before_wipe_profile;
+                return BIOMETRIC_DIALOG_WORK_PASSWORD_LAST_ATTEMPT;
         }
     }
 
-    private static @StringRes int getLastAttemptBeforeWipeUserMessageRes(
+    private String getLastAttemptBeforeWipeProfileDefaultMessage(
             @Utils.CredentialType int credentialType) {
+        int resId;
         switch (credentialType) {
             case Utils.CREDENTIAL_PIN:
-                return R.string.biometric_dialog_last_pin_attempt_before_wipe_user;
+                resId = R.string.biometric_dialog_last_pin_attempt_before_wipe_profile;
+                break;
             case Utils.CREDENTIAL_PATTERN:
-                return R.string.biometric_dialog_last_pattern_attempt_before_wipe_user;
+                resId = R.string.biometric_dialog_last_pattern_attempt_before_wipe_profile;
+                break;
             case Utils.CREDENTIAL_PASSWORD:
             default:
-                return R.string.biometric_dialog_last_password_attempt_before_wipe_user;
+                resId = R.string.biometric_dialog_last_password_attempt_before_wipe_profile;
+        }
+        return mContext.getString(resId);
+    }
+
+    private String getLastAttemptBeforeWipeUserMessage(
+            @Utils.CredentialType int credentialType) {
+        int resId;
+        switch (credentialType) {
+            case Utils.CREDENTIAL_PIN:
+                resId = R.string.biometric_dialog_last_pin_attempt_before_wipe_user;
+                break;
+            case Utils.CREDENTIAL_PATTERN:
+                resId = R.string.biometric_dialog_last_pattern_attempt_before_wipe_user;
+                break;
+            case Utils.CREDENTIAL_PASSWORD:
+            default:
+                resId = R.string.biometric_dialog_last_password_attempt_before_wipe_user;
+        }
+        return mContext.getString(resId);
+    }
+
+    private String getNowWipingMessage(@UserType int userType) {
+        return mDevicePolicyManager.getResources().getString(
+                getNowWipingUpdatableStringId(userType),
+                () -> getNowWipingDefaultMessage(userType));
+    }
+
+    private String getNowWipingUpdatableStringId(@UserType int userType) {
+        switch (userType) {
+            case USER_TYPE_MANAGED_PROFILE:
+                return BIOMETRIC_DIALOG_WORK_LOCK_FAILED_ATTEMPTS;
+            default:
+                return UNDEFINED;
         }
     }
 
-    private static @StringRes int getNowWipingMessageRes(@UserType int userType) {
+    private String getNowWipingDefaultMessage(@UserType int userType) {
+        int resId;
         switch (userType) {
             case USER_TYPE_PRIMARY:
-                return R.string.biometric_dialog_failed_attempts_now_wiping_device;
+                resId = com.android.settingslib.R.string.failed_attempts_now_wiping_device;
+                break;
             case USER_TYPE_MANAGED_PROFILE:
-                return R.string.biometric_dialog_failed_attempts_now_wiping_profile;
+                resId = com.android.settingslib.R.string.failed_attempts_now_wiping_profile;
+                break;
             case USER_TYPE_SECONDARY:
-                return R.string.biometric_dialog_failed_attempts_now_wiping_user;
+                resId = com.android.settingslib.R.string.failed_attempts_now_wiping_user;
+                break;
             default:
                 throw new IllegalArgumentException("Unrecognized user type:" + userType);
         }
+        return mContext.getString(resId);
     }
 
     @Nullable
-    private static CharSequence getTitle(@NonNull Bundle bundle) {
-        final CharSequence credentialTitle =
-                bundle.getCharSequence(BiometricPrompt.KEY_DEVICE_CREDENTIAL_TITLE);
-        return credentialTitle != null ? credentialTitle
-                : bundle.getCharSequence(BiometricPrompt.KEY_TITLE);
+    private static CharSequence getTitle(@NonNull PromptInfo promptInfo) {
+        final CharSequence credentialTitle = promptInfo.getDeviceCredentialTitle();
+        return credentialTitle != null ? credentialTitle : promptInfo.getTitle();
     }
 
     @Nullable
-    private static CharSequence getSubtitle(@NonNull Bundle bundle) {
-        final CharSequence credentialSubtitle =
-                bundle.getCharSequence(BiometricPrompt.KEY_DEVICE_CREDENTIAL_SUBTITLE);
-        return credentialSubtitle != null ? credentialSubtitle
-                : bundle.getCharSequence(BiometricPrompt.KEY_SUBTITLE);
+    private static CharSequence getSubtitle(@NonNull PromptInfo promptInfo) {
+        final CharSequence credentialSubtitle = promptInfo.getDeviceCredentialSubtitle();
+        return credentialSubtitle != null ? credentialSubtitle : promptInfo.getSubtitle();
     }
 
     @Nullable
-    private static CharSequence getDescription(@NonNull Bundle bundle) {
-        final CharSequence credentialDescription =
-                bundle.getCharSequence(BiometricPrompt.KEY_DEVICE_CREDENTIAL_DESCRIPTION);
-        return credentialDescription != null ? credentialDescription
-                : bundle.getCharSequence(BiometricPrompt.KEY_DESCRIPTION);
+    private static CharSequence getDescription(@NonNull PromptInfo promptInfo) {
+        final CharSequence credentialDescription = promptInfo.getDeviceCredentialDescription();
+        return credentialDescription != null ? credentialDescription : promptInfo.getDescription();
     }
 }

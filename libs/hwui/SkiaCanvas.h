@@ -23,8 +23,11 @@
 #include "VectorDrawable.h"
 #include "hwui/Canvas.h"
 #include "hwui/Paint.h"
+#include "hwui/BlurDrawLooper.h"
 
 #include <SkCanvas.h>
+#include <SkDeque.h>
+#include "pipeline/skia/AnimatedDrawables.h"
 #include "src/core/SkArenaAlloc.h"
 
 #include <cassert>
@@ -53,13 +56,14 @@ public:
         LOG_ALWAYS_FATAL("SkiaCanvas cannot be reset as a recording canvas");
     }
 
-    virtual uirenderer::DisplayList* finishRecording() override {
+    virtual void finishRecording(uirenderer::RenderNode*) override {
         LOG_ALWAYS_FATAL("SkiaCanvas does not produce a DisplayList");
-        return nullptr;
     }
-    virtual void insertReorderBarrier(bool enableReorder) override {
-        LOG_ALWAYS_FATAL("SkiaCanvas does not support reordering barriers");
+    virtual void enableZ(bool enableZ) override {
+        LOG_ALWAYS_FATAL("SkiaCanvas does not support enableZ");
     }
+
+    virtual void punchHole(const SkRRect& rect) override;
 
     virtual void setBitmap(const SkBitmap& bitmap) override;
 
@@ -71,12 +75,10 @@ public:
     virtual int save(SaveFlags::Flags flags) override;
     virtual void restore() override;
     virtual void restoreToCount(int saveCount) override;
-    virtual void restoreUnclippedLayer(int saveCount, const SkPaint& paint) override;
+    virtual void restoreUnclippedLayer(int saveCount, const Paint& paint) override;
 
-    virtual int saveLayer(float left, float top, float right, float bottom, const SkPaint* paint,
-                          SaveFlags::Flags flags) override;
-    virtual int saveLayerAlpha(float left, float top, float right, float bottom, int alpha,
-                               SaveFlags::Flags flags) override;
+    virtual int saveLayer(float left, float top, float right, float bottom, const SkPaint* paint) override;
+    virtual int saveLayerAlpha(float left, float top, float right, float bottom, int alpha) override;
     virtual int saveUnclippedLayer(int left, int top, int right, int bottom) override;
 
     virtual void getMatrix(SkMatrix* outMatrix) const override;
@@ -92,6 +94,9 @@ public:
     virtual bool quickRejectPath(const SkPath& path) const override;
     virtual bool clipRect(float left, float top, float right, float bottom, SkClipOp op) override;
     virtual bool clipPath(const SkPath* path, SkClipOp op) override;
+    virtual bool replaceClipRect_deprecated(float left, float top, float right,
+                                            float bottom) override;
+    virtual bool replaceClipPath_deprecated(const SkPath* path) override;
 
     virtual PaintFilter* getPaintFilter() override;
     virtual void setPaintFilter(sk_sp<PaintFilter> paintFilter) override;
@@ -99,7 +104,7 @@ public:
     virtual SkCanvasState* captureCanvasState() const override;
 
     virtual void drawColor(int color, SkBlendMode mode) override;
-    virtual void drawPaint(const SkPaint& paint) override;
+    virtual void drawPaint(const Paint& paint) override;
 
     virtual void drawPoint(float x, float y, const Paint& paint) override;
     virtual void drawPoints(const float* points, int count, const Paint& paint) override;
@@ -149,11 +154,10 @@ public:
                             uirenderer::CanvasPropertyPrimitive* y,
                             uirenderer::CanvasPropertyPrimitive* radius,
                             uirenderer::CanvasPropertyPaint* paint) override;
+    virtual void drawRipple(const uirenderer::skiapipeline::RippleDrawableParams& params) override;
 
     virtual void drawLayer(uirenderer::DeferredLayerUpdater* layerHandle) override;
     virtual void drawRenderNode(uirenderer::RenderNode* renderNode) override;
-    virtual void callDrawGLFunction(Functor* functor,
-                                    uirenderer::GlFunctorLifecycleListener* listener) override;
     virtual void drawPicture(const SkPicture& picture) override;
 
 protected:
@@ -163,80 +167,39 @@ protected:
     void drawDrawable(SkDrawable* drawable) { mCanvas->drawDrawable(drawable); }
 
     virtual void drawGlyphs(ReadGlyphFunc glyphFunc, int count, const Paint& paint, float x,
-                            float y, float boundsLeft, float boundsTop, float boundsRight,
-                            float boundsBottom, float totalAdvance) override;
+                            float y, float totalAdvance) override;
     virtual void drawLayoutOnPath(const minikin::Layout& layout, float hOffset, float vOffset,
                                   const Paint& paint, const SkPath& path, size_t start,
                                   size_t end) override;
 
-    /** This class acts as a copy on write SkPaint.
-     *
-     *  Initially this will be the SkPaint passed to the contructor.
-     *  The first time writable() is called this will become a copy of the
-     *  initial SkPaint (or a default SkPaint if nullptr).
-     */
-    struct PaintCoW {
-        PaintCoW(const SkPaint& that) : mPtr(&that) {}
-        PaintCoW(const SkPaint* ptr) : mPtr(ptr) {}
-        PaintCoW(const PaintCoW&) = delete;
-        PaintCoW(PaintCoW&&) = delete;
-        PaintCoW& operator=(const PaintCoW&) = delete;
-        PaintCoW& operator=(PaintCoW&&) = delete;
-        SkPaint& writeable() {
-            if (!mStorage) {
-                if (!mPtr) {
-                    mStorage.emplace();
-                } else {
-                    mStorage.emplace(*mPtr);
-                }
-                mPtr = &*mStorage;
-            }
-            return *mStorage;
-        }
-        operator const SkPaint*() const { return mPtr; }
-        const SkPaint* operator->() const { assert(mPtr); return mPtr; }
-        const SkPaint& operator*() const { assert(mPtr); return *mPtr; }
-        explicit operator bool() { return mPtr != nullptr; }
-    private:
-        const SkPaint* mPtr;
-        std::optional<SkPaint> mStorage;
-    };
+    void onFilterPaint(Paint& paint);
 
-    /** Filters the paint using the current paint filter.
-     *
-     *  @param paint the paint to filter. Will be initialized with the default
-     *      SkPaint before filtering if filtering is required.
-     */
-    PaintCoW&& filterPaint(PaintCoW&& paint) const;
-
-    template <typename Proc> void apply_looper(const Paint* paint, Proc proc) {
-        SkPaint skp;
-        SkDrawLooper* looper = nullptr;
-        if (paint) {
-            skp = *filterPaint(paint);
-            looper = paint->getLooper();
-        }
-        if (looper) {
-            SkSTArenaAlloc<256> alloc;
-            SkDrawLooper::Context* ctx = looper->makeContext(&alloc);
-            if (ctx) {
-                SkDrawLooper::Context::Info info;
-                for (;;) {
-                    SkPaint p = skp;
-                    if (!ctx->next(&info, &p)) {
-                        break;
-                    }
-                    mCanvas->save();
-                    mCanvas->translate(info.fTranslate.fX, info.fTranslate.fY);
-                    proc(p);
-                    mCanvas->restore();
-                }
-            }
-        } else {
-            proc(skp);
-        }
+    Paint filterPaint(const Paint& src) {
+        Paint dst(src);
+        this->onFilterPaint(dst);
+        return dst;
     }
 
+    // proc(const SkPaint& modifiedPaint)
+    template <typename Proc>
+    void applyLooper(const Paint* paint, Proc proc, void (*preFilter)(SkPaint&) = nullptr) {
+        BlurDrawLooper* looper = paint ? paint->getLooper() : nullptr;
+        Paint pnt = paint ? *paint : Paint();
+        if (preFilter) {
+            preFilter(pnt);
+        }
+        this->onFilterPaint(pnt);
+        if (looper) {
+            looper->apply(pnt, [&](SkPoint offset, const Paint& modifiedPaint) {
+                mCanvas->save();
+                mCanvas->translate(offset.fX, offset.fY);
+                proc(modifiedPaint);
+                mCanvas->restore();
+            });
+        } else {
+            proc(pnt);
+        }
+    }
 
 private:
     struct SaveRec {

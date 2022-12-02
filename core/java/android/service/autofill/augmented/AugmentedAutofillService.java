@@ -25,8 +25,9 @@ import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.app.Service;
+import android.app.assist.AssistStructure.ViewNode;
+import android.app.assist.AssistStructure.ViewNodeParcelable;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.graphics.Rect;
@@ -70,7 +71,6 @@ import java.util.List;
  * @hide
  */
 @SystemApi
-@TestApi
 public abstract class AugmentedAutofillService extends Service {
 
     private static final String TAG = AugmentedAutofillService.class.getSimpleName();
@@ -417,6 +417,8 @@ public abstract class AugmentedAutofillService extends Service {
         @GuardedBy("mLock")
         private AutofillValue mFocusedValue;
         @GuardedBy("mLock")
+        private ViewNode mFocusedViewNode;
+        @GuardedBy("mLock")
         private IFillCallback mCallback;
 
         /**
@@ -534,6 +536,7 @@ public abstract class AugmentedAutofillService extends Service {
             synchronized (mLock) {
                 mFocusedId = focusedId;
                 mFocusedValue = focusedValue;
+                mFocusedViewNode = null;
                 if (mCallback != null) {
                     try {
                         if (!mCallback.isCompleted()) {
@@ -572,6 +575,25 @@ public abstract class AugmentedAutofillService extends Service {
             }
         }
 
+        @Nullable
+        public ViewNode getFocusedViewNode() {
+            synchronized (mLock) {
+                if (mFocusedViewNode == null) {
+                    try {
+                        final ViewNodeParcelable viewNodeParcelable = mClient.getViewNodeParcelable(
+                                mFocusedId);
+                        if (viewNodeParcelable != null) {
+                            mFocusedViewNode = viewNodeParcelable.getViewNode();
+                        }
+                    } catch (RemoteException e) {
+                        Log.e(TAG, "Error getting the ViewNode of the focused view: " + e);
+                        return null;
+                    }
+                }
+                return mFocusedViewNode;
+            }
+        }
+
         void logEvent(@ReportEvent int event) {
             if (sVerbose) Log.v(TAG, "returnAndLogResult(): " + event);
             long duration = -1;
@@ -596,7 +618,7 @@ public abstract class AugmentedAutofillService extends Service {
                         mFirstOnSuccessTime = SystemClock.elapsedRealtime();
                         duration = mFirstOnSuccessTime - mFirstRequestTime;
                         if (sDebug) {
-                            Log.d(TAG, "Service responded nothing in " + formatDuration(duration));
+                            Log.d(TAG, "Inline response in " + formatDuration(duration));
                         }
                     }
                 } break;

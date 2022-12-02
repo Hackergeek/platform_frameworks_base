@@ -16,8 +16,13 @@
 
 package com.android.server.am;
 
+import android.annotation.IntDef;
+import android.compat.annotation.ChangeId;
+import android.compat.annotation.EnabledAfter;
+import android.compat.annotation.Overridable;
 import android.content.ContentResolver;
 import android.database.ContentObserver;
+import android.os.Build;
 import android.os.Handler;
 import android.provider.Settings;
 import android.util.KeyValueListParser;
@@ -25,6 +30,8 @@ import android.util.Slog;
 import android.util.TimeUtils;
 
 import java.io.PrintWriter;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 
 /**
  * Tunable parameters for broadcast dispatch policy
@@ -42,12 +49,54 @@ public class BroadcastConstants {
             "bcast_allow_bg_activity_start_timeout";
 
     // All time intervals are in milliseconds
-    private static final long DEFAULT_TIMEOUT = 10_000;
-    private static final long DEFAULT_SLOW_TIME = 5_000;
-    private static final long DEFAULT_DEFERRAL = 5_000;
+    private static final long DEFAULT_TIMEOUT = 10_000 * Build.HW_TIMEOUT_MULTIPLIER;
+    private static final long DEFAULT_SLOW_TIME = 5_000 * Build.HW_TIMEOUT_MULTIPLIER;
+    private static final long DEFAULT_DEFERRAL = 5_000 * Build.HW_TIMEOUT_MULTIPLIER;
     private static final float DEFAULT_DEFERRAL_DECAY_FACTOR = 0.75f;
     private static final long DEFAULT_DEFERRAL_FLOOR = 0;
-    private static final long DEFAULT_ALLOW_BG_ACTIVITY_START_TIMEOUT = 10_000;
+    private static final long DEFAULT_ALLOW_BG_ACTIVITY_START_TIMEOUT =
+            10_000 * Build.HW_TIMEOUT_MULTIPLIER;
+
+    /**
+     * Defer LOCKED_BOOT_COMPLETED and BOOT_COMPLETED broadcasts until the first time any process in
+     * the UID is started.
+     */
+    @ChangeId
+    @EnabledAfter(targetSdkVersion = android.os.Build.VERSION_CODES.S_V2)
+    @Overridable
+    static final long DEFER_BOOT_COMPLETED_BROADCAST_CHANGE_ID = 203704822L;
+
+    /**
+     * Do not defer LOCKED_BOOT_COMPLETED and BOOT_COMPLETED broadcasts.
+     */
+    public static final int DEFER_BOOT_COMPLETED_BROADCAST_NONE = 0;
+    /**
+     * Defer all LOCKED_BOOT_COMPLETED and BOOT_COMPLETED broadcasts.
+     */
+    public static final int DEFER_BOOT_COMPLETED_BROADCAST_ALL = 1 << 0;
+    /**
+     * Defer LOCKED_BOOT_COMPLETED and BOOT_COMPLETED broadcasts if app is background restricted.
+     */
+    public static final int DEFER_BOOT_COMPLETED_BROADCAST_BACKGROUND_RESTRICTED_ONLY = 1 << 1;
+    /**
+     * Defer LOCKED_BOOT_COMPLETED and BOOT_COMPLETED broadcasts if app's targetSdkVersion is T
+     * and above.
+     */
+    public static final int DEFER_BOOT_COMPLETED_BROADCAST_TARGET_T_ONLY = 1 << 2;
+
+    /**
+     * The list of DEFER_BOOT_COMPLETED_BROADCAST types.
+     * If multiple flags are selected, all conditions must be met to defer the broadcast.
+     * @hide
+     */
+    @IntDef(flag = true, prefix = { "DEFER_BOOT_COMPLETED_BROADCAST_" }, value = {
+            DEFER_BOOT_COMPLETED_BROADCAST_NONE,
+            DEFER_BOOT_COMPLETED_BROADCAST_ALL,
+            DEFER_BOOT_COMPLETED_BROADCAST_BACKGROUND_RESTRICTED_ONLY,
+            DEFER_BOOT_COMPLETED_BROADCAST_TARGET_T_ONLY,
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface DeferBootCompletedBroadcastType {}
 
     // All time constants are in milliseconds
 
@@ -62,7 +111,8 @@ public class BroadcastConstants {
     public float DEFERRAL_DECAY_FACTOR = DEFAULT_DEFERRAL_DECAY_FACTOR;
     // Minimum that the deferral time can decay to until the backlog fully clears
     public long DEFERRAL_FLOOR = DEFAULT_DEFERRAL_FLOOR;
-    // For how long after a whitelisted receiver's start its process can start a background activity
+    // For a receiver that has been allowed to start background activities, how long after it
+    // started its process can start a background activity.
     public long ALLOW_BG_ACTIVITY_START_TIMEOUT = DEFAULT_ALLOW_BG_ACTIVITY_START_TIMEOUT;
 
     // Settings override tracking for this instance

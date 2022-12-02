@@ -25,15 +25,24 @@ using namespace android::uirenderer::renderthread;
 namespace android {
 namespace uirenderer {
 
-AutoBackendTextureRelease::AutoBackendTextureRelease(GrContext* context, AHardwareBuffer* buffer) {
+AutoBackendTextureRelease::AutoBackendTextureRelease(GrDirectContext* context,
+                                                     AHardwareBuffer* buffer) {
     AHardwareBuffer_Desc desc;
     AHardwareBuffer_describe(buffer, &desc);
     bool createProtectedImage = 0 != (desc.usage & AHARDWAREBUFFER_USAGE_PROTECTED_CONTENT);
     GrBackendFormat backendFormat =
             GrAHardwareBufferUtils::GetBackendFormat(context, buffer, desc.format, false);
+    LOG_ALWAYS_FATAL_IF(!backendFormat.isValid(),
+                        __FILE__ " Invalid GrBackendFormat. GrBackendApi==%" PRIu32
+                                 ", AHardwareBuffer_Format==%" PRIu32 ".",
+                        static_cast<int>(context->backend()), desc.format);
     mBackendTexture = GrAHardwareBufferUtils::MakeBackendTexture(
             context, buffer, desc.width, desc.height, &mDeleteProc, &mUpdateProc, &mImageCtx,
             createProtectedImage, backendFormat, false);
+    LOG_ALWAYS_FATAL_IF(!mBackendTexture.isValid(),
+                        __FILE__ " Invalid GrBackendTexture. Width==%" PRIu32 ", height==%" PRIu32
+                                 ", protected==%d",
+                        desc.width, desc.height, createProtectedImage);
 }
 
 void AutoBackendTextureRelease::unref(bool releaseImage) {
@@ -67,23 +76,46 @@ static void releaseProc(SkImage::ReleaseContext releaseContext) {
     textureRelease->unref(false);
 }
 
-void AutoBackendTextureRelease::makeImage(AHardwareBuffer* buffer, android_dataspace dataspace,
-                                          GrContext* context) {
+void AutoBackendTextureRelease::makeImage(AHardwareBuffer* buffer,
+                                          android_dataspace dataspace,
+                                          GrDirectContext* context) {
     AHardwareBuffer_Desc desc;
     AHardwareBuffer_describe(buffer, &desc);
     SkColorType colorType = GrAHardwareBufferUtils::GetSkColorTypeFromBufferFormat(desc.format);
+    // The following ref will be counteracted by Skia calling releaseProc, either during
+    // MakeFromTexture if there is a failure, or later when SkImage is discarded. It must
+    // be called before MakeFromTexture, otherwise Skia may remove HWUI's ref on failure.
+    ref();
     mImage = SkImage::MakeFromTexture(
             context, mBackendTexture, kTopLeft_GrSurfaceOrigin, colorType, kPremul_SkAlphaType,
             uirenderer::DataSpaceToColorSpace(dataspace), releaseProc, this);
-    if (mImage.get()) {
-        // The following ref will be counteracted by releaseProc, when SkImage is discarded.
-        ref();
+}
+
+void AutoBackendTextureRelease::newBufferContent(GrDirectContext* context) {
+    if (mBackendTexture.isValid()) {
+        mUpdateProc(mImageCtx, context);
     }
 }
 
-void AutoBackendTextureRelease::newBufferContent(GrContext* context) {
+void AutoBackendTextureRelease::releaseQueueOwnership(GrDirectContext* context) {
+    if (!context) {
+        return;
+    }
+
+    LOG_ALWAYS_FATAL_IF(Properties::getRenderPipelineType() != RenderPipelineType::SkiaVulkan);
     if (mBackendTexture.isValid()) {
-        mUpdateProc(mImageCtx, context);
+        // Passing in VK_IMAGE_LAYOUT_UNDEFINED means we keep the old layout.
+        GrBackendSurfaceMutableState newState(VK_IMAGE_LAYOUT_UNDEFINED,
+                                              VK_QUEUE_FAMILY_FOREIGN_EXT);
+
+        // The unref for this ref happens in the releaseProc passed into setBackendTextureState. The
+        // releaseProc callback will be made when the work to set the new state has finished on the
+        // gpu.
+        ref();
+        // Note that we don't have an explicit call to set the backend texture back onto the
+        // graphics queue when we use the VkImage again. Internally, Skia will notice that the image
+        // is not on the graphics queue and will do the transition automatically.
+        context->setBackendTextureState(mBackendTexture, newState, nullptr, releaseProc, this);
     }
 }
 

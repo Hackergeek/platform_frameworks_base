@@ -25,8 +25,7 @@
     android:focusable="true"
     android:screenReaderFocusable="true"
     android:stateListAnimator="@anim/control_state_list_animator"
-    android:layout_marginLeft="@dimen/control_base_item_margin"
-    android:layout_marginRight="@dimen/control_base_item_margin"
+    android:layout_marginStart="@dimen/control_spacing"
     android:background="@drawable/control_background">
 
     <ImageView
@@ -114,4 +113,16 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintBottom_toBottomOf="parent"/>
 
+    <ImageView
+        android:id="@+id/chevron_icon"
+        android:autoMirrored="true"
+        android:src="@drawable/ic_chevron_icon"
+        android:visibility="invisible"
+        android:layout_width="@dimen/control_chevron_icon_size"
+        android:layout_height="@dimen/control_chevron_icon_size"
+        android:clickable="false"
+        android:focusable="false"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"/>
 </androidx.constraintlayout.widget.ConstraintLayout>

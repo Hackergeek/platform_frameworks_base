@@ -4,8 +4,8 @@
 #include <cutils/compiler.h>
 
 #include "Bitmap.h"
+#include "BRDAllocator.h"
 #include "SkBitmap.h"
-#include "SkBRDAllocator.h"
 #include "SkCodec.h"
 #include "SkPixelRef.h"
 #include "SkMallocPixelRef.h"
@@ -17,10 +17,14 @@
 
 #include "graphics_jni_helpers.h"
 
-class SkBitmapRegionDecoder;
 class SkCanvas;
+struct SkFontMetrics;
 
 namespace android {
+namespace skia {
+    class BitmapRegionDecoder;
+}
+class Canvas;
 class Paint;
 struct Typeface;
 }
@@ -30,16 +34,17 @@ public:
     // This enum must keep these int values, to match the int values
     // in the java Bitmap.Config enum.
     enum LegacyBitmapConfig {
-        kNo_LegacyBitmapConfig          = 0,
-        kA8_LegacyBitmapConfig          = 1,
-        kIndex8_LegacyBitmapConfig      = 2,
-        kRGB_565_LegacyBitmapConfig     = 3,
-        kARGB_4444_LegacyBitmapConfig   = 4,
-        kARGB_8888_LegacyBitmapConfig   = 5,
-        kRGBA_16F_LegacyBitmapConfig    = 6,
-        kHardware_LegacyBitmapConfig    = 7,
+        kNo_LegacyBitmapConfig = 0,
+        kA8_LegacyBitmapConfig = 1,
+        kIndex8_LegacyBitmapConfig = 2,
+        kRGB_565_LegacyBitmapConfig = 3,
+        kARGB_4444_LegacyBitmapConfig = 4,
+        kARGB_8888_LegacyBitmapConfig = 5,
+        kRGBA_16F_LegacyBitmapConfig = 6,
+        kHardware_LegacyBitmapConfig = 7,
+        kRGBA_1010102_LegacyBitmapConfig = 8,
 
-        kLastEnum_LegacyBitmapConfig = kHardware_LegacyBitmapConfig
+        kLastEnum_LegacyBitmapConfig = kRGBA_1010102_LegacyBitmapConfig
     };
 
     static void setJavaVM(JavaVM* javaVM);
@@ -83,6 +88,17 @@ public:
                                      bool* isHardware);
     static SkRegion* getNativeRegion(JNIEnv*, jobject region);
 
+    /**
+     * Set SkFontMetrics to Java Paint.FontMetrics.
+     * Do nothing if metrics is nullptr.
+     */
+    static void set_metrics(JNIEnv*, jobject metrics, const SkFontMetrics& skmetrics);
+    /**
+     * Set SkFontMetrics to Java Paint.FontMetricsInt and return recommended interline space.
+     * Do nothing if metrics is nullptr.
+     */
+    static int set_metrics_int(JNIEnv*, jobject metrics, const SkFontMetrics& skmetrics);
+
     /*
      *  LegacyBitmapConfig is the old enum in Skia that matched the enum int values
      *  in Bitmap.Config. Skia no longer supports this config, but has replaced it
@@ -103,7 +119,8 @@ public:
 
     static jobject createRegion(JNIEnv* env, SkRegion* region);
 
-    static jobject createBitmapRegionDecoder(JNIEnv* env, SkBitmapRegionDecoder* bitmap);
+    static jobject createBitmapRegionDecoder(JNIEnv* env,
+                                             android::skia::BitmapRegionDecoder* bitmap);
 
     /**
      * Given a bitmap we natively allocate a memory block to store the contents
@@ -154,7 +171,7 @@ private:
     static JavaVM* mJavaVM;
 };
 
-class HeapAllocator : public SkBRDAllocator {
+class HeapAllocator : public android::skia::BRDAllocator {
 public:
    HeapAllocator() { };
     ~HeapAllocator() { };
@@ -181,7 +198,7 @@ private:
  *  the decoded output to fit in the recycled bitmap if necessary.
  *  This allocator implements that behavior.
  *
- *  Skia's SkBitmapRegionDecoder expects the memory that
+ *  Skia's BitmapRegionDecoder expects the memory that
  *  is allocated to be large enough to decode the entire region
  *  that is requested.  It will decode directly into the memory
  *  that is provided.
@@ -200,7 +217,7 @@ private:
  *  reuse it again, given that it still may be in use from our
  *  first allocation.
  */
-class RecyclingClippingPixelAllocator : public SkBRDAllocator {
+class RecyclingClippingPixelAllocator : public android::skia::BRDAllocator {
 public:
 
     RecyclingClippingPixelAllocator(android::Bitmap* recycledBitmap,

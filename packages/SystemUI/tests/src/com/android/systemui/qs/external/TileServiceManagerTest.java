@@ -20,13 +20,18 @@ import static junit.framework.Assert.assertFalse;
 import static junit.framework.Assert.assertTrue;
 
 import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.UserHandle;
 import android.test.suitebuilder.annotation.SmallTest;
 
 import androidx.test.runner.AndroidJUnit4;
 
 import com.android.systemui.SysuiTestCase;
+import com.android.systemui.settings.UserTracker;
 
 import org.junit.After;
 import org.junit.Before;
@@ -44,6 +49,8 @@ public class TileServiceManagerTest extends SysuiTestCase {
     private HandlerThread mThread;
     private Handler mHandler;
     private TileServiceManager mTileServiceManager;
+    private UserTracker mUserTracker;
+    private Context mMockContext;
 
     @Before
     public void setUp() throws Exception {
@@ -51,18 +58,43 @@ public class TileServiceManagerTest extends SysuiTestCase {
         mThread.start();
         mHandler = Handler.createAsync(mThread.getLooper());
         mTileServices = Mockito.mock(TileServices.class);
-        Mockito.when(mTileServices.getContext()).thenReturn(mContext);
+        mUserTracker = Mockito.mock(UserTracker.class);
+        Mockito.when(mUserTracker.getUserId()).thenReturn(UserHandle.USER_SYSTEM);
+        Mockito.when(mUserTracker.getUserHandle()).thenReturn(UserHandle.SYSTEM);
+
+        mMockContext = Mockito.mock(Context.class);
+        Mockito.when(mTileServices.getContext()).thenReturn(mMockContext);
         mTileLifecycle = Mockito.mock(TileLifecycleManager.class);
         Mockito.when(mTileLifecycle.isActiveTile()).thenReturn(false);
         ComponentName componentName = new ComponentName(mContext,
                 TileServiceManagerTest.class);
         Mockito.when(mTileLifecycle.getComponent()).thenReturn(componentName);
-        mTileServiceManager = new TileServiceManager(mTileServices, mHandler, mTileLifecycle);
+        mTileServiceManager = new TileServiceManager(mTileServices, mHandler, mUserTracker,
+                mTileLifecycle);
     }
 
     @After
     public void tearDown() throws Exception {
         mThread.quit();
+        mTileServiceManager.handleDestroy();
+    }
+
+    @Test
+    public void testUninstallReceiverExported() {
+        ArgumentCaptor<IntentFilter> intentFilterCaptor =
+                ArgumentCaptor.forClass(IntentFilter.class);
+
+        Mockito.verify(mMockContext).registerReceiverAsUser(
+                Mockito.any(),
+                Mockito.any(),
+                intentFilterCaptor.capture(),
+                Mockito.any(),
+                Mockito.any(),
+                Mockito.eq(Context.RECEIVER_EXPORTED)
+        );
+        IntentFilter filter = intentFilterCaptor.getValue();
+        assertTrue(filter.hasAction(Intent.ACTION_PACKAGE_REMOVED));
+        assertTrue(filter.hasDataScheme("package"));
     }
 
     @Test

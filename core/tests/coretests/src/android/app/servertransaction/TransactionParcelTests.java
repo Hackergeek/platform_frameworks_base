@@ -24,10 +24,13 @@ import static android.app.servertransaction.TestUtils.resultInfoList;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import android.app.ActivityOptions;
+import android.app.ContentProviderHolder;
 import android.app.IApplicationThread;
 import android.app.IInstrumentationWatcher;
 import android.app.IUiAutomationConnection;
 import android.app.ProfilerInfo;
+import android.app.servertransaction.TestUtils.LaunchActivityItemBuilder;
 import android.content.AutofillOptions;
 import android.content.ComponentName;
 import android.content.ContentCaptureOptions;
@@ -51,10 +54,11 @@ import android.os.Parcelable;
 import android.os.PersistableBundle;
 import android.os.RemoteCallback;
 import android.os.RemoteException;
+import android.os.SharedMemory;
 import android.platform.test.annotations.Presubmit;
-import android.view.DisplayAdjustments.FixedRotationAdjustments;
-import android.view.DisplayCutout;
-import android.view.Surface;
+import android.view.autofill.AutofillId;
+import android.view.translation.TranslationSpec;
+import android.view.translation.UiTranslationSpec;
 
 import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
@@ -66,6 +70,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -175,7 +180,7 @@ public class TransactionParcelTests {
         int ident = 57;
         ActivityInfo activityInfo = new ActivityInfo();
         activityInfo.flags = 42;
-        activityInfo.maxAspectRatio = 2.4f;
+        activityInfo.setMaxAspectRatio(2.4f);
         activityInfo.launchToken = "token";
         activityInfo.applicationInfo = new ApplicationInfo();
         activityInfo.packageName = "packageName";
@@ -190,14 +195,17 @@ public class TransactionParcelTests {
         bundle.putParcelable("data", new ParcelableData(1));
         PersistableBundle persistableBundle = new PersistableBundle();
         persistableBundle.putInt("k", 4);
-        FixedRotationAdjustments fixedRotationAdjustments = new FixedRotationAdjustments(
-                Surface.ROTATION_90, DisplayCutout.NO_CUTOUT);
 
-        LaunchActivityItem item = LaunchActivityItem.obtain(intent, ident, activityInfo,
-                config(), overrideConfig, compat, referrer, null /* voiceInteractor */,
-                procState, bundle, persistableBundle, resultInfoList(), referrerIntentList(),
-                true /* isForward */, null /* profilerInfo */, new Binder(),
-                fixedRotationAdjustments);
+        LaunchActivityItem item = new LaunchActivityItemBuilder()
+                .setIntent(intent).setIdent(ident).setInfo(activityInfo).setCurConfig(config())
+                .setOverrideConfig(overrideConfig).setCompatInfo(compat).setReferrer(referrer)
+                .setProcState(procState).setState(bundle).setPersistentState(persistableBundle)
+                .setPendingResults(resultInfoList()).setActivityOptions(ActivityOptions.makeBasic())
+                .setPendingNewIntents(referrerIntentList()).setIsForward(true)
+                .setAssistToken(new Binder()).setShareableActivityToken(new Binder())
+                .setTaskFragmentToken(new Binder())
+                .build();
+
         writeAndPrepareForReading(item);
 
         // Read from parcel and assert
@@ -267,7 +275,7 @@ public class TransactionParcelTests {
     @Test
     public void testStart() {
         // Write to parcel
-        StartActivityItem item = StartActivityItem.obtain();
+        StartActivityItem item = StartActivityItem.obtain(ActivityOptions.makeBasic());
         writeAndPrepareForReading(item);
 
         // Read from parcel and assert
@@ -336,22 +344,6 @@ public class TransactionParcelTests {
 
         ClientTransaction transaction = ClientTransaction.obtain(appThread, activityToken);
         transaction.setLifecycleStateRequest(lifecycleRequest);
-
-        writeAndPrepareForReading(transaction);
-
-        // Read from parcel and assert
-        ClientTransaction result = ClientTransaction.CREATOR.createFromParcel(mParcel);
-
-        assertEquals(transaction.hashCode(), result.hashCode());
-        assertTrue(transaction.equals(result));
-    }
-
-    @Test
-    public void testFixedRotationAdjustments() {
-        ClientTransaction transaction = ClientTransaction.obtain(new StubAppThread(),
-                null /* activityToken */);
-        transaction.addCallback(FixedRotationAdjustmentsItem.obtain(new Binder(),
-                new FixedRotationAdjustments(Surface.ROTATION_270, DisplayCutout.NO_CUTOUT)));
 
         writeAndPrepareForReading(transaction);
 
@@ -433,12 +425,15 @@ public class TransactionParcelTests {
 
         @Override
         public void bindApplication(String s, ApplicationInfo applicationInfo,
+                String sdkSandboxClientAppVolumeUuid, String sdkSandboxClientAppPackage,
                 ProviderInfoList list, ComponentName componentName, ProfilerInfo profilerInfo,
                 Bundle bundle, IInstrumentationWatcher iInstrumentationWatcher,
                 IUiAutomationConnection iUiAutomationConnection, int i, boolean b, boolean b1,
                 boolean b2, boolean b3, Configuration configuration,
                 CompatibilityInfo compatibilityInfo, Map map, Bundle bundle1, String s1,
-                AutofillOptions ao, ContentCaptureOptions co, long[] disableCompatChanges)
+                AutofillOptions ao, ContentCaptureOptions co, long[] disableCompatChanges,
+                SharedMemory serializedSystemFontMap,
+                long startRequestedElapsedTime, long startRequestedUptime)
                 throws RemoteException {
         }
 
@@ -494,7 +489,8 @@ public class TransactionParcelTests {
 
         @Override
         public void scheduleCreateBackupAgent(ApplicationInfo applicationInfo,
-                CompatibilityInfo compatibilityInfo, int i, int userId) throws RemoteException {
+                CompatibilityInfo compatibilityInfo, int i, int userId, int operatioType)
+                throws RemoteException {
         }
 
         @Override
@@ -516,7 +512,7 @@ public class TransactionParcelTests {
         }
 
         @Override
-        public void scheduleCrash(String s) throws RemoteException {
+        public void scheduleCrash(String s, int i, Bundle extras) throws RemoteException {
         }
 
         @Override
@@ -652,6 +648,10 @@ public class TransactionParcelTests {
         }
 
         @Override
+        public void dumpResources(ParcelFileDescriptor fd, RemoteCallback finishCallback) {
+        }
+
+        @Override
         public final void runIsolatedEntryPoint(String entryPoint, String[] entryPointArgs) {
         }
 
@@ -663,6 +663,23 @@ public class TransactionParcelTests {
         @Override
         public void performDirectAction(IBinder activityToken, String actionId, Bundle arguments,
                 RemoteCallback cancellationCallback, RemoteCallback resultCallback) {
+        }
+
+        @Override
+        public void notifyContentProviderPublishStatus(ContentProviderHolder holder, String auth,
+                int userId, boolean published) {
+        }
+
+        @Override
+        public void instrumentWithoutRestart(ComponentName instrumentationName,
+                Bundle instrumentationArgs, IInstrumentationWatcher instrumentationWatcher,
+                IUiAutomationConnection instrumentationUiConnection, ApplicationInfo targetInfo) {
+        }
+
+        @Override
+        public void updateUiTranslationState(IBinder activityToken, int state,
+                TranslationSpec sourceSpec, TranslationSpec targetSpec, List<AutofillId> viewIds,
+                UiTranslationSpec uiTranslationSpec) {
         }
     }
 }

@@ -88,7 +88,6 @@ BinderIncrementalService* BinderIncrementalService::start(JNIEnv* env) {
     }
     sp<ProcessState> ps(ProcessState::self());
     ps->startThreadPool();
-    ps->giveThreadPoolName();
     // sm->addService increments the reference count, and now we're OK with returning the pointer.
     return self.get();
 }
@@ -118,17 +117,11 @@ binder::Status BinderIncrementalService::openStorage(const std::string& path,
 
 binder::Status BinderIncrementalService::createStorage(
         const ::std::string& path, const ::android::content::pm::DataLoaderParamsParcel& params,
-        int32_t createMode,
-        const ::android::sp<::android::content::pm::IDataLoaderStatusListener>& statusListener,
-        const ::android::os::incremental::StorageHealthCheckParams& healthCheckParams,
-        const ::android::sp<::android::os::incremental::IStorageHealthListener>& healthListener,
-        int32_t* _aidl_return) {
+        int32_t createMode, int32_t* _aidl_return) {
     *_aidl_return =
             mImpl.createStorage(path, const_cast<content::pm::DataLoaderParamsParcel&&>(params),
-                                android::incremental::IncrementalService::CreateOptions(createMode),
-                                statusListener,
-                                const_cast<StorageHealthCheckParams&&>(healthCheckParams),
-                                healthListener);
+                                android::incremental::IncrementalService::CreateOptions(
+                                        createMode));
     return ok();
 }
 
@@ -140,6 +133,25 @@ binder::Status BinderIncrementalService::createLinkedStorage(const std::string& 
             mImpl.createLinkedStorage(path, otherStorageId,
                                       android::incremental::IncrementalService::CreateOptions(
                                               createMode));
+    return ok();
+}
+
+binder::Status BinderIncrementalService::startLoading(
+        int32_t storageId, const ::android::content::pm::DataLoaderParamsParcel& params,
+        const ::android::sp<::android::content::pm::IDataLoaderStatusListener>& statusListener,
+        const ::android::os::incremental::StorageHealthCheckParams& healthCheckParams,
+        const ::android::sp<IStorageHealthListener>& healthListener,
+        const ::std::vector<::android::os::incremental::PerUidReadTimeouts>& perUidReadTimeouts,
+        bool* _aidl_return) {
+    *_aidl_return =
+            mImpl.startLoading(storageId, const_cast<content::pm::DataLoaderParamsParcel&&>(params),
+                               statusListener, healthCheckParams, healthListener,
+                               perUidReadTimeouts);
+    return ok();
+}
+
+binder::Status BinderIncrementalService::onInstallationComplete(int32_t storageId) {
+    mImpl.onInstallationComplete(storageId);
     return ok();
 }
 
@@ -164,8 +176,8 @@ binder::Status BinderIncrementalService::deleteStorage(int32_t storageId) {
     return ok();
 }
 
-binder::Status BinderIncrementalService::disableReadLogs(int32_t storageId) {
-    mImpl.disableReadLogs(storageId);
+binder::Status BinderIncrementalService::disallowReadLogs(int32_t storageId) {
+    mImpl.disallowReadLogs(storageId);
     return ok();
 }
 
@@ -200,16 +212,27 @@ static std::tuple<int, incfs::FileId, incfs::NewFileParams> toMakeFileParams(
     return {0, id, nfp};
 }
 
+static std::span<const uint8_t> toSpan(const ::std::optional<::std::vector<uint8_t>>& content) {
+    if (!content) {
+        return {};
+    }
+    // TODO(b/175635923): Replace with {content->data(), content->size()} after libc++ is upgraded.
+    // The type of the second std::span ctor param changed from ptrdiff_t to size_t between the old
+    // libc++ and the finalized C++20.
+    return std::span<const uint8_t>(content->data(), content->size());
+}
+
 binder::Status BinderIncrementalService::makeFile(
         int32_t storageId, const std::string& path,
-        const ::android::os::incremental::IncrementalNewFileParams& params, int32_t* _aidl_return) {
+        const ::android::os::incremental::IncrementalNewFileParams& params,
+        const ::std::optional<::std::vector<uint8_t>>& content, int32_t* _aidl_return) {
     auto [err, fileId, nfp] = toMakeFileParams(params);
     if (err) {
         *_aidl_return = err;
         return ok();
     }
 
-    *_aidl_return = mImpl.makeFile(storageId, path, 0777, fileId, nfp);
+    *_aidl_return = mImpl.makeFile(storageId, path, 0777, fileId, nfp, toSpan(content));
     return ok();
 }
 binder::Status BinderIncrementalService::makeFileFromRange(int32_t storageId,
@@ -237,11 +260,21 @@ binder::Status BinderIncrementalService::unlink(int32_t storageId, const std::st
     return ok();
 }
 
-binder::Status BinderIncrementalService::isFileRangeLoaded(int32_t storageId,
-                                                           const std::string& path, int64_t start,
-                                                           int64_t end, bool* _aidl_return) {
-    // TODO: implement
-    *_aidl_return = false;
+binder::Status BinderIncrementalService::isFileFullyLoaded(int32_t storageId,
+                                                           const std::string& path,
+                                                           int32_t* _aidl_return) {
+    *_aidl_return = (int)mImpl.isFileFullyLoaded(storageId, path);
+    return ok();
+}
+
+binder::Status BinderIncrementalService::isFullyLoaded(int32_t storageId, int32_t* _aidl_return) {
+    *_aidl_return = (int)mImpl.isMountFullyLoaded(storageId);
+    return ok();
+}
+
+binder::Status BinderIncrementalService::getLoadingProgress(int32_t storageId,
+                                                            float* _aidl_return) {
+    *_aidl_return = mImpl.getLoadingProgress(storageId).getProgress();
     return ok();
 }
 
@@ -254,8 +287,8 @@ binder::Status BinderIncrementalService::getMetadataByPath(int32_t storageId,
 }
 
 static FileId toFileId(const std::vector<uint8_t>& id) {
-    FileId fid;
-    memcpy(&fid, id.data(), id.size());
+    FileId fid = {};
+    memcpy(&fid, id.data(), std::min(sizeof(fid), id.size()));
     return fid;
 }
 
@@ -277,11 +310,6 @@ binder::Status BinderIncrementalService::makeDirectories(int32_t storageId, cons
     return ok();
 }
 
-binder::Status BinderIncrementalService::startLoading(int32_t storageId, bool* _aidl_return) {
-    *_aidl_return = mImpl.startLoading(storageId);
-    return ok();
-}
-
 binder::Status BinderIncrementalService::configureNativeBinaries(
         int32_t storageId, const std::string& apkFullPath, const std::string& libDirRelativePath,
         const std::string& abi, bool extractNativeLibs, bool* _aidl_return) {
@@ -293,6 +321,26 @@ binder::Status BinderIncrementalService::configureNativeBinaries(
 binder::Status BinderIncrementalService::waitForNativeBinariesExtraction(int storageId,
                                                                          bool* _aidl_return) {
     *_aidl_return = mImpl.waitForNativeBinariesExtraction(storageId);
+    return ok();
+}
+
+binder::Status BinderIncrementalService::registerLoadingProgressListener(
+        int32_t storageId,
+        const ::android::sp<::android::os::incremental::IStorageLoadingProgressListener>&
+                progressListener,
+        bool* _aidl_return) {
+    *_aidl_return = mImpl.registerLoadingProgressListener(storageId, progressListener);
+    return ok();
+}
+binder::Status BinderIncrementalService::unregisterLoadingProgressListener(int32_t storageId,
+                                                                           bool* _aidl_return) {
+    *_aidl_return = mImpl.unregisterLoadingProgressListener(storageId);
+    return ok();
+}
+
+binder::Status BinderIncrementalService::getMetrics(int32_t storageId,
+                                                    android::os::PersistableBundle* _aidl_return) {
+    mImpl.getMetrics(storageId, _aidl_return);
     return ok();
 }
 

@@ -16,13 +16,17 @@
 
 package android.view;
 
+import android.annotation.Nullable;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.hardware.input.InputManager;
+import android.os.Build;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.text.method.MetaKeyKeyListener;
 import android.util.AndroidRuntimeException;
 import android.util.SparseIntArray;
+
+import com.android.internal.annotations.VisibleForTesting;
 
 import java.text.Normalizer;
 
@@ -296,6 +300,8 @@ public class KeyCharacterMap implements Parcelable {
     private static native char nativeGetDisplayLabel(long ptr, int keyCode);
     private static native int nativeGetKeyboardType(long ptr);
     private static native KeyEvent[] nativeGetEvents(long ptr, char[] chars);
+    private static native KeyCharacterMap nativeObtainEmptyKeyCharacterMap(int deviceId);
+    private static native boolean nativeEquals(long ptr1, long ptr2);
 
     private KeyCharacterMap(Parcel in) {
         if (in == null) {
@@ -308,7 +314,7 @@ public class KeyCharacterMap implements Parcelable {
     }
 
     // Called from native
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private KeyCharacterMap(long ptr) {
         mPtr = ptr;
     }
@@ -319,6 +325,18 @@ public class KeyCharacterMap implements Parcelable {
             nativeDispose(mPtr);
             mPtr = 0;
         }
+    }
+
+    /**
+     * Obtain empty key character map
+     * @param deviceId The input device ID
+     * @return The KeyCharacterMap object
+     * @hide
+     */
+    @VisibleForTesting
+    @Nullable
+    public static KeyCharacterMap obtainEmptyMap(int deviceId) {
+        return nativeObtainEmptyKeyCharacterMap(deviceId);
     }
 
     /**
@@ -691,8 +709,8 @@ public class KeyCharacterMap implements Parcelable {
     }
 
     /**
-     * Queries the framework about whether any physical keys exist on the
-     * any keyboard attached to the device that are capable of producing the given key code.
+     * Queries the framework about whether any physical keys exist on any currently attached input
+     * devices that are capable of producing the given key code.
      *
      * @param keyCode The key code to query.
      * @return True if at least one attached keyboard supports the specified key code.
@@ -702,9 +720,8 @@ public class KeyCharacterMap implements Parcelable {
     }
 
     /**
-     * Queries the framework about whether any physical keys exist on the
-     * any keyboard attached to the device that are capable of producing the given
-     * array of key codes.
+     * Queries the framework about whether any physical keys exist on any currently attached input
+     * devices that are capable of producing the given array of key codes.
      *
      * @param keyCodes The array of key codes to query.
      * @return A new array of the same size as the key codes array whose elements
@@ -726,6 +743,18 @@ public class KeyCharacterMap implements Parcelable {
     @Override
     public int describeContents() {
         return 0;
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (obj == null || !(obj instanceof KeyCharacterMap)) {
+            return false;
+        }
+        KeyCharacterMap peer = (KeyCharacterMap) obj;
+        if (mPtr == 0 || peer.mPtr == 0) {
+            return mPtr == peer.mPtr;
+        }
+        return nativeEquals(mPtr, peer.mPtr);
     }
 
     /**
@@ -750,9 +779,9 @@ public class KeyCharacterMap implements Parcelable {
 
         private FallbackAction next;
 
-        @UnsupportedAppUsage
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         public int keyCode;
-        @UnsupportedAppUsage
+        @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
         public int metaState;
 
         private FallbackAction() {

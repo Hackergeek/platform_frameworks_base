@@ -24,6 +24,7 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.text.LineBreaker;
+import android.os.Build;
 import android.text.method.TextKeyListener;
 import android.text.style.AlignmentSpan;
 import android.text.style.LeadingMarginSpan;
@@ -81,7 +82,9 @@ public abstract class Layout {
     /** @hide */
     @IntDef(prefix = { "HYPHENATION_FREQUENCY_" }, value = {
             HYPHENATION_FREQUENCY_NORMAL,
+            HYPHENATION_FREQUENCY_NORMAL_FAST,
             HYPHENATION_FREQUENCY_FULL,
+            HYPHENATION_FREQUENCY_FULL_FAST,
             HYPHENATION_FREQUENCY_NONE
     })
     @Retention(RetentionPolicy.SOURCE)
@@ -94,21 +97,40 @@ public abstract class Layout {
      * layout and there is otherwise no valid break. Soft hyphens are ignored and will not be used
      * as suggestions for potential line breaks.
      */
-    public static final int HYPHENATION_FREQUENCY_NONE = LineBreaker.HYPHENATION_FREQUENCY_NONE;
+    public static final int HYPHENATION_FREQUENCY_NONE = 0;
 
     /**
      * Value for hyphenation frequency indicating a light amount of automatic hyphenation, which
      * is a conservative default. Useful for informal cases, such as short sentences or chat
      * messages.
      */
-    public static final int HYPHENATION_FREQUENCY_NORMAL = LineBreaker.HYPHENATION_FREQUENCY_NORMAL;
+    public static final int HYPHENATION_FREQUENCY_NORMAL = 1;
 
     /**
      * Value for hyphenation frequency indicating the full amount of automatic hyphenation, typical
      * in typography. Useful for running text and where it's important to put the maximum amount of
      * text in a screen with limited space.
      */
-    public static final int HYPHENATION_FREQUENCY_FULL = LineBreaker.HYPHENATION_FREQUENCY_FULL;
+    public static final int HYPHENATION_FREQUENCY_FULL = 2;
+
+    /**
+     * Value for hyphenation frequency indicating a light amount of automatic hyphenation with
+     * using faster algorithm.
+     *
+     * This option is useful for informal cases, such as short sentences or chat messages. To make
+     * text rendering faster with hyphenation, this algorithm ignores some hyphen character related
+     * typographic features, e.g. kerning.
+     */
+    public static final int HYPHENATION_FREQUENCY_NORMAL_FAST = 3;
+    /**
+     * Value for hyphenation frequency indicating the full amount of automatic hyphenation with
+     * using faster algorithm.
+     *
+     * This option is useful for running text and where it's important to put the maximum amount of
+     * text in a screen with limited space. To make text rendering faster with hyphenation, this
+     * algorithm ignores some hyphen character related typographic features, e.g. kerning.
+     */
+    public static final int HYPHENATION_FREQUENCY_FULL_FAST = 4;
 
     private static final ParagraphStyle[] NO_PARA_SPANS =
         ArrayUtils.emptyArray(ParagraphStyle.class);
@@ -414,7 +436,7 @@ public abstract class Layout {
     /**
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void drawText(Canvas canvas, int firstLine, int lastLine) {
         int previousLineBottom = getLineTop(firstLine);
         int previousLineEnd = getLineStart(firstLine);
@@ -569,7 +591,8 @@ public abstract class Layout {
             } else {
                 tl.set(paint, buf, start, end, dir, directions, hasTab, tabStops,
                         getEllipsisStart(lineNum),
-                        getEllipsisStart(lineNum) + getEllipsisCount(lineNum));
+                        getEllipsisStart(lineNum) + getEllipsisCount(lineNum),
+                        isFallbackLineSpacingEnabled());
                 if (justify) {
                     tl.justify(right - left - indentWidth);
                 }
@@ -583,7 +606,7 @@ public abstract class Layout {
     /**
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void drawBackground(Canvas canvas, Path highlight, Paint highlightPaint,
             int cursorOffsetVertical, int firstLine, int lastLine) {
         // First, draw LineBackgroundSpans.
@@ -664,7 +687,7 @@ public abstract class Layout {
      * @return The range of lines that need to be drawn, possibly empty.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public long getLineRangeForDraw(Canvas canvas) {
         int dtop, dbottom;
 
@@ -938,6 +961,15 @@ public abstract class Layout {
     }
 
     /**
+     * Return true if the fallback line space is enabled in this Layout.
+     *
+     * @return true if the fallback line space is enabled. Otherwise returns false.
+     */
+    public boolean isFallbackLineSpacingEnabled() {
+        return false;
+    }
+
+    /**
      * Returns true if the character at offset and the preceding character
      * are at different run levels (and thus there's a split caret).
      * @param offset the offset
@@ -1154,7 +1186,7 @@ public abstract class Layout {
      * optionally clamp it so that it doesn't exceed the width of the layout.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public float getPrimaryHorizontal(int offset, boolean clamped) {
         boolean trailing = primaryIsTrailingPrevious(offset);
         return getHorizontal(offset, trailing, clamped);
@@ -1174,7 +1206,7 @@ public abstract class Layout {
      * optionally clamp it so that it doesn't exceed the width of the layout.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public float getSecondaryHorizontal(int offset, boolean clamped) {
         boolean trailing = primaryIsTrailingPrevious(offset);
         return getHorizontal(offset, !trailing, clamped);
@@ -1209,7 +1241,8 @@ public abstract class Layout {
 
         TextLine tl = TextLine.obtain();
         tl.set(mPaint, mText, start, end, dir, directions, hasTab, tabStops,
-                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line));
+                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line),
+                isFallbackLineSpacingEnabled());
         float wid = tl.measure(offset - start, trailing, null);
         TextLine.recycle(tl);
 
@@ -1249,7 +1282,8 @@ public abstract class Layout {
 
         TextLine tl = TextLine.obtain();
         tl.set(mPaint, mText, start, end, dir, directions, hasTab, tabStops,
-                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line));
+                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line),
+                isFallbackLineSpacingEnabled());
         boolean[] trailings = primaryIsTrailingPreviousAllLineOffsets(line);
         if (!primary) {
             for (int offset = 0; offset < trailings.length; ++offset) {
@@ -1434,7 +1468,8 @@ public abstract class Layout {
         paint.setStartHyphenEdit(getStartHyphenEdit(line));
         paint.setEndHyphenEdit(getEndHyphenEdit(line));
         tl.set(paint, mText, start, end, dir, directions, hasTabs, tabStops,
-                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line));
+                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line),
+                isFallbackLineSpacingEnabled());
         if (isJustificationRequired(line)) {
             tl.justify(getJustifyWidth(line));
         }
@@ -1464,7 +1499,8 @@ public abstract class Layout {
         paint.setStartHyphenEdit(getStartHyphenEdit(line));
         paint.setEndHyphenEdit(getEndHyphenEdit(line));
         tl.set(paint, mText, start, end, dir, directions, hasTabs, tabStops,
-                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line));
+                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line),
+                isFallbackLineSpacingEnabled());
         if (isJustificationRequired(line)) {
             tl.justify(getJustifyWidth(line));
         }
@@ -1550,7 +1586,8 @@ public abstract class Layout {
         // XXX: we don't care about tabs as we just use TextLine#getOffsetToLeftRightOf here.
         tl.set(mPaint, mText, lineStartOffset, lineEndOffset, getParagraphDirection(line), dirs,
                 false, null,
-                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line));
+                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line),
+                isFallbackLineSpacingEnabled());
         final HorizontalMeasurementProvider horizontal =
                 new HorizontalMeasurementProvider(line, primary);
 
@@ -1806,7 +1843,8 @@ public abstract class Layout {
         TextLine tl = TextLine.obtain();
         // XXX: we don't care about tabs
         tl.set(mPaint, mText, lineStart, lineEnd, lineDir, directions, false, null,
-                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line));
+                getEllipsisStart(line), getEllipsisStart(line) + getEllipsisCount(line),
+                isFallbackLineSpacingEnabled());
         caret = lineStart + tl.getOffsetToLeftRightOf(caret - lineStart, toLeft);
         TextLine.recycle(tl);
         return caret;
@@ -1849,7 +1887,7 @@ public abstract class Layout {
      * only robust for left-aligned displays.
      * @hide
      */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public boolean shouldClampCursor(int line) {
         // Only clamp cursor position in left-aligned displays.
         switch (getParagraphAlignment(line)) {
@@ -2180,7 +2218,8 @@ public abstract class Layout {
                 }
             }
             tl.set(paint, text, start, end, dir, directions, hasTabs, tabStops,
-                    0 /* ellipsisStart */, 0 /* ellipsisEnd */);
+                    0 /* ellipsisStart */, 0 /* ellipsisEnd */,
+                    false /* use fallback line spacing. unused */);
             return margin + Math.abs(tl.metrics(null));
         } finally {
             TextLine.recycle(tl);
@@ -2350,7 +2389,10 @@ public abstract class Layout {
         final int ellipsisStringLen = ellipsisString.length();
         // Use the ellipsis string only if there are that at least as many characters to replace.
         final boolean useEllipsisString = ellipsisCount >= ellipsisStringLen;
-        for (int i = 0; i < ellipsisCount; i++) {
+        final int min = Math.max(0, start - ellipsisStart - lineStart);
+        final int max = Math.min(ellipsisCount, end - ellipsisStart - lineStart);
+
+        for (int i = min; i < max; i++) {
             final char c;
             if (useEllipsisString && i < ellipsisStringLen) {
                 c = ellipsisString.charAt(i);
@@ -2359,9 +2401,7 @@ public abstract class Layout {
             }
 
             final int a = i + ellipsisStart + lineStart;
-            if (start <= a && a < end) {
-                dest[destoff + a - start] = c;
-            }
+            dest[destoff + a - start] = c;
         }
     }
 

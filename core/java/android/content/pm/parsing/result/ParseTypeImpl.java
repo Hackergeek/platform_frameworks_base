@@ -21,7 +21,6 @@ import android.annotation.Nullable;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.parsing.ParsingUtils;
 import android.os.ServiceManager;
 import android.util.ArrayMap;
 import android.util.Log;
@@ -33,7 +32,7 @@ import com.android.internal.util.CollectionUtils;
 /** @hide */
 public class ParseTypeImpl implements ParseInput, ParseResult<Object> {
 
-    private static final String TAG = ParsingUtils.TAG;
+    private static final String TAG = "ParseTypeImpl";
 
     public static final boolean DEBUG_FILL_STACK_TRACE = false;
 
@@ -62,7 +61,7 @@ public class ParseTypeImpl implements ParseInput, ParseResult<Object> {
     private ArrayMap<Long, String> mDeferredErrors = null;
 
     private String mPackageName;
-    private Integer mTargetSdkVersion;
+    private int mTargetSdkVersion = -1;
 
     /**
      * Specifically for {@link PackageManager#getPackageArchiveInfo(String, int)} where
@@ -95,7 +94,7 @@ public class ParseTypeImpl implements ParseInput, ParseResult<Object> {
                 return platformCompat.isChangeEnabled(changeId, appInfo);
             } catch (Exception e) {
                 // This shouldn't happen, but assume enforcement if it does
-                Slog.wtf(ParsingUtils.TAG, "IPlatformCompat query failed", e);
+                Slog.wtf(TAG, "IPlatformCompat query failed", e);
                 return true;
             }
         });
@@ -119,13 +118,14 @@ public class ParseTypeImpl implements ParseInput, ParseResult<Object> {
             // how many APKs they're going through.
             mDeferredErrors.erase();
         }
+        mTargetSdkVersion = -1;
         return this;
     }
 
     @Override
     public <ResultType> ParseResult<ResultType> success(ResultType result) {
         if (mErrorCode != PackageManager.INSTALL_SUCCEEDED) {
-            Slog.wtf(ParsingUtils.TAG, "Cannot set to success after set to error, was "
+            Slog.wtf(TAG, "Cannot set to success after set to error, was "
                     + mErrorMessage, mException);
         }
         mResult = result;
@@ -138,7 +138,7 @@ public class ParseTypeImpl implements ParseInput, ParseResult<Object> {
         if (DEBUG_THROW_ALL_ERRORS) {
             return error(parseError);
         }
-        if (mTargetSdkVersion != null) {
+        if (mTargetSdkVersion != -1) {
             if (mDeferredErrors != null && mDeferredErrors.containsKey(deferredError)) {
                 // If the map already contains the key, that means it's already been checked and
                 // found to be disabled. Otherwise it would've failed when mTargetSdkVersion was

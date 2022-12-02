@@ -95,8 +95,8 @@ class Context : public IAaptContext {
   friend class ContextBuilder;
 
   PackageType package_type_ = PackageType::kApp;
-  Maybe<std::string> compilation_package_;
-  Maybe<uint8_t> package_id_;
+  std::optional<std::string> compilation_package_;
+  std::optional<uint8_t> package_id_;
   StdErrDiagnostics diagnostics_;
   NameMangler name_mangler_;
   SymbolTable symbols_;
@@ -200,10 +200,11 @@ class StaticSymbolSourceBuilder {
 
    private:
     std::unique_ptr<SymbolTable::Symbol> CloneSymbol(SymbolTable::Symbol* sym) {
+      CloningValueTransformer cloner(nullptr);
       std::unique_ptr<SymbolTable::Symbol> clone = util::make_unique<SymbolTable::Symbol>();
       clone->id = sym->id;
       if (sym->attribute) {
-        clone->attribute = std::unique_ptr<Attribute>(sym->attribute->Clone(nullptr));
+        clone->attribute = std::unique_ptr<Attribute>(sym->attribute->Transform(cloner));
       }
       clone->is_public = sym->is_public;
       return clone;

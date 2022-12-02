@@ -23,7 +23,6 @@ import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
 import android.os.FileUtils;
-import android.os.SystemClock;
 import android.util.SparseArray;
 
 import androidx.test.InstrumentationRegistry;
@@ -56,7 +55,7 @@ public class KernelCpuUidUserSysTimeReaderTest {
     private KernelCpuUidTimeReader.KernelCpuUidUserSysTimeReader mReader;
     private VerifiableCallback mCallback;
 
-    private Random mRand = new Random(12345);
+    private final Random mRand = new Random(12345);
     private final int[] mUids = {0, 1, 22, 333, 4444, 55555};
     private final long[][] mInitialTimes = new long[][]{
             {15334000, 310964000},
@@ -67,6 +66,8 @@ public class KernelCpuUidUserSysTimeReaderTest {
             {47000, 17000}
     };
 
+    private final MockClock mMockClock = new MockClock();
+
     private Context getContext() {
         return InstrumentationRegistry.getContext();
     }
@@ -76,7 +77,8 @@ public class KernelCpuUidUserSysTimeReaderTest {
         mTestDir = getContext().getDir("test", Context.MODE_PRIVATE);
         mTestFile = new File(mTestDir, "test.file");
         mReader = new KernelCpuUidUserSysTimeReader(
-                new KernelCpuProcStringReader(mTestFile.getAbsolutePath()), false);
+                new KernelCpuProcStringReader(mTestFile.getAbsolutePath(), mMockClock),
+                false, mMockClock);
         mCallback = new VerifiableCallback();
     }
 
@@ -88,40 +90,70 @@ public class KernelCpuUidUserSysTimeReaderTest {
 
     @Test
     public void testThrottler() throws Exception {
+        mMockClock.realtime = 1000;
+
         mReader = new KernelCpuUidUserSysTimeReader(
-                new KernelCpuProcStringReader(mTestFile.getAbsolutePath()), true);
+                new KernelCpuProcStringReader(mTestFile.getAbsolutePath(), mMockClock),
+                true, mMockClock);
+
         mReader.setThrottle(500);
 
         writeToFile(uidLines(mUids, mInitialTimes));
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         assertEquals(6, mCallback.mData.size());
 
         long[][] times1 = increaseTime(mInitialTimes);
         writeToFile(uidLines(mUids, times1));
         mCallback.clear();
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         assertEquals(0, mCallback.mData.size());
 
-        SystemClock.sleep(600);
+        mMockClock.realtime += 600;
 
         long[][] times2 = increaseTime(times1);
         writeToFile(uidLines(mUids, times2));
         mCallback.clear();
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         assertEquals(6, mCallback.mData.size());
 
         long[][] times3 = increaseTime(times2);
         writeToFile(uidLines(mUids, times3));
         mCallback.clear();
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         assertEquals(0, mCallback.mData.size());
+
+        // Force the delta read, previously skipped increments should now be read
+        mCallback.clear();
+        mReader.readDelta(true, mCallback);
+        assertEquals(6, mCallback.mData.size());
+
+        mMockClock.realtime += 600;
+
+        long[][] times4 = increaseTime(times3);
+        writeToFile(uidLines(mUids, times4));
+        mCallback.clear();
+        mReader.readDelta(true, mCallback);
+        assertEquals(6, mCallback.mData.size());
+
+        // Don't force the delta read, throttle should be set from last read.
+        long[][] times5 = increaseTime(times4);
+        writeToFile(uidLines(mUids, times5));
+        mCallback.clear();
+        mReader.readDelta(false, mCallback);
+        assertEquals(0, mCallback.mData.size());
+
+        mMockClock.realtime += 600;
+
+        mCallback.clear();
+        mReader.readDelta(false, mCallback);
+        assertEquals(6, mCallback.mData.size());
     }
 
     @Test
     public void testReadDelta() throws Exception {
         final long[][] times1 = mInitialTimes;
         writeToFile(uidLines(mUids, times1));
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         for (int i = 0; i < mUids.length; i++) {
             mCallback.verify(mUids[i], times1[i]);
         }
@@ -131,7 +163,7 @@ public class KernelCpuUidUserSysTimeReaderTest {
         // Verify that a second call will only return deltas.
         final long[][] times2 = increaseTime(times1);
         writeToFile(uidLines(mUids, times2));
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         for (int i = 0; i < mUids.length; i++) {
             mCallback.verify(mUids[i], subtract(times2[i], times1[i]));
         }
@@ -139,20 +171,20 @@ public class KernelCpuUidUserSysTimeReaderTest {
         mCallback.clear();
 
         // Verify that there won't be a callback if the proc file values didn't change.
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         mCallback.verifyNoMoreInteractions();
         mCallback.clear();
 
         // Verify that calling with a null callback doesn't result in any crashes
         final long[][] times3 = increaseTime(times2);
         writeToFile(uidLines(mUids, times3));
-        mReader.readDelta(null);
+        mReader.readDelta(false, null);
 
         // Verify that the readDelta call will only return deltas when
         // the previous call had null callback.
         final long[][] times4 = increaseTime(times3);
         writeToFile(uidLines(mUids, times4));
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         for (int i = 0; i < mUids.length; i++) {
             mCallback.verify(mUids[i], subtract(times4[i], times3[i]));
         }
@@ -165,7 +197,7 @@ public class KernelCpuUidUserSysTimeReaderTest {
     public void testReadDeltaWrongData() throws Exception {
         final long[][] times1 = mInitialTimes;
         writeToFile(uidLines(mUids, times1));
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         for (int i = 0; i < mUids.length; i++) {
             mCallback.verify(mUids[i], times1[i]);
         }
@@ -176,7 +208,7 @@ public class KernelCpuUidUserSysTimeReaderTest {
         final long[][] times2 = increaseTime(times1);
         times2[0][0] = 1000;
         writeToFile(uidLines(mUids, times2));
-        mReader.readDelta(mCallback);
+        mReader.readDelta(false, mCallback);
         for (int i = 1; i < mUids.length; i++) {
             mCallback.verify(mUids[i], subtract(times2[i], times1[i]));
         }

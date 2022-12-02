@@ -22,20 +22,23 @@ import android.content.res.Configuration;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.util.AttributeSet;
+import android.util.IndentingPrintWriter;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.widget.FrameLayout;
 
 import androidx.annotation.Nullable;
 
 import com.android.systemui.Dumpable;
-import com.android.systemui.Interpolators;
 import com.android.systemui.R;
+import com.android.systemui.animation.Interpolators;
 import com.android.systemui.statusbar.StatusBarIconView;
 import com.android.systemui.statusbar.notification.stack.ExpandableViewState;
 import com.android.systemui.statusbar.notification.stack.NotificationStackScrollLayout;
+import com.android.systemui.util.DumpUtilsKt;
 
-import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,7 +49,6 @@ import java.util.List;
 public abstract class ExpandableView extends FrameLayout implements Dumpable {
     private static final String TAG = "ExpandableView";
 
-    public static final float NO_ROUNDNESS = -1;
     protected OnHeightChangedListener mOnHeightChangedListener;
     private int mActualHeight;
     protected int mClipTopAmount;
@@ -155,7 +157,7 @@ public abstract class ExpandableView extends FrameLayout implements Dumpable {
 
     @Override
     public boolean pointInView(float localX, float localY, float slop) {
-        float top = mClipTopAmount;
+        float top = Math.max(0, mClipTopAmount);
         float bottom = mActualHeight;
         return localX >= -slop && localY >= top - slop && localX < ((mRight - mLeft) + slop) &&
                 localY < (bottom + slop);
@@ -190,14 +192,6 @@ public abstract class ExpandableView extends FrameLayout implements Dumpable {
         if (notifyListeners) {
             notifyHeightChanged(false  /* needsAnimation */);
         }
-    }
-
-    /**
-     * Set the distance to the top roundness, from where we should start clipping a value above
-     * or equal to 0 is the effective distance, and if a value below 0 is received, there should
-     * be no clipping.
-     */
-    public void setDistanceToTopRoundness(float distanceToTopRoundness) {
     }
 
     public void setActualHeight(int actualHeight) {
@@ -363,7 +357,12 @@ public abstract class ExpandableView extends FrameLayout implements Dumpable {
             Runnable onFinishedRunnable,
             AnimatorListenerAdapter animationListener);
 
-    public abstract void performAddAnimation(long delay, long duration, boolean isHeadsUpAppear);
+    public void performAddAnimation(long delay, long duration, boolean isHeadsUpAppear) {
+        performAddAnimation(delay, duration, isHeadsUpAppear, null);
+    }
+
+    public abstract void performAddAnimation(long delay, long duration, boolean isHeadsUpAppear,
+            Runnable onEndRunnable);
 
     /**
      * Set the notification appearance to be below the speed bump.
@@ -423,7 +422,7 @@ public abstract class ExpandableView extends FrameLayout implements Dumpable {
             outRect.top += getTop() + getTranslationY();
         }
         outRect.bottom = outRect.top + getActualHeight();
-        outRect.top += getClipTopAmount();
+        outRect.top += Math.max(0, getClipTopAmount());
     }
 
     public boolean isSummaryWithChildren() {
@@ -488,7 +487,8 @@ public abstract class ExpandableView extends FrameLayout implements Dumpable {
 
     @Override
     public void setLayerType(int layerType, Paint paint) {
-        if (hasOverlappingRendering()) {
+        // Allow resetting the layerType to NONE regardless of overlappingRendering
+        if (layerType == LAYER_TYPE_NONE || hasOverlappingRendering()) {
             super.setLayerType(layerType, paint);
         }
     }
@@ -497,15 +497,6 @@ public abstract class ExpandableView extends FrameLayout implements Dumpable {
     public boolean hasOverlappingRendering() {
         // Otherwise it will be clipped
         return super.hasOverlappingRendering() && getActualHeight() <= getHeight();
-    }
-
-    /**
-     * @return an amount between -1 and 1 of increased padding that this child needs. 1 means it
-     * needs a full increased padding while -1 means it needs no padding at all. For 0.0f the normal
-     * padding is applied.
-     */
-    public float getIncreasedPaddingAmount() {
-        return 0.0f;
     }
 
     public boolean mustStayOnScreen() {
@@ -530,6 +521,61 @@ public abstract class ExpandableView extends FrameLayout implements Dumpable {
 
     public boolean isChangingPosition() {
         return mChangingPosition;
+    }
+
+    /**
+     * Called when removing a view from its transient container, such as at the end of an animation.
+     * Generally, when operating on ExpandableView instances, this should be used rather than
+     * {@link ExpandableView#removeTransientView(View)} to ensure that the
+     * {@link #getTransientContainer() transient container} is correctly reset.
+     */
+    public void removeFromTransientContainer() {
+        final ViewGroup transientContainer = getTransientContainer();
+        if (transientContainer == null) {
+            return;
+        }
+        final ViewParent parent = getParent();
+        if (parent != transientContainer) {
+            Log.w(TAG, "Expandable view " + this
+                    + " has transient container " + transientContainer
+                    + " but different parent " + parent);
+            setTransientContainer(null);
+            return;
+        }
+        transientContainer.removeTransientView(this);
+        setTransientContainer(null);
+    }
+
+    /**
+     * Called before adding this view to a group, which would always throw an exception if this view
+     * has a different parent, so clean up the transient container and throw an exception if the
+     * parent isn't a transient container.  Provide as much detail as possible in the crash.
+     */
+    public void removeFromTransientContainerForAdditionTo(ViewGroup newParent) {
+        final ViewParent parent = getParent();
+        final ViewGroup transientContainer = getTransientContainer();
+        if (parent == null || parent == newParent) {
+            // If this view's current parent is null or the same as the new parent, the add will
+            // succeed as long as it's a true child, so just make sure the view isn't transient.
+            removeFromTransientContainer();
+            return;
+        }
+        if (transientContainer == null) {
+            throw new IllegalStateException("Can't add view " + this + " to container " + newParent
+                    + "; current parent " + parent + " is not a transient container");
+        }
+        if (transientContainer != parent) {
+            // Crash with details before addView() crashes without any; the view is being added
+            // to a different parent, and the transient container isn't the parent, so we can't
+            // even (safely) clean that up.
+            throw new IllegalStateException("Expandable view " + this
+                    + " has transient container " + transientContainer
+                    + " but different parent " + parent);
+        }
+        Log.w(TAG, "Removing view " + this + " from transient container "
+                + transientContainer + " in preparation for moving to parent " + newParent);
+        transientContainer.removeTransientView(this);
+        setTransientContainer(null);
     }
 
     public void setTransientContainer(ViewGroup transientContainer) {
@@ -759,7 +805,18 @@ public abstract class ExpandableView extends FrameLayout implements Dumpable {
     }
 
     @Override
-    public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+    public void dump(PrintWriter pwOriginal, String[] args) {
+        IndentingPrintWriter pw = DumpUtilsKt.asIndenting(pwOriginal);
+        pw.println(getClass().getSimpleName());
+        DumpUtilsKt.withIncreasedIndent(pw, () -> {
+            ExpandableViewState viewState = getViewState();
+            if (viewState == null) {
+                pw.println("no viewState!!!");
+            } else {
+                viewState.dump(pw, args);
+                pw.println();
+            }
+        });
     }
 
     /**

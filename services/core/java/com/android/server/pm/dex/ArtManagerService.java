@@ -31,13 +31,13 @@ import android.content.pm.dex.ArtManagerInternal;
 import android.content.pm.dex.DexMetadataHelper;
 import android.content.pm.dex.ISnapshotRuntimeProfileCallback;
 import android.content.pm.dex.PackageOptimizationInfo;
-import android.content.pm.parsing.PackageInfoWithoutStateUtils;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
+import android.os.ServiceManager;
 import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.system.Os;
@@ -45,7 +45,6 @@ import android.util.ArrayMap;
 import android.util.Log;
 import android.util.Slog;
 
-import com.android.internal.annotations.GuardedBy;
 import com.android.internal.os.BackgroundThread;
 import com.android.internal.os.RoSystemProperties;
 import com.android.internal.util.ArrayUtils;
@@ -53,8 +52,10 @@ import com.android.internal.util.Preconditions;
 import com.android.server.LocalServices;
 import com.android.server.pm.Installer;
 import com.android.server.pm.Installer.InstallerException;
+import com.android.server.pm.PackageManagerService;
 import com.android.server.pm.PackageManagerServiceCompilerMapping;
 import com.android.server.pm.parsing.pkg.AndroidPackage;
+import com.android.server.pm.pkg.parsing.PackageInfoWithoutStateUtils;
 
 import dalvik.system.DexFile;
 import dalvik.system.VMRuntime;
@@ -92,9 +93,7 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
     private static final String BOOT_IMAGE_PROFILE_NAME = "android.prof";
 
     private final Context mContext;
-    private final IPackageManager mPackageManager;
-    private final Object mInstallLock;
-    @GuardedBy("mInstallLock")
+    private IPackageManager mPackageManager;
     private final Installer mInstaller;
 
     private final Handler mHandler;
@@ -103,15 +102,22 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         verifyTronLoggingConstants();
     }
 
-    public ArtManagerService(Context context, IPackageManager pm, Installer installer,
-            Object installLock) {
+    public ArtManagerService(Context context, Installer installer,
+            Object ignored) {
         mContext = context;
-        mPackageManager = pm;
         mInstaller = installer;
-        mInstallLock = installLock;
         mHandler = new Handler(BackgroundThread.getHandler().getLooper());
 
         LocalServices.addService(ArtManagerInternal.class, new ArtManagerInternalImpl());
+    }
+
+    @NonNull
+    private IPackageManager getPackageManager() {
+        if (mPackageManager == null) {
+            mPackageManager = IPackageManager.Stub.asInterface(
+                    ServiceManager.getService("package"));
+        }
+        return mPackageManager;
     }
 
     private boolean checkAndroidPermissions(int callingUid, String callingPackage) {
@@ -157,7 +163,7 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         }
         PackageInfo info = null;
         try {
-            info = mPackageManager.getPackageInfo(packageName, /*flags*/ 0, /*userId*/ 0);
+            info =  getPackageManager().getPackageInfo(packageName, /*flags*/ 0, /*userId*/ 0);
         } catch (RemoteException ignored) {
             // Should not happen.
         }
@@ -221,7 +227,7 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
 
             // TODO(calin): consider adding an API to PMS which can retrieve the
             // PackageParser.Package.
-            info = mPackageManager.getPackageInfo(packageName, /*flags*/ 0, /*userId*/ 0);
+            info =  getPackageManager().getPackageInfo(packageName, /*flags*/ 0, /*userId*/ 0);
         } catch (RemoteException ignored) {
             // Should not happen.
         }
@@ -264,16 +270,14 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
     private void createProfileSnapshot(String packageName, String profileName, String classpath,
             int appId, ISnapshotRuntimeProfileCallback callback) {
         // Ask the installer to snapshot the profile.
-        synchronized (mInstallLock) {
-            try {
-                if (!mInstaller.createProfileSnapshot(appId, packageName, profileName, classpath)) {
-                    postError(callback, packageName, ArtManager.SNAPSHOT_FAILED_INTERNAL_ERROR);
-                    return;
-                }
-            } catch (InstallerException e) {
+        try {
+            if (!mInstaller.createProfileSnapshot(appId, packageName, profileName, classpath)) {
                 postError(callback, packageName, ArtManager.SNAPSHOT_FAILED_INTERNAL_ERROR);
                 return;
             }
+        } catch (InstallerException e) {
+            postError(callback, packageName, ArtManager.SNAPSHOT_FAILED_INTERNAL_ERROR);
+            return;
         }
 
         // Open the snapshot and invoke the callback.
@@ -299,13 +303,11 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
             Slog.d(TAG, "Destroying profile snapshot for" + packageName + ":" + profileName);
         }
 
-        synchronized (mInstallLock) {
-            try {
-                mInstaller.destroyProfileSnapshot(packageName, profileName);
-            } catch (InstallerException e) {
-                Slog.e(TAG, "Failed to destroy profile snapshot for " +
-                    packageName + ":" + profileName, e);
-            }
+        try {
+            mInstaller.destroyProfileSnapshot(packageName, profileName);
+        } catch (InstallerException e) {
+            Slog.e(TAG, "Failed to destroy profile snapshot for " + packageName + ":" + profileName,
+                    e);
         }
     }
 
@@ -337,6 +339,11 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         // This avoids having yet another type of profiles and simplifies the processing.
         String classpath = String.join(":", Os.getenv("BOOTCLASSPATH"),
                 Os.getenv("SYSTEMSERVERCLASSPATH"));
+
+        final String standaloneSystemServerJars = Os.getenv("STANDALONE_SYSTEMSERVER_JARS");
+        if (standaloneSystemServerJars != null) {
+            classpath = String.join(":", classpath, standaloneSystemServerJars);
+        }
 
         // Create the snapshot.
         createProfileSnapshot(BOOT_IMAGE_ANDROID_PACKAGE, BOOT_IMAGE_PROFILE_NAME, classpath,
@@ -464,16 +471,15 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
     /**
      * Dumps the profiles for the given package.
      */
-    public void dumpProfiles(AndroidPackage pkg) {
+    public void dumpProfiles(AndroidPackage pkg, boolean dumpClassesAndMethods) {
         final int sharedGid = UserHandle.getSharedAppGid(pkg.getUid());
         try {
             ArrayMap<String, String> packageProfileNames = getPackageProfileNames(pkg);
             for (int i = packageProfileNames.size() - 1; i >= 0; i--) {
                 String codePath = packageProfileNames.keyAt(i);
                 String profileName = packageProfileNames.valueAt(i);
-                synchronized (mInstallLock) {
-                    mInstaller.dumpProfiles(sharedGid, pkg.getPackageName(), profileName, codePath);
-                }
+                mInstaller.dumpProfiles(sharedGid, pkg.getPackageName(), profileName, codePath,
+                                        dumpClassesAndMethods);
             }
         } catch (InstallerException e) {
             Slog.w(TAG, "Failed to dump profiles", e);
@@ -486,7 +492,7 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
     public boolean compileLayouts(AndroidPackage pkg) {
         try {
             final String packageName = pkg.getPackageName();
-            final String apkPath = pkg.getBaseCodePath();
+            final String apkPath = pkg.getBaseApkPath();
             // TODO(b/143971007): Use a cross-user directory
             File dataDir = PackageInfoWithoutStateUtils.getDataDir(pkg, UserHandle.myUserId());
             final String outDexFile = dataDir.getAbsolutePath() + "/code_cache/compiled_view.dex";
@@ -501,12 +507,10 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
             }
             Log.i("PackageManager", "Compiling layouts in " + packageName + " (" + apkPath +
                     ") to " + outDexFile);
-            long callingId = Binder.clearCallingIdentity();
+            final long callingId = Binder.clearCallingIdentity();
             try {
-                synchronized (mInstallLock) {
-                    return mInstaller.compileLayouts(apkPath, packageName, outDexFile,
-                            pkg.getUid());
-                }
+                return mInstaller.compileLayouts(apkPath, packageName, outDexFile,
+                        pkg.getUid());
             } finally {
                 Binder.restoreCallingIdentity(callingId);
             }
@@ -524,7 +528,7 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
     private ArrayMap<String, String> getPackageProfileNames(AndroidPackage pkg) {
         ArrayMap<String, String> result = new ArrayMap<>();
         if (pkg.isHasCode()) {
-            result.put(pkg.getBaseCodePath(), ArtManager.getProfileName(null));
+            result.put(pkg.getBaseApkPath(), ArtManager.getProfileName(null));
         }
 
         String[] splitCodePaths = pkg.getSplitCodePaths();
@@ -579,19 +583,37 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
     // Constants used for logging compilation reason to TRON.
     // DO NOT CHANGE existing values.
     //
+    // In the below constants, the abbreviation DM stands for "DEX metadata".
+    //
     // NOTE: '-1' value is reserved for the case where we cannot produce a valid
     // PackageOptimizationInfo because the ArtManagerInternal is not ready to be used by the
     // ActivityMetricsLoggers.
     private static final int TRON_COMPILATION_REASON_ERROR = 0;
     private static final int TRON_COMPILATION_REASON_UNKNOWN = 1;
     private static final int TRON_COMPILATION_REASON_FIRST_BOOT = 2;
-    private static final int TRON_COMPILATION_REASON_BOOT = 3;
+    private static final int TRON_COMPILATION_REASON_BOOT_DEPRECATED_SINCE_S = 3;
     private static final int TRON_COMPILATION_REASON_INSTALL = 4;
     private static final int TRON_COMPILATION_REASON_BG_DEXOPT = 5;
     private static final int TRON_COMPILATION_REASON_AB_OTA = 6;
     private static final int TRON_COMPILATION_REASON_INACTIVE = 7;
     private static final int TRON_COMPILATION_REASON_SHARED = 8;
-    private static final int TRON_COMPILATION_REASON_INSTALL_WITH_DEX_METADATA = 9;
+    private static final int TRON_COMPILATION_REASON_INSTALL_WITH_DM = 9;
+    private static final int TRON_COMPILATION_REASON_INSTALL_FAST = 10;
+    private static final int TRON_COMPILATION_REASON_INSTALL_BULK = 11;
+    private static final int TRON_COMPILATION_REASON_INSTALL_BULK_SECONDARY = 12;
+    private static final int TRON_COMPILATION_REASON_INSTALL_BULK_DOWNGRADED = 13;
+    private static final int TRON_COMPILATION_REASON_INSTALL_BULK_SECONDARY_DOWNGRADED = 14;
+    private static final int TRON_COMPILATION_REASON_INSTALL_FAST_WITH_DM = 15;
+    private static final int TRON_COMPILATION_REASON_INSTALL_BULK_WITH_DM = 16;
+    private static final int TRON_COMPILATION_REASON_INSTALL_BULK_SECONDARY_WITH_DM = 17;
+    private static final int TRON_COMPILATION_REASON_INSTALL_BULK_DOWNGRADED_WITH_DM = 18;
+    private static final int
+            TRON_COMPILATION_REASON_INSTALL_BULK_SECONDARY_DOWNGRADED_WITH_DM = 19;
+    private static final int TRON_COMPILATION_REASON_BOOT_AFTER_OTA = 20;
+    private static final int TRON_COMPILATION_REASON_POST_BOOT = 21;
+    private static final int TRON_COMPILATION_REASON_CMDLINE = 22;
+    private static final int TRON_COMPILATION_REASON_PREBUILT = 23;
+    private static final int TRON_COMPILATION_REASON_VDEX = 24;
 
     // The annotation to add as a suffix to the compilation reason when dexopt was
     // performed with dex metadata.
@@ -602,19 +624,42 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
      */
     private static int getCompilationReasonTronValue(String compilationReason) {
         switch (compilationReason) {
-            case "unknown" : return TRON_COMPILATION_REASON_UNKNOWN;
+            case "cmdline" : return TRON_COMPILATION_REASON_CMDLINE;
             case "error" : return TRON_COMPILATION_REASON_ERROR;
             case "first-boot" : return TRON_COMPILATION_REASON_FIRST_BOOT;
-            case "boot" : return TRON_COMPILATION_REASON_BOOT;
+            case "boot-after-ota": return TRON_COMPILATION_REASON_BOOT_AFTER_OTA;
+            case "post-boot" : return TRON_COMPILATION_REASON_POST_BOOT;
             case "install" : return TRON_COMPILATION_REASON_INSTALL;
             case "bg-dexopt" : return TRON_COMPILATION_REASON_BG_DEXOPT;
             case "ab-ota" : return TRON_COMPILATION_REASON_AB_OTA;
             case "inactive" : return TRON_COMPILATION_REASON_INACTIVE;
             case "shared" : return TRON_COMPILATION_REASON_SHARED;
-            // This is a special marker for dex metadata installation that does not
+            case "prebuilt" : return TRON_COMPILATION_REASON_PREBUILT;
+            case "vdex" : return TRON_COMPILATION_REASON_VDEX;
+            case "install-fast" :
+                return TRON_COMPILATION_REASON_INSTALL_FAST;
+            case "install-bulk" :
+                return TRON_COMPILATION_REASON_INSTALL_BULK;
+            case "install-bulk-secondary" :
+                return TRON_COMPILATION_REASON_INSTALL_BULK_SECONDARY;
+            case "install-bulk-downgraded" :
+                return TRON_COMPILATION_REASON_INSTALL_BULK_DOWNGRADED;
+            case "install-bulk-secondary-downgraded" :
+                return TRON_COMPILATION_REASON_INSTALL_BULK_SECONDARY_DOWNGRADED;
+            // These are special markers for dex metadata installation that do not
             // have an equivalent as a system property.
             case "install" + DEXOPT_REASON_WITH_DEX_METADATA_ANNOTATION :
-                return TRON_COMPILATION_REASON_INSTALL_WITH_DEX_METADATA;
+                return TRON_COMPILATION_REASON_INSTALL_WITH_DM;
+            case "install-fast" + DEXOPT_REASON_WITH_DEX_METADATA_ANNOTATION :
+                return TRON_COMPILATION_REASON_INSTALL_FAST_WITH_DM;
+            case "install-bulk" + DEXOPT_REASON_WITH_DEX_METADATA_ANNOTATION :
+                return TRON_COMPILATION_REASON_INSTALL_BULK_WITH_DM;
+            case "install-bulk-secondary" + DEXOPT_REASON_WITH_DEX_METADATA_ANNOTATION :
+                return TRON_COMPILATION_REASON_INSTALL_BULK_SECONDARY_WITH_DM;
+            case "install-bulk-downgraded" + DEXOPT_REASON_WITH_DEX_METADATA_ANNOTATION :
+                return TRON_COMPILATION_REASON_INSTALL_BULK_DOWNGRADED_WITH_DM;
+            case "install-bulk-secondary-downgraded" + DEXOPT_REASON_WITH_DEX_METADATA_ANNOTATION :
+                return TRON_COMPILATION_REASON_INSTALL_BULK_SECONDARY_DOWNGRADED_WITH_DM;
             default: return TRON_COMPILATION_REASON_UNKNOWN;
         }
     }
@@ -680,6 +725,13 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         @Override
         public PackageOptimizationInfo getPackageOptimizationInfo(
                 ApplicationInfo info, String abi, String activityName) {
+            if (info.packageName.equals(PackageManagerService.PLATFORM_PACKAGE_NAME)) {
+                // PackageManagerService.PLATFORM_PACKAGE_NAME in this context means that the
+                // activity is defined in bootclasspath. Currently, we don't have an API to get the
+                // correct optimization info.
+                return PackageOptimizationInfo.createWithNoInfo();
+            }
+
             String compilationReason;
             String compilationFilter;
             try {
@@ -727,10 +779,14 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
                                        "compiled_trace.pb");
             try {
                 boolean exists =  Files.exists(tracePath);
-                Log.d(TAG, tracePath.toString() + (exists? " exists" : " doesn't exist"));
+                if (DEBUG) {
+                    Log.d(TAG, tracePath.toString() + (exists? " exists" : " doesn't exist"));
+                }
                 if (exists) {
                     long bytes = Files.size(tracePath);
-                    Log.d(TAG, tracePath.toString() + " size is " + Long.toString(bytes));
+                    if (DEBUG) {
+                        Log.d(TAG, tracePath.toString() + " size is " + Long.toString(bytes));
+                    }
                     return bytes > 0L;
                 }
                 return exists;

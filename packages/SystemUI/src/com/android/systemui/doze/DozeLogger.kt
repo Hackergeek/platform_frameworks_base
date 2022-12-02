@@ -16,6 +16,7 @@
 
 package com.android.systemui.doze
 
+import android.view.Display
 import com.android.systemui.doze.DozeLog.Reason
 import com.android.systemui.doze.DozeLog.reasonToString
 import com.android.systemui.log.LogBuffer
@@ -23,6 +24,7 @@ import com.android.systemui.log.LogLevel.DEBUG
 import com.android.systemui.log.LogLevel.ERROR
 import com.android.systemui.log.LogLevel.INFO
 import com.android.systemui.log.dagger.DozeLog
+import com.android.systemui.statusbar.policy.DevicePostureController
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -61,6 +63,32 @@ class DozeLogger @Inject constructor(
             bool1 = isDozing
         }, {
             "Dozing=$bool1"
+        })
+    }
+
+    fun logDozingChanged(isDozing: Boolean) {
+        buffer.log(TAG, INFO, {
+            bool1 = isDozing
+        }, {
+            "Dozing changed dozing=$bool1"
+        })
+    }
+
+    fun logPowerSaveChanged(powerSaveActive: Boolean, nextState: DozeMachine.State) {
+        buffer.log(TAG, INFO, {
+            bool1 = powerSaveActive
+            str1 = nextState.name
+        }, {
+            "Power save active=$bool1 nextState=$str1"
+        })
+    }
+
+    fun logAlwaysOnSuppressedChange(isAodSuppressed: Boolean, nextState: DozeMachine.State) {
+        buffer.log(TAG, INFO, {
+            bool1 = isAodSuppressed
+            str1 = nextState.name
+        }, {
+            "Always on (AOD) suppressed changed, suppressed=$bool1 nextState=$str1"
         })
     }
 
@@ -143,11 +171,36 @@ class DozeLogger @Inject constructor(
         })
     }
 
-    fun logWakeDisplay(isAwake: Boolean) {
+    fun logStateChangedSent(state: DozeMachine.State) {
+        buffer.log(TAG, INFO, {
+            str1 = state.name
+        }, {
+            "Doze state sent to all DozeMachineParts stateSent=$str1"
+        })
+    }
+
+    fun logDisplayStateDelayedByUdfps(delayedDisplayState: Int) {
+        buffer.log(TAG, INFO, {
+            str1 = Display.stateToString(delayedDisplayState)
+        }, {
+            "Delaying display state change to: $str1 due to UDFPS activity"
+        })
+    }
+
+    fun logDisplayStateChanged(displayState: Int) {
+        buffer.log(TAG, INFO, {
+            str1 = Display.stateToString(displayState)
+        }, {
+            "Display state changed to $str1"
+        })
+    }
+
+    fun logWakeDisplay(isAwake: Boolean, @Reason reason: Int) {
         buffer.log(TAG, DEBUG, {
             bool1 = isAwake
+            int1 = reason
         }, {
-            "Display wakefulness changed, isAwake=$bool1"
+            "Display wakefulness changed, isAwake=$bool1, reason=${reasonToString(int1)}"
         })
     }
 
@@ -161,6 +214,16 @@ class DozeLogger @Inject constructor(
         })
     }
 
+    fun logPostureChanged(posture: Int, partUpdated: String) {
+        buffer.log(TAG, INFO, {
+            int1 = posture
+            str1 = partUpdated
+        }, {
+            "Posture changed, posture=${DevicePostureController.devicePostureToString(int1)}" +
+                    " partUpdated=$str1"
+        })
+    }
+
     fun logPulseDropped(pulsePending: Boolean, state: DozeMachine.State, blocked: Boolean) {
         buffer.log(TAG, INFO, {
             bool1 = pulsePending
@@ -168,6 +231,15 @@ class DozeLogger @Inject constructor(
             bool2 = blocked
         }, {
             "Pulse dropped, pulsePending=$bool1 state=$str1 blocked=$bool2"
+        })
+    }
+
+    fun logSensorEventDropped(sensorEvent: Int, reason: String) {
+        buffer.log(TAG, INFO, {
+            int1 = sensorEvent
+            str1 = reason
+        }, {
+            "SensorEvent [$int1] dropped, reason=$str1"
         })
     }
 
@@ -195,11 +267,36 @@ class DozeLogger @Inject constructor(
         })
     }
 
-    fun logDozeSuppressed(state: DozeMachine.State) {
+    fun logAlwaysOnSuppressed(state: DozeMachine.State, reason: String) {
         buffer.log(TAG, INFO, {
             str1 = state.name
+            str2 = reason
         }, {
-            "Doze state suppressed, state=$str1"
+            "Always-on state suppressed, suppressed state=$str1 reason=$str2"
+        })
+    }
+
+    fun logImmediatelyEndDoze(reason: String) {
+        buffer.log(TAG, INFO, {
+            str1 = reason
+        }, {
+            "Doze immediately ended due to $str1"
+        })
+    }
+
+    fun logDozeScreenBrightness(brightness: Int) {
+        buffer.log(TAG, INFO, {
+            int1 = brightness
+        }, {
+            "Doze screen brightness set, brightness=$int1"
+        })
+    }
+
+    fun logSetAodDimmingScrim(scrimOpacity: Long) {
+        buffer.log(TAG, INFO, {
+            long1 = scrimOpacity
+        }, {
+            "Doze aod dimming scrim opacity set, opacity=$long1"
         })
     }
 }

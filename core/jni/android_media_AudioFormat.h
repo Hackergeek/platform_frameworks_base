@@ -39,6 +39,16 @@
 #define ENCODING_E_AC3_JOC      18
 #define ENCODING_DOLBY_MAT      19
 #define ENCODING_OPUS           20
+#define ENCODING_PCM_24BIT_PACKED 21
+#define ENCODING_PCM_32BIT 22
+#define ENCODING_MPEGH_BL_L3 23
+#define ENCODING_MPEGH_BL_L4 24
+#define ENCODING_MPEGH_LC_L3 25
+#define ENCODING_MPEGH_LC_L4 26
+#define ENCODING_DTS_UHD_P1 27
+#define ENCODING_DRA 28
+#define ENCODING_DTS_HD_MA 29
+#define ENCODING_DTS_UHD_P2 30
 
 #define ENCODING_INVALID    0
 #define ENCODING_DEFAULT    1
@@ -92,6 +102,26 @@ static inline audio_format_t audioFormatToNative(int audioFormat)
         return AUDIO_FORMAT_MAT;
     case ENCODING_OPUS:
         return AUDIO_FORMAT_OPUS;
+    case ENCODING_PCM_24BIT_PACKED:
+        return AUDIO_FORMAT_PCM_24_BIT_PACKED;
+    case ENCODING_PCM_32BIT:
+        return AUDIO_FORMAT_PCM_32_BIT;
+    case ENCODING_MPEGH_BL_L3:
+        return AUDIO_FORMAT_MPEGH_BL_L3;
+    case ENCODING_MPEGH_BL_L4:
+        return AUDIO_FORMAT_MPEGH_BL_L4;
+    case ENCODING_MPEGH_LC_L3:
+        return AUDIO_FORMAT_MPEGH_LC_L3;
+    case ENCODING_MPEGH_LC_L4:
+        return AUDIO_FORMAT_MPEGH_LC_L4;
+    case ENCODING_DTS_UHD_P1:
+        return AUDIO_FORMAT_DTS_UHD;
+    case ENCODING_DRA:
+        return AUDIO_FORMAT_DRA;
+    case ENCODING_DTS_HD_MA:
+        return AUDIO_FORMAT_DTS_HD_MA;
+    case ENCODING_DTS_UHD_P2:
+        return AUDIO_FORMAT_DTS_UHD_P2;
     default:
         return AUDIO_FORMAT_INVALID;
     }
@@ -107,10 +137,15 @@ static inline int audioFormatFromNative(audio_format_t nativeFormat)
     case AUDIO_FORMAT_PCM_FLOAT:
         return ENCODING_PCM_FLOAT;
 
-    // map these to ENCODING_PCM_FLOAT
-    case AUDIO_FORMAT_PCM_8_24_BIT:
+    // As of S, these extend integer precision formats now return more specific values
+    // than ENCODING_PCM_FLOAT.
     case AUDIO_FORMAT_PCM_24_BIT_PACKED:
+        return ENCODING_PCM_24BIT_PACKED;
     case AUDIO_FORMAT_PCM_32_BIT:
+        return ENCODING_PCM_32BIT;
+
+    // map this to ENCODING_PCM_FLOAT
+    case AUDIO_FORMAT_PCM_8_24_BIT:
         return ENCODING_PCM_FLOAT;
 
     case AUDIO_FORMAT_AC3:
@@ -148,6 +183,22 @@ static inline int audioFormatFromNative(audio_format_t nativeFormat)
         return ENCODING_DOLBY_MAT;
     case AUDIO_FORMAT_OPUS:
         return ENCODING_OPUS;
+    case AUDIO_FORMAT_MPEGH_BL_L3:
+        return ENCODING_MPEGH_BL_L3;
+    case AUDIO_FORMAT_MPEGH_BL_L4:
+        return ENCODING_MPEGH_BL_L4;
+    case AUDIO_FORMAT_MPEGH_LC_L3:
+        return ENCODING_MPEGH_LC_L3;
+    case AUDIO_FORMAT_MPEGH_LC_L4:
+        return ENCODING_MPEGH_LC_L4;
+    case AUDIO_FORMAT_DTS_UHD:
+        return ENCODING_DTS_UHD_P1;
+    case AUDIO_FORMAT_DRA:
+        return ENCODING_DRA;
+    case AUDIO_FORMAT_DTS_HD_MA:
+        return ENCODING_DTS_HD_MA;
+    case AUDIO_FORMAT_DTS_UHD_P2:
+        return ENCODING_DTS_UHD_P2;
     case AUDIO_FORMAT_DEFAULT:
         return ENCODING_DEFAULT;
     default:

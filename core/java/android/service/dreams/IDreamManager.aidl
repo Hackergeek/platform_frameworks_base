@@ -27,9 +27,9 @@ interface IDreamManager {
     void dream();
     @UnsupportedAppUsage
     void awaken();
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     void setDreamComponents(in ComponentName[] componentNames);
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     ComponentName[] getDreamComponents();
     ComponentName getDefaultDreamComponentForUser(int userId);
     void testDream(int userId, in ComponentName componentName);
@@ -41,4 +41,5 @@ interface IDreamManager {
     void forceAmbientDisplayEnabled(boolean enabled);
     ComponentName[] getDreamComponentsForUser(int userId);
     void setDreamComponentsForUser(int userId, in ComponentName[] componentNames);
+    void registerDreamOverlayService(in ComponentName componentName);
 }

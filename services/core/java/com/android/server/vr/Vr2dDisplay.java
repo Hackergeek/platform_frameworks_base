@@ -177,7 +177,7 @@ class Vr2dDisplay {
                         }
                     }
                 }
-            }, intentFilter);
+            }, intentFilter, Context.RECEIVER_NOT_EXPORTED);
         }
     }
 
@@ -295,13 +295,15 @@ class Vr2dDisplay {
             flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
             flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_DESTROY_CONTENT_ON_REMOVAL;
             flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE;
+            flags |= DisplayManager.VIRTUAL_DISPLAY_FLAG_TRUSTED;
 
             final VirtualDisplayConfig.Builder builder = new VirtualDisplayConfig.Builder(
                     DISPLAY_NAME, mVirtualDisplayWidth, mVirtualDisplayHeight, mVirtualDisplayDpi);
             builder.setUniqueId(UNIQUE_DISPLAY_ID);
             builder.setFlags(flags);
             mVirtualDisplay = mDisplayManager.createVirtualDisplay(null /* projection */,
-                    builder.build(), null /* callback */, null /* handler */);
+                    builder.build(), null /* callback */, null /* handler */,
+                    null /* windowContext */);
 
             if (mVirtualDisplay != null) {
                 updateDisplayId(mVirtualDisplay.getDisplay().getDisplayId());

@@ -16,6 +16,7 @@
 
 package com.android.server;
 
+import android.annotation.Nullable;
 import android.app.ActivityManager;
 import android.app.AppOpsManager;
 import android.content.BroadcastReceiver;
@@ -34,6 +35,7 @@ import android.os.FileUtils;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.ParcelFileDescriptor;
 import android.os.ResultReceiver;
 import android.os.ShellCallback;
 import android.os.ShellCommand;
@@ -42,6 +44,10 @@ import android.os.SystemClock;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.service.dropbox.DropBoxManagerServiceDumpProto;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
+import android.system.StructStat;
 import android.text.TextUtils;
 import android.text.format.TimeMigrationUtils;
 import android.util.ArrayMap;
@@ -54,18 +60,19 @@ import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.os.IDropBoxManagerService;
 import com.android.internal.util.DumpUtils;
+import com.android.internal.util.FrameworkStatsLog;
 import com.android.internal.util.ObjectUtils;
+import com.android.server.DropBoxManagerInternal.EntrySource;
 
 import libcore.io.IoUtils;
 
-import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -82,7 +89,7 @@ public final class DropBoxManagerService extends SystemService {
     private static final int DEFAULT_AGE_SECONDS = 3 * 86400;
     private static final int DEFAULT_MAX_FILES = 1000;
     private static final int DEFAULT_MAX_FILES_LOWRAM = 300;
-    private static final int DEFAULT_QUOTA_KB = 5 * 1024;
+    private static final int DEFAULT_QUOTA_KB = 10 * 1024;
     private static final int DEFAULT_QUOTA_PERCENT = 10;
     private static final int DEFAULT_RESERVE_PERCENT = 10;
     private static final int QUOTA_RESCAN_MILLIS = 5000;
@@ -91,6 +98,9 @@ public final class DropBoxManagerService extends SystemService {
 
     // Max number of bytes of a dropbox entry to write into protobuf.
     private static final int PROTO_MAX_DATA_BYTES = 256 * 1024;
+
+    // Size beyond which to force-compress newly added entries.
+    private static final long COMPRESS_THRESHOLD_BYTES = 16_384;
 
     // TODO: This implementation currently uses one file per entry, which is
     // inefficient for smallish entries -- consider using a single queue file
@@ -148,8 +158,13 @@ public final class DropBoxManagerService extends SystemService {
 
     private final IDropBoxManagerService.Stub mStub = new IDropBoxManagerService.Stub() {
         @Override
-        public void add(DropBoxManager.Entry entry) {
-            DropBoxManagerService.this.add(entry);
+        public void addData(String tag, byte[] data, int flags) {
+            DropBoxManagerService.this.addData(tag, data, flags);
+        }
+
+        @Override
+        public void addFile(String tag, ParcelFileDescriptor fd, int flags) {
+            DropBoxManagerService.this.addFile(tag, fd, flags);
         }
 
         @Override
@@ -159,7 +174,14 @@ public final class DropBoxManagerService extends SystemService {
 
         @Override
         public DropBoxManager.Entry getNextEntry(String tag, long millis, String callingPackage) {
-            return DropBoxManagerService.this.getNextEntry(tag, millis, callingPackage);
+            return getNextEntryWithAttribution(tag, millis, callingPackage, null);
+        }
+
+        @Override
+        public DropBoxManager.Entry getNextEntryWithAttribution(String tag, long millis,
+                String callingPackage, String callingAttributionTag) {
+            return DropBoxManagerService.this.getNextEntry(tag, millis, callingPackage,
+                    callingAttributionTag);
         }
 
         @Override
@@ -260,7 +282,7 @@ public final class DropBoxManagerService extends SystemService {
             if (!DropBoxManagerService.this.mBooted) {
                 intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY);
             }
-            getContext().sendBroadcastAsUser(intent, UserHandle.SYSTEM,
+            getContext().sendBroadcastAsUser(intent, UserHandle.ALL,
                     android.Manifest.permission.READ_LOGS);
         }
 
@@ -325,6 +347,7 @@ public final class DropBoxManagerService extends SystemService {
         mDropBoxDir = path;
         mContentResolver = getContext().getContentResolver();
         mHandler = new DropBoxManagerBroadcastHandler(looper);
+        LocalServices.addService(DropBoxManagerInternal.class, new DropBoxManagerInternalImpl());
     }
 
     @Override
@@ -366,77 +389,104 @@ public final class DropBoxManagerService extends SystemService {
         return mStub;
     }
 
-    public void add(DropBoxManager.Entry entry) {
-        File temp = null;
-        InputStream input = null;
-        OutputStream output = null;
-        final String tag = entry.getTag();
+    public void addData(String tag, byte[] data, int flags) {
+        addEntry(tag, new ByteArrayInputStream(data), data.length, flags);
+    }
+
+    public void addFile(String tag, ParcelFileDescriptor fd, int flags) {
+        final StructStat stat;
         try {
-            int flags = entry.getFlags();
+            stat = Os.fstat(fd.getFileDescriptor());
+
+            // Verify caller isn't playing games with pipes or sockets
+            if (!OsConstants.S_ISREG(stat.st_mode)) {
+                throw new IllegalArgumentException(tag + " entry must be real file");
+            }
+        } catch (ErrnoException e) {
+            throw new IllegalArgumentException(e);
+        }
+
+        addEntry(tag, new ParcelFileDescriptor.AutoCloseInputStream(fd), stat.st_size, flags);
+    }
+
+    public void addEntry(String tag, InputStream in, long length, int flags) {
+        // If entry being added is large, and if it's not already compressed,
+        // then we'll force compress it during write
+        boolean forceCompress = false;
+        if ((flags & DropBoxManager.IS_GZIPPED) == 0
+                && length > COMPRESS_THRESHOLD_BYTES) {
+            forceCompress = true;
+            flags |= DropBoxManager.IS_GZIPPED;
+        }
+
+        addEntry(tag, new SimpleEntrySource(in, length, forceCompress), flags);
+    }
+
+    /**
+     * Simple entry which contains data ready to be written.
+     */
+    public static class SimpleEntrySource implements EntrySource {
+        private final InputStream in;
+        private final long length;
+        private final boolean forceCompress;
+
+        public SimpleEntrySource(InputStream in, long length, boolean forceCompress) {
+            this.in = in;
+            this.length = length;
+            this.forceCompress = forceCompress;
+        }
+
+        public long length() {
+            return length;
+        }
+
+        @Override
+        public void writeTo(FileDescriptor fd) throws IOException {
+            // No need to buffer the output here, since data is either coming
+            // from an in-memory buffer, or another file on disk; if we buffered
+            // we'd lose out on sendfile() optimizations
+            if (forceCompress) {
+                final GZIPOutputStream gzipOutputStream =
+                        new GZIPOutputStream(new FileOutputStream(fd));
+                FileUtils.copy(in, gzipOutputStream);
+                gzipOutputStream.close();
+            } else {
+                FileUtils.copy(in, new FileOutputStream(fd));
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            FileUtils.closeQuietly(in);
+        }
+    }
+
+    public void addEntry(String tag, EntrySource entry, int flags) {
+        File temp = null;
+        try {
             Slog.i(TAG, "add tag=" + tag + " isTagEnabled=" + isTagEnabled(tag)
                     + " flags=0x" + Integer.toHexString(flags));
             if ((flags & DropBoxManager.IS_EMPTY) != 0) throw new IllegalArgumentException();
 
             init();
+
+            // Bail early if we know tag is disabled
             if (!isTagEnabled(tag)) return;
-            long max = trimToFit();
-            long lastTrim = System.currentTimeMillis();
 
-            byte[] buffer = new byte[mBlockSize];
-            input = entry.getInputStream();
-
-            // First, accumulate up to one block worth of data in memory before
-            // deciding whether to compress the data or not.
-
-            int read = 0;
-            while (read < buffer.length) {
-                int n = input.read(buffer, read, buffer.length - read);
-                if (n <= 0) break;
-                read += n;
+            // Drop entries which are too large for our quota
+            final long length = entry.length();
+            final long max = trimToFit();
+            if (length > max) {
+                // Log and fall through to create empty tombstone below
+                Slog.w(TAG, "Dropping: " + tag + " (" + length + " > " + max + " bytes)");
+            } else {
+                temp = new File(mDropBoxDir, "drop" + Thread.currentThread().getId() + ".tmp");
+                try (FileOutputStream out = new FileOutputStream(temp)) {
+                    entry.writeTo(out.getFD());
+                }
             }
 
-            // If we have at least one block, compress it -- otherwise, just write
-            // the data in uncompressed form.
-
-            temp = new File(mDropBoxDir, "drop" + Thread.currentThread().getId() + ".tmp");
-            int bufferSize = mBlockSize;
-            if (bufferSize > 4096) bufferSize = 4096;
-            if (bufferSize < 512) bufferSize = 512;
-            FileOutputStream foutput = new FileOutputStream(temp);
-            output = new BufferedOutputStream(foutput, bufferSize);
-            if (read == buffer.length && ((flags & DropBoxManager.IS_GZIPPED) == 0)) {
-                output = new GZIPOutputStream(output);
-                flags = flags | DropBoxManager.IS_GZIPPED;
-            }
-
-            do {
-                output.write(buffer, 0, read);
-
-                long now = System.currentTimeMillis();
-                if (now - lastTrim > 30 * 1000) {
-                    max = trimToFit();  // In case data dribbles in slowly
-                    lastTrim = now;
-                }
-
-                read = input.read(buffer);
-                if (read <= 0) {
-                    FileUtils.sync(foutput);
-                    output.close();  // Get a final size measurement
-                    output = null;
-                } else {
-                    output.flush();  // So the size measurement is pseudo-reasonable
-                }
-
-                long len = temp.length();
-                if (len > max) {
-                    Slog.w(TAG, "Dropping: " + tag + " (" + temp.length() + " > "
-                            + max + " bytes)");
-                    temp.delete();
-                    temp = null;  // Pass temp = null to createEntry() to leave a tombstone
-                    break;
-                }
-            } while (read > 0);
-
+            // Writing above succeeded, so create the finalized entry
             long time = createEntry(temp, tag, flags);
             temp = null;
 
@@ -452,12 +502,18 @@ public final class DropBoxManagerService extends SystemService {
             }
         } catch (IOException e) {
             Slog.e(TAG, "Can't write: " + tag, e);
+            logDropboxDropped(
+                    FrameworkStatsLog.DROPBOX_ENTRY_DROPPED__DROP_REASON__WRITE_FAILURE,
+                    tag,
+                    0);
         } finally {
-            IoUtils.closeQuietly(output);
-            IoUtils.closeQuietly(input);
-            entry.close();
+            IoUtils.closeQuietly(entry);
             if (temp != null) temp.delete();
         }
+    }
+
+    private void logDropboxDropped(int reason, String tag, long entryAge) {
+        FrameworkStatsLog.write(FrameworkStatsLog.DROPBOX_ENTRY_DROPPED, reason, tag, entryAge);
     }
 
     public boolean isTagEnabled(String tag) {
@@ -470,7 +526,8 @@ public final class DropBoxManagerService extends SystemService {
         }
     }
 
-    private boolean checkPermission(int callingUid, String callingPackage) {
+    private boolean checkPermission(int callingUid, String callingPackage,
+            @Nullable String callingAttributionTag) {
         // If callers have this permission, then we don't need to check
         // USAGE_STATS, because they are part of the system and have agreed to
         // check USAGE_STATS before passing the data along.
@@ -484,8 +541,9 @@ public final class DropBoxManagerService extends SystemService {
                 android.Manifest.permission.READ_LOGS, TAG);
 
         // Callers also need the ability to read usage statistics
-        switch (getContext().getSystemService(AppOpsManager.class)
-                .noteOp(AppOpsManager.OP_GET_USAGE_STATS, callingUid, callingPackage)) {
+        switch (getContext().getSystemService(AppOpsManager.class).noteOp(
+                AppOpsManager.OP_GET_USAGE_STATS, callingUid, callingPackage, callingAttributionTag,
+                null)) {
             case AppOpsManager.MODE_ALLOWED:
                 return true;
             case AppOpsManager.MODE_DEFAULT:
@@ -498,8 +556,8 @@ public final class DropBoxManagerService extends SystemService {
     }
 
     public synchronized DropBoxManager.Entry getNextEntry(String tag, long millis,
-            String callingPackage) {
-        if (!checkPermission(Binder.getCallingUid(), callingPackage)) {
+            String callingPackage, @Nullable String callingAttributionTag) {
+        if (!checkPermission(Binder.getCallingUid(), callingPackage, callingAttributionTag)) {
             return null;
         }
 
@@ -1070,12 +1128,18 @@ public final class DropBoxManagerService extends SystemService {
                 Settings.Global.DROPBOX_MAX_FILES,
                 (ActivityManager.isLowRamDeviceStatic()
                         ?  DEFAULT_MAX_FILES_LOWRAM : DEFAULT_MAX_FILES));
-        long cutoffMillis = System.currentTimeMillis() - ageSeconds * 1000;
+        long curTimeMillis = System.currentTimeMillis();
+        long cutoffMillis = curTimeMillis - ageSeconds * 1000;
         while (!mAllFiles.contents.isEmpty()) {
             EntryFile entry = mAllFiles.contents.first();
             if (entry.timestampMillis > cutoffMillis && mAllFiles.contents.size() < mMaxFiles) {
                 break;
             }
+
+            logDropboxDropped(
+                    FrameworkStatsLog.DROPBOX_ENTRY_DROPPED__DROP_REASON__AGED,
+                    entry.tag,
+                    curTimeMillis - entry.timestampMillis);
 
             FileList tag = mFilesByTag.get(entry.tag);
             if (tag != null && tag.contents.remove(entry)) tag.blocks -= entry.blocks;
@@ -1145,6 +1209,11 @@ public final class DropBoxManagerService extends SystemService {
                 if (mAllFiles.blocks < mCachedQuotaBlocks) break;
                 while (tag.blocks > tagQuota && !tag.contents.isEmpty()) {
                     EntryFile entry = tag.contents.first();
+                    logDropboxDropped(
+                            FrameworkStatsLog.DROPBOX_ENTRY_DROPPED__DROP_REASON__CLEARING_DATA,
+                            entry.tag,
+                            curTimeMillis - entry.timestampMillis);
+
                     if (tag.contents.remove(entry)) tag.blocks -= entry.blocks;
                     if (mAllFiles.contents.remove(entry)) mAllFiles.blocks -= entry.blocks;
 
@@ -1175,6 +1244,13 @@ public final class DropBoxManagerService extends SystemService {
         mLowPriorityTags = new ArraySet(size);
         for (int i = 0; i < size; i++) {
             mLowPriorityTags.add(lowPrioritytags[i]);
+        }
+    }
+
+    private final class DropBoxManagerInternalImpl extends DropBoxManagerInternal {
+        @Override
+        public void addEntry(String tag, EntrySource entry, int flags) {
+            DropBoxManagerService.this.addEntry(tag, entry, flags);
         }
     }
 }

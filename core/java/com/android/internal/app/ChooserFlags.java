@@ -22,17 +22,12 @@ import android.app.prediction.AppPredictionManager;
  * Common flags for {@link ChooserListAdapter} and {@link ChooserActivity}.
  */
 public class ChooserFlags {
-    /**
-     * If set to true, use ShortcutManager to retrieve the matching direct share targets, instead of
-     * binding to every ChooserTargetService implementation.
-     */
-    // TODO(b/121287573): Replace with a system flag (setprop?)
-    public static final boolean USE_SHORTCUT_MANAGER_FOR_DIRECT_TARGETS = true;
 
     /**
-     * If {@link ChooserFlags#USE_SHORTCUT_MANAGER_FOR_DIRECT_TARGETS} and this is set to true,
-     * {@link AppPredictionManager} will be queried for direct share targets.
+     * Whether to use {@link AppPredictionManager} to query for direct share targets (as opposed to
+     * talking directly to {@link android.content.pm.ShortcutManager}.
      */
     // TODO(b/123089490): Replace with system flag
     static final boolean USE_PREDICTION_MANAGER_FOR_DIRECT_TARGETS = true;
 }
+

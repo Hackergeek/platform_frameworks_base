@@ -46,7 +46,7 @@ import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Log;
 
-import com.android.internal.content.PackageHelper;
+import com.android.internal.content.InstallLocationUtils;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.RILConstants;
 import com.android.internal.util.XmlUtils;
@@ -783,7 +783,7 @@ class DatabaseHelper extends SQLiteOpenHelper {
                         + " VALUES(?,?);");
                 loadSetting(stmt, Global.SET_INSTALL_LOCATION, 0);
                 loadSetting(stmt, Global.DEFAULT_INSTALL_LOCATION,
-                        PackageHelper.APP_INSTALL_AUTO);
+                        InstallLocationUtils.APP_INSTALL_AUTO);
                 db.setTransactionSuccessful();
              } finally {
                  db.endTransaction();
@@ -846,8 +846,8 @@ class DatabaseHelper extends SQLiteOpenHelper {
             try {
                 stmt = db.compileStatement("INSERT INTO system(name,value)"
                         + " VALUES(?,?);");
-                loadBooleanSetting(stmt, Settings.System.USER_ROTATION,
-                        R.integer.def_user_rotation); // should be zero degrees
+                loadIntegerSetting(stmt, Settings.System.USER_ROTATION,
+                        R.integer.def_user_rotation);
                 db.setTransactionSuccessful();
             } finally {
                 db.endTransaction();
@@ -1176,8 +1176,6 @@ class DatabaseHelper extends SQLiteOpenHelper {
                         com.android.internal.R.bool.config_dreamsActivatedOnDockByDefault);
                 loadBooleanSetting(stmt, Settings.Secure.SCREENSAVER_ACTIVATE_ON_SLEEP,
                         com.android.internal.R.bool.config_dreamsActivatedOnSleepByDefault);
-                loadStringSetting(stmt, Settings.Secure.SCREENSAVER_COMPONENTS,
-                        com.android.internal.R.string.config_dreamsDefaultComponent);
                 loadStringSetting(stmt, Settings.Secure.SCREENSAVER_DEFAULT_COMPONENT,
                         com.android.internal.R.string.config_dreamsDefaultComponent);
 
@@ -1348,7 +1346,6 @@ class DatabaseHelper extends SQLiteOpenHelper {
                             Settings.Global.CONNECTIVITY_CHANGE_DELAY,
                             Settings.Global.CAPTIVE_PORTAL_DETECTION_ENABLED,
                             Settings.Global.CAPTIVE_PORTAL_SERVER,
-                            Settings.Global.NSD_ON,
                             Settings.Global.SET_INSTALL_LOCATION,
                             Settings.Global.DEFAULT_INSTALL_LOCATION,
                             Settings.Global.INET_CONDITION_DEBOUNCE_UP_DELAY,
@@ -2265,6 +2262,8 @@ class DatabaseHelper extends SQLiteOpenHelper {
             loadBooleanSetting(stmt, Settings.System.ACCELEROMETER_ROTATION,
                     R.bool.def_accelerometer_rotation);
 
+            loadIntegerSetting(stmt, Settings.System.USER_ROTATION, R.integer.def_user_rotation);
+
             loadDefaultHapticSettings(stmt);
 
             loadBooleanSetting(stmt, Settings.System.NOTIFICATION_LIGHT_PULSE,
@@ -2361,8 +2360,6 @@ class DatabaseHelper extends SQLiteOpenHelper {
                     com.android.internal.R.bool.config_dreamsActivatedOnDockByDefault);
             loadBooleanSetting(stmt, Settings.Secure.SCREENSAVER_ACTIVATE_ON_SLEEP,
                     com.android.internal.R.bool.config_dreamsActivatedOnSleepByDefault);
-            loadStringSetting(stmt, Settings.Secure.SCREENSAVER_COMPONENTS,
-                    com.android.internal.R.string.config_dreamsDefaultComponent);
             loadStringSetting(stmt, Settings.Secure.SCREENSAVER_DEFAULT_COMPONENT,
                     com.android.internal.R.string.config_dreamsDefaultComponent);
 
@@ -2443,8 +2440,8 @@ class DatabaseHelper extends SQLiteOpenHelper {
                     R.bool.def_auto_time_zone); // Sync timezone to NITZ
 
             loadSetting(stmt, Settings.Global.STAY_ON_WHILE_PLUGGED_IN,
-                    ("1".equals(SystemProperties.get("ro.kernel.qemu")) ||
-                        res.getBoolean(R.bool.def_stay_on_while_plugged_in))
+                    ("1".equals(SystemProperties.get("ro.boot.qemu"))
+                        || res.getBoolean(R.bool.def_stay_on_while_plugged_in))
                      ? 1 : 0);
 
             loadIntegerSetting(stmt, Settings.Global.WIFI_SLEEP_POLICY,
@@ -2464,6 +2461,9 @@ class DatabaseHelper extends SQLiteOpenHelper {
 
             loadBooleanSetting(stmt, Settings.Global.BLUETOOTH_ON,
                     R.bool.def_bluetooth_on);
+
+            loadIntegerSetting(stmt, Settings.Global.CELL_ON,
+                    R.integer.def_cell_on);
 
             // Enable or disable Cell Broadcast SMS
             loadSetting(stmt, Settings.Global.CDMA_CELL_BROADCAST_SMS,
@@ -2534,7 +2534,7 @@ class DatabaseHelper extends SQLiteOpenHelper {
 
             loadSetting(stmt, Settings.Global.SET_INSTALL_LOCATION, 0);
             loadSetting(stmt, Settings.Global.DEFAULT_INSTALL_LOCATION,
-                    PackageHelper.APP_INSTALL_AUTO);
+                    InstallLocationUtils.APP_INSTALL_AUTO);
 
             // Set default cdma emergency tone
             loadSetting(stmt, Settings.Global.EMERGENCY_TONE, 0);

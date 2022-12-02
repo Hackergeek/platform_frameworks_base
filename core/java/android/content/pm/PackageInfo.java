@@ -213,9 +213,18 @@ public class PackageInfo implements Parcelable {
      * or null if there were none.  This is only filled in if the flag
      * {@link PackageManager#GET_PERMISSIONS} was set.  Each value matches
      * the corresponding entry in {@link #requestedPermissions}, and will have
-     * the flag {@link #REQUESTED_PERMISSION_GRANTED} set as appropriate.
+     * the flags {@link #REQUESTED_PERMISSION_GRANTED} and
+     * {@link #REQUESTED_PERMISSION_NEVER_FOR_LOCATION} set as appropriate.
      */
     public int[] requestedPermissionsFlags;
+
+    /**
+     * Array of all {@link android.R.styleable#AndroidManifestAttribution
+     * &lt;attribution&gt;} tags included under &lt;manifest&gt;, or null if there were none. This
+     * is only filled if the flag {@link PackageManager#GET_ATTRIBUTIONS} was set.
+     */
+    @SuppressWarnings({"ArrayReturn", "NullableCollection"})
+    public @Nullable Attribution[] attributions;
 
     /**
      * Flag for {@link #requestedPermissionsFlags}: the requested permission
@@ -224,13 +233,23 @@ public class PackageInfo implements Parcelable {
      *
      * @removed We do not support required permissions.
      */
-    public static final int REQUESTED_PERMISSION_REQUIRED = 1<<0;
+    public static final int REQUESTED_PERMISSION_REQUIRED = 0x00000001;
 
     /**
      * Flag for {@link #requestedPermissionsFlags}: the requested permission
      * is currently granted to the application.
      */
-    public static final int REQUESTED_PERMISSION_GRANTED = 1<<1;
+    public static final int REQUESTED_PERMISSION_GRANTED = 0x00000002;
+
+    /**
+     * Flag for {@link #requestedPermissionsFlags}: the requested permission has
+     * declared {@code neverForLocation} in their manifest as a strong assertion
+     * by a developer that they will never use this permission to derive the
+     * physical location of the device, regardless of
+     * {@link android.Manifest.permission#ACCESS_FINE_LOCATION} and/or
+     * {@link android.Manifest.permission#ACCESS_COARSE_LOCATION} being granted.
+     */
+    public static final int REQUESTED_PERMISSION_NEVER_FOR_LOCATION = 0x00010000;
 
     /**
      * Array of all signatures read from the package file. This is only filled
@@ -328,20 +347,44 @@ public class PackageInfo implements Parcelable {
      */
     public int installLocation = INSTALL_LOCATION_INTERNAL_ONLY;
 
-    /** @hide */
+    /**
+     * Whether or not the package is a stub and should be replaced by a full version of the app.
+     *
+     * @hide
+     */
     public boolean isStub;
 
-    /** @hide */
+    /**
+     * Whether the app is included when the device is booted into a minimal state. Set through the
+     * non-namespaced "coreApp" attribute of the manifest tag.
+     *
+     * @hide
+     */
     @UnsupportedAppUsage
     public boolean coreApp;
 
-    /** @hide */
+    /**
+     * Signals that this app is required for all users on the device.
+     *
+     * When a restricted user profile is created, the user is prompted with a list of apps to
+     * install on that user. Settings uses this field to determine obligatory apps which cannot be
+     * deselected.
+     *
+     * This restriction is not handled by the framework itself.
+     * @hide
+     */
     public boolean requiredForAllUsers;
 
-    /** @hide */
+    /**
+     * The restricted account authenticator type that is used by this application.
+     * @hide
+     */
     public String restrictedAccountType;
 
-    /** @hide */
+    /**
+     * The required account type without which this application will not function.
+     * @hide
+     */
     public String requiredAccountType;
 
     /**
@@ -471,6 +514,7 @@ public class PackageInfo implements Parcelable {
         dest.writeTypedArray(configPreferences, parcelableFlags);
         dest.writeTypedArray(reqFeatures, parcelableFlags);
         dest.writeTypedArray(featureGroups, parcelableFlags);
+        dest.writeTypedArray(attributions, parcelableFlags);
         dest.writeInt(installLocation);
         dest.writeInt(isStub ? 1 : 0);
         dest.writeInt(coreApp ? 1 : 0);
@@ -536,6 +580,7 @@ public class PackageInfo implements Parcelable {
         configPreferences = source.createTypedArray(ConfigurationInfo.CREATOR);
         reqFeatures = source.createTypedArray(FeatureInfo.CREATOR);
         featureGroups = source.createTypedArray(FeatureGroupInfo.CREATOR);
+        attributions = source.createTypedArray(Attribution.CREATOR);
         installLocation = source.readInt();
         isStub = source.readInt() != 0;
         coreApp = source.readInt() != 0;

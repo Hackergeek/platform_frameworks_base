@@ -25,7 +25,6 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.net.util.SharedLog;
 import android.os.Build;
 import android.os.Environment;
 import android.os.IBinder;
@@ -35,13 +34,13 @@ import android.os.UserHandle;
 import android.provider.DeviceConfig;
 import android.text.format.DateUtils;
 import android.util.ArraySet;
+import android.util.Log;
 import android.util.Slog;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 
 import java.io.File;
-import java.io.PrintWriter;
 
 /**
  * Class used to communicate to the various networking mainline modules running in the network stack
@@ -73,8 +72,6 @@ public class ConnectivityModuleConnector {
     private static ConnectivityModuleConnector sInstance;
 
     private Context mContext;
-    @GuardedBy("mLog")
-    private final SharedLog mLog = new SharedLog(TAG);
     @GuardedBy("mHealthListeners")
     private final ArraySet<ConnectivityModuleHealthListener> mHealthListeners = new ArraySet<>();
     @NonNull
@@ -278,7 +275,10 @@ public class ConnectivityModuleConnector {
             // This code path is only run by the system server: only the system server binds
             // to the NetworkStack as a service. Other processes get the NetworkStack from
             // the ServiceManager.
-            maybeCrashWithTerribleFailure("Lost network stack", mPackageName);
+            maybeCrashWithTerribleFailure(
+                "Lost network stack. This is not the root cause of any issue, it is a side "
+                + "effect of a crash that happened earlier. Earlier logs should point to the "
+                + "actual issue.", mPackageName);
         }
     }
 
@@ -381,38 +381,19 @@ public class ConnectivityModuleConnector {
     }
 
     private void log(@NonNull String message) {
-        Slog.d(TAG, message);
-        synchronized (mLog) {
-            mLog.log(message);
-        }
+        Log.d(TAG, message);
     }
 
     private void logWtf(@NonNull String message, @Nullable Throwable e) {
         Slog.wtf(TAG, message, e);
-        synchronized (mLog) {
-            mLog.e(message);
-        }
+        Log.e(TAG, message, e);
     }
 
     private void loge(@NonNull String message, @Nullable Throwable e) {
-        Slog.e(TAG, message, e);
-        synchronized (mLog) {
-            mLog.e(message);
-        }
+        Log.e(TAG, message, e);
     }
 
     private void logi(@NonNull String message) {
-        Slog.i(TAG, message);
-        synchronized (mLog) {
-            mLog.i(message);
-        }
-    }
-
-    /**
-     * Dump ConnectivityModuleConnector logs to the specified {@link PrintWriter}.
-     */
-    public void dump(PrintWriter pw) {
-        // dump is thread-safe on SharedLog
-        mLog.dump(null, pw, null);
+        Log.i(TAG, message);
     }
 }

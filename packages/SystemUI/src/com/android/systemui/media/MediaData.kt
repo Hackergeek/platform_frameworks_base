@@ -20,20 +20,21 @@ import android.app.PendingIntent
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.Icon
 import android.media.session.MediaSession
+import com.android.internal.logging.InstanceId
+import com.android.systemui.R
 
 /** State of a media view. */
 data class MediaData(
     val userId: Int,
     val initialized: Boolean = false,
-    val backgroundColor: Int,
     /**
      * App name that will be displayed on the player.
      */
     val app: String?,
     /**
-     * Icon shown on player, close to app name.
+     * App icon shown on player.
      */
-    val appIcon: Drawable?,
+    val appIcon: Icon?,
     /**
      * Artist name.
      */
@@ -47,13 +48,18 @@ data class MediaData(
      */
     val artwork: Icon?,
     /**
-     * List of actions that can be performed on the player: prev, next, play, pause, etc.
+     * List of generic action buttons for the media player, based on notification actions
      */
     val actions: List<MediaAction>,
     /**
      * Same as above, but shown on smaller versions of the player, like in QQS or keyguard.
      */
     val actionsToShowInCompact: List<Int>,
+    /**
+     * Semantic actions buttons, based on the PlaybackState of the media session.
+     * If present, these actions will be preferred in the UI over [actions]
+     */
+    val semanticActions: MediaButton? = null,
     /**
      * Package name of the app that's posting the media.
      */
@@ -82,6 +88,10 @@ data class MediaData(
      */
     var resumeAction: Runnable?,
     /**
+     * Playback location: one of PLAYBACK_LOCAL, PLAYBACK_CAST_LOCAL, or PLAYBACK_CAST_REMOTE
+     */
+    var playbackLocation: Int = PLAYBACK_LOCAL,
+    /**
      * Indicates that this player is a resumption player (ie. It only shows a play actions which
      * will start the app and start playing).
      */
@@ -90,19 +100,136 @@ data class MediaData(
      * Notification key for cancelling a media player after a timeout (when not using resumption.)
      */
     val notificationKey: String? = null,
-    var hasCheckedForResume: Boolean = false
-)
+    var hasCheckedForResume: Boolean = false,
+
+    /**
+     * If apps do not report PlaybackState, set as null to imply 'undetermined'
+     */
+    val isPlaying: Boolean? = null,
+
+    /**
+     * Set from the notification and used as fallback when PlaybackState cannot be determined
+     */
+    val isClearable: Boolean = true,
+
+    /**
+     * Timestamp when this player was last active.
+     */
+    var lastActive: Long = 0L,
+
+    /**
+     * Instance ID for logging purposes
+     */
+    val instanceId: InstanceId,
+
+    /**
+     * The UID of the app, used for logging
+     */
+    val appUid: Int
+) {
+    companion object {
+        /** Media is playing on the local device */
+        const val PLAYBACK_LOCAL = 0
+        /** Media is cast but originated on the local device */
+        const val PLAYBACK_CAST_LOCAL = 1
+        /** Media is from a remote cast notification */
+        const val PLAYBACK_CAST_REMOTE = 2
+    }
+
+    fun isLocalSession(): Boolean {
+        return playbackLocation == PLAYBACK_LOCAL
+    }
+}
+
+/**
+ * Contains [MediaAction] objects which represent specific buttons in the UI
+ */
+data class MediaButton(
+    /**
+     * Play/pause button
+     */
+    val playOrPause: MediaAction? = null,
+    /**
+     * Next button, or custom action
+     */
+    val nextOrCustom: MediaAction? = null,
+    /**
+     * Previous button, or custom action
+     */
+    val prevOrCustom: MediaAction? = null,
+    /**
+     * First custom action space
+     */
+    val custom0: MediaAction? = null,
+    /**
+     * Second custom action space
+     */
+    val custom1: MediaAction? = null,
+    /**
+     * Whether to reserve the empty space when the nextOrCustom is null
+     */
+    val reserveNext: Boolean = false,
+    /**
+     * Whether to reserve the empty space when the prevOrCustom is null
+     */
+    val reservePrev: Boolean = false
+) {
+    fun getActionById(id: Int): MediaAction? {
+        return when (id) {
+            R.id.actionPlayPause -> playOrPause
+            R.id.actionNext -> nextOrCustom
+            R.id.actionPrev -> prevOrCustom
+            R.id.action0 -> custom0
+            R.id.action1 -> custom1
+            else -> null
+        }
+    }
+}
 
 /** State of a media action. */
 data class MediaAction(
-    val drawable: Drawable?,
+    val icon: Drawable?,
     val action: Runnable?,
-    val contentDescription: CharSequence?
+    val contentDescription: CharSequence?,
+    val background: Drawable?,
+
+    // Rebind Id is used to detect identical rebinds and ignore them. It is intended
+    // to prevent continuously looping animations from restarting due to the arrival
+    // of repeated media notifications that are visually identical.
+    val rebindId: Int? = null
 )
 
 /** State of the media device. */
-data class MediaDeviceData(
+data class MediaDeviceData
+@JvmOverloads constructor(
+    /** Whether or not to enable the chip */
     val enabled: Boolean,
+
+    /** Device icon to show in the chip */
     val icon: Drawable?,
-    val name: String?
-)
+
+    /** Device display name */
+    val name: CharSequence?,
+
+    /** Optional intent to override the default output switcher for this control */
+    val intent: PendingIntent? = null,
+
+    /** Unique id for this device */
+    val id: String? = null
+) {
+    /**
+     * Check whether [MediaDeviceData] objects are equal in all fields except the icon. The icon
+     * is ignored because it can change by reference frequently depending on the device type's
+     * implementation, but this is not usually relevant unless other info has changed
+     */
+    fun equalsWithoutIcon(other: MediaDeviceData?): Boolean {
+        if (other == null) {
+            return false
+        }
+
+        return enabled == other.enabled &&
+            name == other.name &&
+            intent == other.intent &&
+            id == other.id
+    }
+}

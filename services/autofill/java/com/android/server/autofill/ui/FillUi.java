@@ -32,6 +32,7 @@ import android.service.autofill.Dataset;
 import android.service.autofill.Dataset.DatasetFieldFilter;
 import android.service.autofill.FillResponse;
 import android.text.TextUtils;
+import android.util.PluralsMessageFormatter;
 import android.util.Slog;
 import android.util.TypedValue;
 import android.view.ContextThemeWrapper;
@@ -63,7 +64,9 @@ import com.android.server.autofill.Helper;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -203,7 +206,7 @@ final class FillUi {
                     .getInteger(com.android.internal.R.integer.autofill_max_visible_datasets);
         }
 
-        final RemoteViews.OnClickHandler interceptionHandler = (view, pendingIntent, r) -> {
+        final RemoteViews.InteractionHandler interceptionHandler = (view, pendingIntent, r) -> {
             if (pendingIntent != null) {
                 mCallback.startIntentSender(pendingIntent.getIntentSender());
             }
@@ -258,10 +261,11 @@ final class FillUi {
                         + mVisibleDatasetsMaxCount);
             }
 
-            RemoteViews.OnClickHandler clickBlocker = null;
+            RemoteViews.InteractionHandler interactionBlocker = null;
             if (headerPresentation != null) {
-                clickBlocker = newClickBlocker();
-                mHeader = headerPresentation.applyWithTheme(mContext, null, clickBlocker, mThemeId);
+                interactionBlocker = newInteractionBlocker();
+                mHeader = headerPresentation.applyWithTheme(
+                        mContext, null, interactionBlocker, mThemeId);
                 final LinearLayout headerContainer =
                         decor.findViewById(R.id.autofill_dataset_header);
                 applyCancelAction(mHeader, response.getCancelIds());
@@ -276,11 +280,11 @@ final class FillUi {
                 final LinearLayout footerContainer =
                         decor.findViewById(R.id.autofill_dataset_footer);
                 if (footerContainer != null) {
-                    if (clickBlocker == null) { // already set for header
-                        clickBlocker = newClickBlocker();
+                    if (interactionBlocker == null) { // already set for header
+                        interactionBlocker = newInteractionBlocker();
                     }
                     mFooter = footerPresentation.applyWithTheme(
-                            mContext, null, clickBlocker, mThemeId);
+                            mContext, null, interactionBlocker, mThemeId);
                     applyCancelAction(mFooter, response.getCancelIds());
                     // Footer not supported on some platform e.g. TV
                     if (sVerbose) Slog.v(TAG, "adding footer");
@@ -397,9 +401,9 @@ final class FillUi {
     }
 
     /**
-     * Creates a remoteview interceptor used to block clicks.
+     * Creates a remoteview interceptor used to block clicks or other interactions.
      */
-    private RemoteViews.OnClickHandler newClickBlocker() {
+    private RemoteViews.InteractionHandler newInteractionBlocker() {
         return (view, pendingIntent, response) -> {
             if (sVerbose) Slog.v(TAG, "Ignoring click on " + view);
             return true;
@@ -897,8 +901,11 @@ final class FillUi {
             if (count <= 0) {
                 text = mContext.getString(R.string.autofill_picker_no_suggestions);
             } else {
-                text = mContext.getResources().getQuantityString(
-                        R.plurals.autofill_picker_some_suggestions, count, count);
+                Map<String, Object> arguments = new HashMap<>();
+                arguments.put("count", count);
+                text = PluralsMessageFormatter.format(mContext.getResources(),
+                        arguments,
+                        R.string.autofill_picker_some_suggestions);
             }
             mListView.announceForAccessibility(text);
         }

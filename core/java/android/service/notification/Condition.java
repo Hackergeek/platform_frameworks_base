@@ -17,6 +17,7 @@
 package android.service.notification;
 
 import android.annotation.IntDef;
+import android.annotation.Nullable;
 import android.content.Context;
 import android.net.Uri;
 import android.os.Parcel;
@@ -113,7 +114,7 @@ public final class Condition implements Parcelable {
     }
 
     public Condition(Parcel source) {
-        this((Uri)source.readParcelable(Condition.class.getClassLoader()),
+        this((Uri)source.readParcelable(Condition.class.getClassLoader(), android.net.Uri.class),
                 source.readString(),
                 source.readString(),
                 source.readString(),
@@ -183,7 +184,7 @@ public final class Condition implements Parcelable {
     }
 
     @Override
-    public boolean equals(Object o) {
+    public boolean equals(@Nullable Object o) {
         if (!(o instanceof Condition)) return false;
         if (o == this) return true;
         final Condition other = (Condition) o;

@@ -16,36 +16,30 @@
 
 package com.android.server.wm;
 
-import static android.app.WindowConfiguration.WINDOWING_MODE_MULTI_WINDOW;
-import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
-import static android.view.InsetsState.ITYPE_CAPTION_BAR;
+import static android.os.Trace.TRACE_TAG_WINDOW_MANAGER;
+import static android.view.InsetsState.ITYPE_CLIMATE_BAR;
+import static android.view.InsetsState.ITYPE_EXTRA_NAVIGATION_BAR;
 import static android.view.InsetsState.ITYPE_IME;
-import static android.view.InsetsState.ITYPE_INVALID;
 import static android.view.InsetsState.ITYPE_NAVIGATION_BAR;
 import static android.view.InsetsState.ITYPE_STATUS_BAR;
-import static android.view.ViewRootImpl.NEW_INSETS_MODE_FULL;
-import static android.view.ViewRootImpl.sNewInsetsMode;
-import static android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD;
-import static android.view.WindowManager.LayoutParams.TYPE_NAVIGATION_BAR;
-import static android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
+import static android.view.WindowInsets.Type.displayCutout;
+import static android.view.WindowInsets.Type.mandatorySystemGestures;
+import static android.view.WindowInsets.Type.systemGestures;
 
-import static com.android.server.wm.ProtoLogGroup.WM_DEBUG_IME;
+import static com.android.internal.protolog.ProtoLogGroup.WM_DEBUG_IME;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.app.WindowConfiguration;
-import android.app.WindowConfiguration.WindowingMode;
+import android.os.Trace;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.SparseArray;
-import android.view.InsetsSource;
 import android.view.InsetsSourceControl;
 import android.view.InsetsState;
 import android.view.InsetsState.InternalInsetsType;
-import android.view.WindowManager;
 
+import com.android.internal.protolog.common.ProtoLog;
 import com.android.server.inputmethod.InputMethodManagerInternal;
-import com.android.server.protolog.common.ProtoLog;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
@@ -60,7 +54,8 @@ class InsetsStateController {
     private final InsetsState mState = new InsetsState();
     private final DisplayContent mDisplayContent;
 
-    private final ArrayMap<Integer, InsetsSourceProvider> mProviders = new ArrayMap<>();
+    private final ArrayMap<Integer, WindowContainerInsetsSourceProvider> mProviders =
+            new ArrayMap<>();
     private final ArrayMap<InsetsControlTarget, ArrayList<Integer>> mControlTargetTypeMap =
             new ArrayMap<>();
     private final SparseArray<InsetsControlTarget> mTypeControlTargetMap = new SparseArray<>();
@@ -71,7 +66,7 @@ class InsetsStateController {
     private final ArraySet<InsetsControlTarget> mPendingControlChanged = new ArraySet<>();
 
     private final Consumer<WindowState> mDispatchInsetsChanged = w -> {
-        if (w.isVisible()) {
+        if (w.isReadyToDispatchInsetsState()) {
             w.notifyInsetsChanged();
         }
     };
@@ -95,113 +90,6 @@ class InsetsStateController {
         mDisplayContent = displayContent;
     }
 
-    /**
-     * When dispatching window state to the client, we'll need to exclude the source that represents
-     * the window that is being dispatched. We also need to exclude certain types of insets source
-     * for client within specific windowing modes.
-     *
-     * @param target The client we dispatch the state to.
-     * @return The state stripped of the necessary information.
-     */
-    InsetsState getInsetsForDispatch(@NonNull WindowState target) {
-        final InsetsSourceProvider provider = target.getControllableInsetProvider();
-        final @InternalInsetsType int type = provider != null
-                ? provider.getSource().getType() : ITYPE_INVALID;
-        return getInsetsForDispatchInner(type, target.getWindowingMode(), target.isAlwaysOnTop(),
-                isAboveIme(target));
-    }
-
-    InsetsState getInsetsForWindowMetrics(@NonNull WindowManager.LayoutParams attrs) {
-        final @InternalInsetsType int type = getInsetsTypeForWindowType(attrs.type);
-        final WindowToken token = mDisplayContent.getWindowToken(attrs.token);
-        final @WindowingMode int windowingMode = token != null
-                ? token.getWindowingMode() : WINDOWING_MODE_UNDEFINED;
-        final boolean alwaysOnTop = token != null && token.isAlwaysOnTop();
-        return getInsetsForDispatchInner(type, windowingMode, alwaysOnTop, isAboveIme(token));
-    }
-
-    private boolean isAboveIme(WindowContainer target) {
-        final WindowState imeWindow = mDisplayContent.mInputMethodWindow;
-        if (target == null || imeWindow == null) {
-            return false;
-        }
-        if (target instanceof WindowState) {
-            final WindowState win = (WindowState) target;
-            return win.needsRelativeLayeringToIme() || !win.mBehindIme;
-        }
-        return false;
-    }
-
-    private static @InternalInsetsType int getInsetsTypeForWindowType(int type) {
-        switch (type) {
-            case TYPE_STATUS_BAR:
-                return ITYPE_STATUS_BAR;
-            case TYPE_NAVIGATION_BAR:
-                return ITYPE_NAVIGATION_BAR;
-            case TYPE_INPUT_METHOD:
-                return ITYPE_IME;
-            default:
-                return ITYPE_INVALID;
-        }
-    }
-
-    /** @see #getInsetsForDispatch */
-    private InsetsState getInsetsForDispatchInner(@InternalInsetsType int type,
-            @WindowingMode int windowingMode, boolean isAlwaysOnTop, boolean aboveIme) {
-        InsetsState state = mState;
-
-        if (type != ITYPE_INVALID) {
-            state = new InsetsState(state);
-            state.removeSource(type);
-
-            // Navigation bar doesn't get influenced by anything else
-            if (type == ITYPE_NAVIGATION_BAR) {
-                state.removeSource(ITYPE_IME);
-                state.removeSource(ITYPE_STATUS_BAR);
-                state.removeSource(ITYPE_CAPTION_BAR);
-            }
-
-            // Status bar doesn't get influenced by caption bar
-            if (type == ITYPE_STATUS_BAR) {
-                state.removeSource(ITYPE_CAPTION_BAR);
-            }
-
-            // IME needs different frames for certain cases (e.g. navigation bar in gesture nav).
-            if (type == ITYPE_IME) {
-                for (int i = mProviders.size() - 1; i >= 0; i--) {
-                    InsetsSourceProvider otherProvider = mProviders.valueAt(i);
-                    if (otherProvider.overridesImeFrame()) {
-                        InsetsSource override =
-                                new InsetsSource(
-                                        state.getSource(otherProvider.getSource().getType()));
-                        override.setFrame(otherProvider.getImeOverrideFrame());
-                        state.addSource(override);
-                    }
-                }
-            }
-        }
-
-        if (WindowConfiguration.isFloating(windowingMode)
-                || (windowingMode == WINDOWING_MODE_MULTI_WINDOW && isAlwaysOnTop)) {
-            state = new InsetsState(state);
-            state.removeSource(ITYPE_STATUS_BAR);
-            state.removeSource(ITYPE_NAVIGATION_BAR);
-        }
-
-        if (aboveIme) {
-            InsetsSource imeSource = state.peekSource(ITYPE_IME);
-            if (imeSource != null && imeSource.isVisible()) {
-                imeSource = new InsetsSource(imeSource);
-                imeSource.setVisible(false);
-                imeSource.setFrame(0, 0, 0, 0);
-                state = new InsetsState(state);
-                state.addSource(imeSource);
-            }
-        }
-
-        return state;
-    }
-
     InsetsState getRawInsetsState() {
         return mState;
     }
@@ -219,17 +107,22 @@ class InsetsStateController {
         return result;
     }
 
+    ArrayMap<Integer, WindowContainerInsetsSourceProvider> getSourceProviders() {
+        return mProviders;
+    }
+
     /**
      * @return The provider of a specific type.
      */
-    InsetsSourceProvider getSourceProvider(@InternalInsetsType int type) {
+    WindowContainerInsetsSourceProvider getSourceProvider(@InternalInsetsType int type) {
         if (type == ITYPE_IME) {
             return mProviders.computeIfAbsent(type,
                     key -> new ImeInsetsSourceProvider(
                             mState.getSource(key), this, mDisplayContent));
         } else {
             return mProviders.computeIfAbsent(type,
-                    key -> new InsetsSourceProvider(mState.getSource(key), this, mDisplayContent));
+                    key -> new WindowContainerInsetsSourceProvider(mState.getSource(key), this,
+                            mDisplayContent));
         }
     }
 
@@ -240,7 +133,8 @@ class InsetsStateController {
     /**
      * @return The provider of a specific type or null if we don't have it.
      */
-    @Nullable InsetsSourceProvider peekSourceProvider(@InternalInsetsType int type) {
+    @Nullable
+    WindowContainerInsetsSourceProvider peekSourceProvider(@InternalInsetsType int type) {
         return mProviders.get(type);
     }
 
@@ -248,57 +142,64 @@ class InsetsStateController {
      * Called when a layout pass has occurred.
      */
     void onPostLayout() {
-        mState.setDisplayFrame(mDisplayContent.getBounds());
+        Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER, "ISC.onPostLayout");
         for (int i = mProviders.size() - 1; i >= 0; i--) {
             mProviders.valueAt(i).onPostLayout();
         }
-        final ArrayList<WindowState> winInsetsChanged = mDisplayContent.mWinInsetsChanged;
         if (!mLastState.equals(mState)) {
             mLastState.set(mState, true /* copySources */);
             notifyInsetsChanged();
-        } else {
-            // The global insets state has not changed but there might be windows whose conditions
-            // (e.g., z-order) have changed. They can affect the insets states that we dispatch to
-            // the clients.
-            for (int i = winInsetsChanged.size() - 1; i >= 0; i--) {
-                mDispatchInsetsChanged.accept(winInsetsChanged.get(i));
-            }
         }
-        winInsetsChanged.clear();
-    }
-
-    void onInsetsModified(InsetsControlTarget windowState, InsetsState state) {
-        boolean changed = false;
-        for (int i = 0; i < InsetsState.SIZE; i++) {
-            final InsetsSource source = state.peekSource(i);
-            if (source == null) continue;
-            final InsetsSourceProvider provider = mProviders.get(source.getType());
-            if (provider == null) {
-                continue;
-            }
-            changed |= provider.onInsetsModified(windowState, source);
-        }
-        if (changed) {
-            notifyInsetsChanged();
-            mDisplayContent.getDisplayPolicy().updateSystemUiVisibilityLw();
-        }
+        Trace.traceEnd(TRACE_TAG_WINDOW_MANAGER);
     }
 
     /**
-     * Computes insets state of the insets provider window in the display frames.
+     * Updates {@link WindowState#mAboveInsetsState} for all windows in the display.
      *
-     * @param state The output state.
-     * @param win The owner window of insets provider.
-     * @param displayFrames The display frames to create insets source.
-     * @param windowFrames The specified frames to represent the owner window.
+     * @param notifyInsetsChange {@code true} if the clients should be notified about the change.
      */
-    void computeSimulatedState(InsetsState state, WindowState win, DisplayFrames displayFrames,
-            WindowFrames windowFrames) {
-        for (int i = mProviders.size() - 1; i >= 0; i--) {
-            final InsetsSourceProvider provider = mProviders.valueAt(i);
-            if (provider.mWin == win) {
-                state.addSource(provider.createSimulatedSource(displayFrames, windowFrames));
+    void updateAboveInsetsState(boolean notifyInsetsChange) {
+        final InsetsState aboveInsetsState = new InsetsState();
+        aboveInsetsState.set(mState,
+                displayCutout() | systemGestures() | mandatorySystemGestures());
+        final ArraySet<WindowState> insetsChangedWindows = new ArraySet<>();
+        final SparseArray<InsetsSourceProvider>
+                localInsetsSourceProvidersFromParent = new SparseArray<>();
+        // This method will iterate on the entire hierarchy in top to bottom z-order manner. The
+        // aboveInsetsState will be modified as per the insets provided by the WindowState being
+        // visited.
+        mDisplayContent.updateAboveInsetsState(aboveInsetsState,
+                localInsetsSourceProvidersFromParent, insetsChangedWindows);
+        if (notifyInsetsChange) {
+            for (int i = insetsChangedWindows.size() - 1; i >= 0; i--) {
+                mDispatchInsetsChanged.accept(insetsChangedWindows.valueAt(i));
             }
+        }
+    }
+
+    void onDisplayFramesUpdated(boolean notifyInsetsChange) {
+        final ArrayList<WindowState> insetsChangedWindows = new ArrayList<>();
+        mDisplayContent.forAllWindows(w -> {
+            w.mAboveInsetsState.set(mState, displayCutout());
+            insetsChangedWindows.add(w);
+        }, true /* traverseTopToBottom */);
+        if (notifyInsetsChange) {
+            for (int i = insetsChangedWindows.size() - 1; i >= 0; i--) {
+                mDispatchInsetsChanged.accept(insetsChangedWindows.get(i));
+            }
+        }
+    }
+
+    void onInsetsModified(InsetsControlTarget caller) {
+        boolean changed = false;
+        for (int i = mProviders.size() - 1; i >= 0; i--) {
+            changed |= mProviders.valueAt(i).updateClientVisibility(caller);
+        }
+        if (changed) {
+            notifyInsetsChanged();
+            mDisplayContent.updateSystemGestureExclusion();
+            mDisplayContent.updateKeepClearAreas();
+            mDisplayContent.getDisplayPolicy().updateSystemBarAttributes();
         }
     }
 
@@ -331,8 +232,12 @@ class InsetsStateController {
             @Nullable InsetsControlTarget fakeNavControlling) {
         onControlChanged(ITYPE_STATUS_BAR, statusControlling);
         onControlChanged(ITYPE_NAVIGATION_BAR, navControlling);
+        onControlChanged(ITYPE_CLIMATE_BAR, statusControlling);
+        onControlChanged(ITYPE_EXTRA_NAVIGATION_BAR, navControlling);
         onControlFakeTargetChanged(ITYPE_STATUS_BAR, fakeStatusControlling);
         onControlFakeTargetChanged(ITYPE_NAVIGATION_BAR, fakeNavControlling);
+        onControlFakeTargetChanged(ITYPE_CLIMATE_BAR, fakeStatusControlling);
+        onControlFakeTargetChanged(ITYPE_EXTRA_NAVIGATION_BAR, fakeNavControlling);
         notifyPendingInsetsControlChanged();
     }
 
@@ -348,7 +253,7 @@ class InsetsStateController {
         if (target == previous) {
             return;
         }
-        final InsetsSourceProvider provider = mProviders.get(type);
+        final WindowContainerInsetsSourceProvider provider = mProviders.get(type);
         if (provider == null) {
             return;
         }
@@ -375,14 +280,11 @@ class InsetsStateController {
      */
     void onControlFakeTargetChanged(@InternalInsetsType int type,
             @Nullable InsetsControlTarget fakeTarget) {
-        if (sNewInsetsMode != NEW_INSETS_MODE_FULL) {
-            return;
-        }
         final InsetsControlTarget previous = mTypeFakeControlTargetMap.get(type);
         if (fakeTarget == previous) {
             return;
         }
-        final InsetsSourceProvider provider = mProviders.get(type);
+        final WindowContainerInsetsSourceProvider provider = mProviders.get(type);
         if (provider == null) {
             return;
         }
@@ -437,38 +339,47 @@ class InsetsStateController {
         }
         mDisplayContent.mWmService.mAnimator.addAfterPrepareSurfacesRunnable(() -> {
             for (int i = mProviders.size() - 1; i >= 0; i--) {
-                final InsetsSourceProvider provider = mProviders.valueAt(i);
+                final WindowContainerInsetsSourceProvider provider = mProviders.valueAt(i);
                 provider.onSurfaceTransactionApplied();
             }
+            final ArraySet<InsetsControlTarget> newControlTargets = new ArraySet<>();
             for (int i = mPendingControlChanged.size() - 1; i >= 0; i--) {
                 final InsetsControlTarget controlTarget = mPendingControlChanged.valueAt(i);
                 controlTarget.notifyInsetsControlChanged();
+                if (mControlTargetTypeMap.containsKey(controlTarget)) {
+                    // We only collect targets who get controls, not lose controls.
+                    newControlTargets.add(controlTarget);
+                }
             }
             mPendingControlChanged.clear();
+
+            // This updates the insets visibilities AFTER sending current insets state and controls
+            // to the clients, so that the clients can change the current visibilities to the
+            // requested visibilities with animations.
+            for (int i = newControlTargets.size() - 1; i >= 0; i--) {
+                onInsetsModified(newControlTargets.valueAt(i));
+            }
+            newControlTargets.clear();
         });
     }
 
     void notifyInsetsChanged() {
-        mDisplayContent.forAllWindows(mDispatchInsetsChanged, true /* traverseTopToBottom */);
-        if (mDisplayContent.mRemoteInsetsControlTarget != null) {
-            mDisplayContent.mRemoteInsetsControlTarget.notifyInsetsChanged();
-        }
+        mDisplayContent.notifyInsetsChanged(mDispatchInsetsChanged);
     }
 
     void dump(String prefix, PrintWriter pw) {
         pw.println(prefix + "WindowInsetsStateController");
-        mState.dump(prefix + "  ", pw);
-        pw.println(prefix + "  " + "Control map:");
+        prefix = prefix + "  ";
+        mState.dump(prefix, pw);
+        pw.println(prefix + "Control map:");
         for (int i = mTypeControlTargetMap.size() - 1; i >= 0; i--) {
             pw.print(prefix + "  ");
             pw.println(InsetsState.typeToString(mTypeControlTargetMap.keyAt(i)) + " -> "
                     + mTypeControlTargetMap.valueAt(i));
         }
-        pw.println(prefix + "  " + "InsetsSourceProviders map:");
+        pw.println(prefix + "InsetsSourceProviders:");
         for (int i = mProviders.size() - 1; i >= 0; i--) {
-            pw.print(prefix + "  ");
-            pw.println(InsetsState.typeToString(mProviders.keyAt(i)) + " -> ");
-            mProviders.valueAt(i).dump(pw, prefix);
+            mProviders.valueAt(i).dump(pw, prefix + "  ");
         }
     }
 }

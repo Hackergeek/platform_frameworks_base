@@ -17,6 +17,7 @@ package android.multiuser;
 
 import static org.junit.Assume.assumeTrue;
 
+import android.annotation.NonNull;
 import android.app.ActivityManager;
 import android.app.ActivityTaskManager;
 import android.app.AppGlobals;
@@ -38,6 +39,7 @@ import android.os.Bundle;
 import android.os.IBinder;
 import android.os.IProgressListener;
 import android.os.RemoteException;
+import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.os.UserManager;
@@ -62,7 +64,10 @@ import java.util.concurrent.TimeUnit;
 /**
  * Perf tests for user life cycle events.
  *
- * Running the tests:
+ * To run the tests: atest UserLifecycleTests
+ *
+ *
+ * Old methods for running the tests:
  *
  * make MultiUserPerfTests &&
  * adb install -r \
@@ -82,9 +87,17 @@ import java.util.concurrent.TimeUnit;
 public class UserLifecycleTests {
     private static final String TAG = UserLifecycleTests.class.getSimpleName();
 
+    /** Max runtime for each test (including all runs within that test). */
+    // Must be less than the AndroidTest.xml test-timeout to avoid being considered non-responsive.
+    private static final long TIMEOUT_MAX_TEST_TIME_MS = 24 * 60_000;
+
     private static final int TIMEOUT_IN_SECOND = 30;
     private static final int CHECK_USER_REMOVED_INTERVAL_MS = 200;
 
+    /** Name of users/profiles in the test. Users with this name may be freely removed. */
+    private static final String TEST_USER_NAME = "UserLifecycleTests_test_user";
+
+    /** Name of dummy package used when timing how long app launches take. */
     private static final String DUMMY_PACKAGE_NAME = "perftests.multiuser.apps.dummyapp";
 
     // Copy of UserSystemPackageInstaller whitelist mode constants.
@@ -101,6 +114,7 @@ public class UserLifecycleTests {
     private PackageManager mPm;
     private ArrayList<Integer> mUsersToRemove;
     private boolean mHasManagedUserFeature;
+    private BroadcastWaiter mBroadcastWaiter;
 
     private final BenchmarkRunner mRunner = new BenchmarkRunner();
     @Rule
@@ -115,10 +129,20 @@ public class UserLifecycleTests {
         mUsersToRemove = new ArrayList<>();
         mPm = context.getPackageManager();
         mHasManagedUserFeature = mPm.hasSystemFeature(PackageManager.FEATURE_MANAGED_USERS);
+        mBroadcastWaiter = new BroadcastWaiter(context, TAG, TIMEOUT_IN_SECOND,
+                Intent.ACTION_USER_STARTED,
+                Intent.ACTION_MEDIA_MOUNTED,
+                Intent.ACTION_USER_UNLOCKED);
+        removeAnyPreviousTestUsers();
+        if (mAm.getCurrentUser() != UserHandle.USER_SYSTEM) {
+            Log.w(TAG, "WARNING: Tests are being run from user " + mAm.getCurrentUser()
+                    + " rather than the system user");
+        }
     }
 
     @After
     public void tearDown() {
+        mBroadcastWaiter.close();
         for (int userId : mUsersToRemove) {
             try {
                 mUm.removeUser(userId);
@@ -128,156 +152,170 @@ public class UserLifecycleTests {
         }
     }
 
-    @Test
+    /** Tests creating a new user. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
     public void createUser() {
         while (mRunner.keepRunning()) {
+            Log.i(TAG, "Starting timer");
             final int userId = createUserNoFlags();
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    @Test
-    public void createAndStartUser() throws Exception {
+    /** Tests creating and starting a new user. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void createAndStartUser() throws RemoteException {
         while (mRunner.keepRunning()) {
+            Log.i(TAG, "Starting timer");
             final int userId = createUserNoFlags();
 
-            final CountDownLatch latch = new CountDownLatch(1);
-            registerBroadcastReceiver(Intent.ACTION_USER_STARTED, latch, userId);
             // Don't use this.startUserInBackgroundAndWaitForUnlock() since only waiting until
             // ACTION_USER_STARTED.
             mIam.startUserInBackground(userId);
-            latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+            waitForBroadcast(Intent.ACTION_USER_STARTED, userId);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
     /**
+     * Tests starting an uninitialized user.
      * Measures the time until ACTION_USER_STARTED is received.
      */
-    @Test
-    public void startUser() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void startUser() throws RemoteException {
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int userId = createUserNoFlags();
-            final CountDownLatch latch = new CountDownLatch(1);
-            registerBroadcastReceiver(Intent.ACTION_USER_STARTED, latch, userId);
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             mIam.startUserInBackground(userId);
-            latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+            waitForBroadcast(Intent.ACTION_USER_STARTED, userId);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
     /**
+     * Tests starting & unlocking an uninitialized user.
      * Measures the time until unlock listener is triggered and user is unlocked.
      */
-    @Test
-    public void startAndUnlockUser() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void startAndUnlockUser() {
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int userId = createUserNoFlags();
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             // Waits for UserState.mUnlockProgress.finish().
             startUserInBackgroundAndWaitForUnlock(userId);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-
-
-    @Test
-    public void switchUser() throws Exception {
+    /** Tests switching to an uninitialized user. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void switchUser() throws RemoteException {
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int startUser = mAm.getCurrentUser();
             final int userId = createUserNoFlags();
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             switchUser(userId);
 
             mRunner.pauseTiming();
-            switchUser(startUser);
+            Log.i(TAG, "Stopping timer");
+            switchUserNoCheck(startUser);
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    /** Tests switching to an already-created, but no-longer-running, user. */
-    @Test
-    public void switchUser_stopped() throws Exception {
+    /** Tests switching to a previously-started, but no-longer-running, user. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void switchUser_stopped() throws RemoteException {
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int startUser = mAm.getCurrentUser();
             final int testUser = initializeNewUserAndSwitchBack(/* stopNewUser */ true);
-            final CountDownLatch latch = new CountDownLatch(1);
-            registerBroadcastReceiver(Intent.ACTION_USER_UNLOCKED, latch, testUser);
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             mAm.switchUser(testUser);
-            boolean success = latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+            waitForBroadcast(Intent.ACTION_USER_UNLOCKED, testUser);
 
             mRunner.pauseTiming();
-            attestTrue("Failed to achieve 2nd ACTION_USER_UNLOCKED for user " + testUser, success);
-            switchUser(startUser);
+            Log.i(TAG, "Stopping timer");
+            switchUserNoCheck(startUser);
             removeUser(testUser);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    /** Tests switching to an already-created already-running non-owner user. */
-    @Test
-    public void switchUser_running() throws Exception {
+    /** Tests switching to an already-created already-running non-owner background user. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void switchUser_running() throws RemoteException {
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int startUser = mAm.getCurrentUser();
             final int testUser = initializeNewUserAndSwitchBack(/* stopNewUser */ false);
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             switchUser(testUser);
 
             mRunner.pauseTiming();
-            attestTrue("Failed to switch to user " + testUser, mAm.isUserRunning(testUser));
-            switchUser(startUser);
+            Log.i(TAG, "Stopping timer");
+            switchUserNoCheck(startUser);
             removeUser(testUser);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    @Test
-    public void stopUser() throws Exception {
+    /** Tests stopping a background user. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void stopUser() throws RemoteException {
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int userId = createUserNoFlags();
-            final CountDownLatch latch = new CountDownLatch(1);
-            registerBroadcastReceiver(Intent.ACTION_USER_STARTED, latch, userId);
             mIam.startUserInBackground(userId);
-            latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+
+            waitForBroadcast(Intent.ACTION_USER_STARTED, userId);
+            waitForBroadcast(Intent.ACTION_MEDIA_MOUNTED, userId);
+
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             stopUser(userId, false);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    @Test
-    public void lockedBootCompleted() throws Exception {
+    /** Tests reaching LOOKED_BOOT_COMPLETE when switching to uninitialized user. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void lockedBootCompleted() throws RemoteException {
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int startUser = mAm.getCurrentUser();
@@ -285,24 +323,29 @@ public class UserLifecycleTests {
             final CountDownLatch latch = new CountDownLatch(1);
             registerUserSwitchObserver(null, latch, userId);
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             mAm.switchUser(userId);
-            latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+            waitForLatch("Failed to achieve onLockedBootComplete for user " + userId, latch);
 
             mRunner.pauseTiming();
-            switchUser(startUser);
+            Log.i(TAG, "Stopping timer");
+            switchUserNoCheck(startUser);
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    @Test
-    public void ephemeralUserStopped() throws Exception {
+    /** Tests stopping an ephemeral foreground user. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void ephemeralUserStopped() throws RemoteException {
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int startUser = mAm.getCurrentUser();
             final int userId = createUserWithFlags(UserInfo.FLAG_EPHEMERAL | UserInfo.FLAG_DEMO);
             switchUser(userId);
+            waitForBroadcast(Intent.ACTION_MEDIA_MOUNTED, userId);
+
             final CountDownLatch latch = new CountDownLatch(1);
             InstrumentationRegistry.getContext().registerReceiver(new BroadcastReceiver() {
                 @Override
@@ -316,53 +359,63 @@ public class UserLifecycleTests {
             final CountDownLatch switchLatch = new CountDownLatch(1);
             registerUserSwitchObserver(switchLatch, null, startUser);
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             mAm.switchUser(startUser);
-            latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+            waitForLatch("Failed to achieve ACTION_USER_STOPPED for user " + userId, latch);
 
             mRunner.pauseTiming();
-            switchLatch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+            Log.i(TAG, "Stopping timer");
+            try {
+                switchLatch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Log.e(TAG, "Thread interrupted unexpectedly while waiting for switch.", e);
+            }
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
     /** Tests creating a new profile. */
-    @Test
-    public void managedProfileCreate() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileCreate() {
         assumeTrue(mHasManagedUserFeature);
 
         while (mRunner.keepRunning()) {
+            Log.i(TAG, "Starting timer");
             final int userId = createManagedProfile();
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             attestTrue("Failed creating profile " + userId, mUm.isManagedProfile(userId));
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    /** Tests starting (unlocking) a newly-created profile. */
-    @Test
-    public void managedProfileUnlock() throws Exception {
+    /** Tests starting (unlocking) an uninitialized profile. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileUnlock() {
         assumeTrue(mHasManagedUserFeature);
 
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int userId = createManagedProfile();
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             startUserInBackgroundAndWaitForUnlock(userId);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    /** Tests starting (unlocking) an already-created, but no-longer-running, profile. */
-    @Test
-    public void managedProfileUnlock_stopped() throws Exception {
+    /** Tests starting (unlocking) a previously-started, but no-longer-running, profile. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileUnlock_stopped() throws RemoteException {
         assumeTrue(mHasManagedUserFeature);
 
         while (mRunner.keepRunning()) {
@@ -372,20 +425,22 @@ public class UserLifecycleTests {
             startUserInBackgroundAndWaitForUnlock(userId);
             stopUser(userId, true);
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             startUserInBackgroundAndWaitForUnlock(userId);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
     /**
-     * Tests starting (unlocking) and launching an already-installed app in a newly-created profile.
+     * Tests starting (unlocking) & launching an already-installed app in an uninitialized profile.
      */
-    @Test
-    public void managedProfileUnlockAndLaunchApp() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileUnlockAndLaunchApp() throws RemoteException {
         assumeTrue(mHasManagedUserFeature);
 
         while (mRunner.keepRunning()) {
@@ -394,24 +449,26 @@ public class UserLifecycleTests {
             WindowManagerGlobal.getWindowManagerService().dismissKeyguard(null, null);
             installPreexistingApp(userId, DUMMY_PACKAGE_NAME);
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             startUserInBackgroundAndWaitForUnlock(userId);
             startApp(userId, DUMMY_PACKAGE_NAME);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
     /**
      * Tests starting (unlocking) and launching a previously-launched app
-     * in an already-created, but no-longer-running, profile.
+     * in a previously-started, but no-longer-running, profile.
      * A sort of combination of {@link #managedProfileUnlockAndLaunchApp} and
      * {@link #managedProfileUnlock_stopped}}.
      */
-    @Test
-    public void managedProfileUnlockAndLaunchApp_stopped() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileUnlockAndLaunchApp_stopped() throws RemoteException {
         assumeTrue(mHasManagedUserFeature);
 
         while (mRunner.keepRunning()) {
@@ -422,33 +479,37 @@ public class UserLifecycleTests {
             startUserInBackgroundAndWaitForUnlock(userId);
             startApp(userId, DUMMY_PACKAGE_NAME);
             stopUser(userId, true);
-            TimeUnit.SECONDS.sleep(1); // Brief cool-down before re-starting profile.
+            SystemClock.sleep(1_000); // 1 second cool-down before re-starting profile.
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             startUserInBackgroundAndWaitForUnlock(userId);
             startApp(userId, DUMMY_PACKAGE_NAME);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
-    /** Tests installing a pre-existing app in a newly-created profile. */
-    @Test
-    public void managedProfileInstall() throws Exception {
+    /** Tests installing a pre-existing app in an uninitialized profile. */
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileInstall() throws RemoteException {
         assumeTrue(mHasManagedUserFeature);
 
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int userId = createManagedProfile();
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             installPreexistingApp(userId, DUMMY_PACKAGE_NAME);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
@@ -456,14 +517,15 @@ public class UserLifecycleTests {
      * Tests creating a new profile, starting (unlocking) it, installing an app,
      * and launching that app in it.
      */
-    @Test
-    public void managedProfileCreateUnlockInstallAndLaunchApp() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileCreateUnlockInstallAndLaunchApp() throws RemoteException {
         assumeTrue(mHasManagedUserFeature);
 
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             WindowManagerGlobal.getWindowManagerService().dismissKeyguard(null, null);
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             final int userId = createManagedProfile();
             startUserInBackgroundAndWaitForUnlock(userId);
@@ -471,34 +533,39 @@ public class UserLifecycleTests {
             startApp(userId, DUMMY_PACKAGE_NAME);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
     /** Tests stopping a profile. */
-    @Test
-    public void managedProfileStopped() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileStopped() throws RemoteException {
         assumeTrue(mHasManagedUserFeature);
 
         while (mRunner.keepRunning()) {
             mRunner.pauseTiming();
             final int userId = createManagedProfile();
             startUserInBackgroundAndWaitForUnlock(userId);
+            waitForBroadcast(Intent.ACTION_MEDIA_MOUNTED, userId);
+
             mRunner.resumeTiming();
+            Log.i(TAG, "Starting timer");
 
             stopUser(userId, true);
 
             mRunner.pauseTiming();
+            Log.i(TAG, "Stopping timer");
             removeUser(userId);
-            mRunner.resumeTiming();
+            mRunner.resumeTimingForNextIteration();
         }
     }
 
     // TODO: This is just a POC. Do this properly and add more.
     /** Tests starting (unlocking) a newly-created profile using the user-type-pkg-whitelist. */
-    @Test
-    public void managedProfileUnlock_usingWhitelist() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileUnlock_usingWhitelist() {
         assumeTrue(mHasManagedUserFeature);
         final int origMode = getUserTypePackageWhitelistMode();
         setUserTypePackageWhitelistMode(USER_TYPE_PACKAGE_WHITELIST_MODE_ENFORCE
@@ -509,20 +576,22 @@ public class UserLifecycleTests {
                 mRunner.pauseTiming();
                 final int userId = createManagedProfile();
                 mRunner.resumeTiming();
+                Log.i(TAG, "Starting timer");
 
                 startUserInBackgroundAndWaitForUnlock(userId);
 
                 mRunner.pauseTiming();
+                Log.i(TAG, "Stopping timer");
                 removeUser(userId);
-                mRunner.resumeTiming();
+                mRunner.resumeTimingForNextIteration();
             }
         } finally {
             setUserTypePackageWhitelistMode(origMode);
         }
     }
     /** Tests starting (unlocking) a newly-created profile NOT using the user-type-pkg-whitelist. */
-    @Test
-    public void managedProfileUnlock_notUsingWhitelist() throws Exception {
+    @Test(timeout = TIMEOUT_MAX_TEST_TIME_MS)
+    public void managedProfileUnlock_notUsingWhitelist() {
         assumeTrue(mHasManagedUserFeature);
         final int origMode = getUserTypePackageWhitelistMode();
         setUserTypePackageWhitelistMode(USER_TYPE_PACKAGE_WHITELIST_MODE_DISABLE);
@@ -532,12 +601,14 @@ public class UserLifecycleTests {
                 mRunner.pauseTiming();
                 final int userId = createManagedProfile();
                 mRunner.resumeTiming();
+                Log.i(TAG, "Starting timer");
 
                 startUserInBackgroundAndWaitForUnlock(userId);
 
                 mRunner.pauseTiming();
+                Log.i(TAG, "Stopping timer");
                 removeUser(userId);
-                mRunner.resumeTiming();
+                mRunner.resumeTimingForNextIteration();
             }
         } finally {
             setUserTypePackageWhitelistMode(origMode);
@@ -551,19 +622,17 @@ public class UserLifecycleTests {
 
     /** Creates a new user with the given flags, returning its userId. */
     private int createUserWithFlags(int flags) {
-        int userId = mUm.createUser("TestUser", flags).id;
+        int userId = mUm.createUser(TEST_USER_NAME, flags).id;
         mUsersToRemove.add(userId);
         return userId;
     }
 
     /** Creates a managed (work) profile under the current user, returning its userId. */
     private int createManagedProfile() {
-        final UserInfo userInfo = mUm.createProfileForUser("TestProfile",
+        final UserInfo userInfo = mUm.createProfileForUser(TEST_USER_NAME,
                 UserManager.USER_TYPE_PROFILE_MANAGED, /* flags */ 0, mAm.getCurrentUser());
-        if (userInfo == null) {
-            throw new IllegalStateException("Creating managed profile failed. Most likely there is "
-                    + "already a pre-existing profile on the device.");
-        }
+        attestFalse("Creating managed profile failed. Most likely there is "
+                + "already a pre-existing profile on the device.", userInfo == null);
         mUsersToRemove.add(userInfo.id);
         return userInfo.id;
     }
@@ -576,24 +645,40 @@ public class UserLifecycleTests {
      */
     private void startUserInBackgroundAndWaitForUnlock(int userId) {
         final ProgressWaiter waiter = new ProgressWaiter();
+        boolean success = false;
         try {
             mIam.startUserInBackgroundWithListener(userId, waiter);
-            boolean success = waiter.waitForFinish(TIMEOUT_IN_SECOND);
-            attestTrue("Failed to start user " + userId + " in background.", success);
+            success = waiter.waitForFinish(TIMEOUT_IN_SECOND);
         } catch (RemoteException e) {
             Log.e(TAG, "startUserInBackgroundAndWaitForUnlock failed", e);
         }
+        attestTrue("Failed to start user " + userId + " in background.", success);
     }
 
     /** Starts the given user in the foreground. */
-    private void switchUser(int userId) throws Exception {
+    private void switchUser(int userId) throws RemoteException {
+        boolean success = switchUserNoCheck(userId);
+        attestTrue("Failed to properly switch to user " + userId, success);
+    }
+
+    /**
+     * Starts the given user in the foreground.
+     * Returns true if successful. Does not fail the test if unsuccessful.
+     * If lack of success should fail the test, use {@link #switchUser(int)} instead.
+     */
+    private boolean switchUserNoCheck(int userId) throws RemoteException {
         final CountDownLatch latch = new CountDownLatch(1);
         registerUserSwitchObserver(latch, null, userId);
         mAm.switchUser(userId);
-        latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+        try {
+            return latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Log.e(TAG, "Thread interrupted unexpectedly.", e);
+            return false;
+        }
     }
 
-    private void stopUser(int userId, boolean force) throws Exception {
+    private void stopUser(int userId, boolean force) throws RemoteException {
         final CountDownLatch latch = new CountDownLatch(1);
         mIam.stopUser(userId, force /* force */, new IStopUserCallback.Stub() {
             @Override
@@ -605,7 +690,7 @@ public class UserLifecycleTests {
             public void userStopAborted(int userId) throws RemoteException {
             }
         });
-        latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+        waitForLatch("Failed to properly stop user " + userId, latch);
     }
 
     /**
@@ -615,15 +700,13 @@ public class UserLifecycleTests {
      * @param stopNewUser whether to stop the new user after switching to otherUser.
      * @return userId of the newly created user.
      */
-    private int initializeNewUserAndSwitchBack(boolean stopNewUser) throws Exception {
+    private int initializeNewUserAndSwitchBack(boolean stopNewUser) throws RemoteException {
         final int origUser = mAm.getCurrentUser();
         // First, create and switch to testUser, waiting for its ACTION_USER_UNLOCKED
         final int testUser = createUserNoFlags();
-        final CountDownLatch latch1 = new CountDownLatch(1);
-        registerBroadcastReceiver(Intent.ACTION_USER_UNLOCKED, latch1, testUser);
         mAm.switchUser(testUser);
-        attestTrue("Failed to achieve initial ACTION_USER_UNLOCKED for user " + testUser,
-                latch1.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS));
+        waitForBroadcast(Intent.ACTION_USER_UNLOCKED, testUser);
+        waitForBroadcast(Intent.ACTION_MEDIA_MOUNTED, testUser);
 
         // Second, switch back to origUser, waiting merely for switchUser() to finish
         switchUser(origUser);
@@ -656,11 +739,7 @@ public class UserLifecycleTests {
                 PackageManager.INSTALL_ALL_WHITELIST_RESTRICTED_PERMISSIONS,
                 PackageManager.INSTALL_REASON_UNKNOWN, sender, userId, null);
 
-        try {
-            latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Log.e(TAG, "Thread interrupted unexpectedly.", e);
-        }
+        waitForLatch("Failed to install app " + packageName + " on user " + userId, latch);
     }
 
     /**
@@ -678,7 +757,7 @@ public class UserLifecycleTests {
     }
 
     private void registerUserSwitchObserver(final CountDownLatch switchLatch,
-            final CountDownLatch bootCompleteLatch, final int userId) throws Exception {
+            final CountDownLatch bootCompleteLatch, final int userId) throws RemoteException {
         ActivityManager.getService().registerUserSwitchObserver(
                 new UserSwitchObserver() {
                     @Override
@@ -695,19 +774,6 @@ public class UserLifecycleTests {
                         }
                     }
                 }, TAG);
-    }
-
-    private void registerBroadcastReceiver(final String action, final CountDownLatch latch,
-            final int userId) {
-        InstrumentationRegistry.getContext().registerReceiverAsUser(new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                if (action.equals(intent.getAction()) && intent.getIntExtra(
-                        Intent.EXTRA_USER_HANDLE, UserHandle.USER_NULL) == userId) {
-                    latch.countDown();
-                }
-            }
-        }, UserHandle.of(userId), new IntentFilter(action), null, null);
     }
 
     private class ProgressWaiter extends IProgressListener.Stub {
@@ -734,6 +800,28 @@ public class UserLifecycleTests {
         }
     }
 
+    /**
+     * Waits TIMEOUT_IN_SECOND for the broadcast to be received, otherwise declares the given error.
+     * It only works for the broadcasts provided in {@link #mBroadcastWaiter}'s instantiation above.
+     * @param action action of the broadcast, i.e. {@link Intent#ACTION_USER_STARTED}
+     * @param userId sendingUserId of the broadcast. See {@link BroadcastReceiver#getSendingUserId}
+     */
+    private void waitForBroadcast(String action, int userId) {
+        attestTrue("Failed to achieve " + action + " for user " + userId,
+                mBroadcastWaiter.waitActionForUser(action, userId));
+    }
+
+    /** Waits TIMEOUT_IN_SECOND for the latch to complete, otherwise declares the given error. */
+    private void waitForLatch(String errMsg, CountDownLatch latch) {
+        boolean success = false;
+        try {
+            success = latch.await(TIMEOUT_IN_SECOND, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Log.e(TAG, "Thread interrupted unexpectedly.", e);
+        }
+        attestTrue(errMsg, success);
+    }
+
     /** Gets the PACKAGE_WHITELIST_MODE_PROP System Property. */
     private int getUserTypePackageWhitelistMode() {
         return SystemProperties.getInt(PACKAGE_WHITELIST_MODE_PROP,
@@ -749,6 +837,9 @@ public class UserLifecycleTests {
     }
 
     private void removeUser(int userId) {
+        if (mBroadcastWaiter.hasActionBeenReceivedForUser(Intent.ACTION_USER_STARTED, userId)) {
+            mBroadcastWaiter.waitActionForUserIfNotReceivedYet(Intent.ACTION_MEDIA_MOUNTED, userId);
+        }
         try {
             mUm.removeUser(userId);
             final long startTime = System.currentTimeMillis();
@@ -767,13 +858,30 @@ public class UserLifecycleTests {
         }
     }
 
-    private void attestTrue(String message, boolean assertion) {
-        if (!assertion) {
-            Log.w(TAG, message);
+    private void removeAnyPreviousTestUsers() {
+        for (UserInfo user : mUm.getUsers()) {
+            if (TEST_USER_NAME.equals(user.name)) {
+                Log.i(TAG, "Found previous test user " + user.id + ". Removing it.");
+                if (mAm.getCurrentUser() == user.id) {
+                    try {
+                        switchUserNoCheck(UserHandle.USER_SYSTEM);
+                    } catch (RemoteException e) {
+                        Log.e(TAG, "Failed to correctly switch to system user", e);
+                    }
+                }
+                mUm.removeUser(user.id);
+            }
         }
     }
 
-    private void attestFalse(String message, boolean assertion) {
+    private void attestTrue(@NonNull String message, boolean assertion) {
+        if (!assertion) {
+            Log.e(TAG, "Test failed on iteration #" + mRunner.getIteration() + ": " + message);
+            mRunner.markAsFailed(new AssertionError(message));
+        }
+    }
+
+    private void attestFalse(@NonNull String message, boolean assertion) {
         attestTrue(message, !assertion);
     }
 }

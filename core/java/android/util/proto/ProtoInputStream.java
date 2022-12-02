@@ -16,10 +16,13 @@
 
 package android.util.proto;
 
+import android.util.LongArray;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * Class to read to a protobuf stream.
@@ -98,7 +101,7 @@ public final class ProtoInputStream extends ProtoStream {
     /**
      * Keeps track of the currently read nested Objects, for end object checking and debug
      */
-    private ArrayList<Long> mExpectedObjectTokenStack = null;
+    private LongArray mExpectedObjectTokenStack = null;
 
     /**
      * Current nesting depth of start calls.
@@ -498,7 +501,7 @@ public final class ProtoInputStream extends ProtoStream {
         int messageSize = (int) readVarint();
 
         if (mExpectedObjectTokenStack == null) {
-            mExpectedObjectTokenStack = new ArrayList<>();
+            mExpectedObjectTokenStack = new LongArray();
         }
         if (++mDepth == mExpectedObjectTokenStack.size()) {
             // Create a token to keep track of nested Object and extend the object stack
@@ -967,26 +970,17 @@ public final class ProtoInputStream extends ProtoStream {
     public String dumpDebugData() {
         StringBuilder sb = new StringBuilder();
 
-        sb.append("\nmFieldNumber : 0x" + Integer.toHexString(mFieldNumber));
-        sb.append("\nmWireType : 0x" + Integer.toHexString(mWireType));
-        sb.append("\nmState : 0x" + Integer.toHexString(mState));
-        sb.append("\nmDiscardedBytes : 0x" + Integer.toHexString(mDiscardedBytes));
-        sb.append("\nmOffset : 0x" + Integer.toHexString(mOffset));
-        sb.append("\nmExpectedObjectTokenStack : ");
-        if (mExpectedObjectTokenStack == null) {
-            sb.append("null");
-        } else {
-            sb.append(mExpectedObjectTokenStack);
-        }
-        sb.append("\nmDepth : 0x" + Integer.toHexString(mDepth));
-        sb.append("\nmBuffer : ");
-        if (mBuffer == null) {
-            sb.append("null");
-        } else {
-            sb.append(mBuffer);
-        }
-        sb.append("\nmBufferSize : 0x" + Integer.toHexString(mBufferSize));
-        sb.append("\nmEnd : 0x" + Integer.toHexString(mEnd));
+        sb.append("\nmFieldNumber : 0x").append(Integer.toHexString(mFieldNumber));
+        sb.append("\nmWireType : 0x").append(Integer.toHexString(mWireType));
+        sb.append("\nmState : 0x").append(Integer.toHexString(mState));
+        sb.append("\nmDiscardedBytes : 0x").append(Integer.toHexString(mDiscardedBytes));
+        sb.append("\nmOffset : 0x").append(Integer.toHexString(mOffset));
+        sb.append("\nmExpectedObjectTokenStack : ")
+                .append(Objects.toString(mExpectedObjectTokenStack));
+        sb.append("\nmDepth : 0x").append(Integer.toHexString(mDepth));
+        sb.append("\nmBuffer : ").append(Arrays.toString(mBuffer));
+        sb.append("\nmBufferSize : 0x").append(Integer.toHexString(mBufferSize));
+        sb.append("\nmEnd : 0x").append(Integer.toHexString(mEnd));
 
         return sb.toString();
     }

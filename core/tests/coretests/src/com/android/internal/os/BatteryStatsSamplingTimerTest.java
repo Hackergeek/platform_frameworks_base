@@ -18,6 +18,7 @@ package com.android.internal.os;
 
 import android.os.BatteryStats;
 import android.os.Parcel;
+import android.os.SystemClock;
 
 import androidx.test.filters.SmallTest;
 
@@ -29,16 +30,16 @@ public class BatteryStatsSamplingTimerTest extends TestCase {
 
     @SmallTest
     public void testSettingStalePreservesData() throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         final BatteryStatsImpl.SamplingTimer timer = new BatteryStatsImpl.SamplingTimer(clocks,
                 Mockito.mock(BatteryStatsImpl.TimeBase.class));
 
         timer.onTimeStarted(100, 100, 100);
 
         // First update is absorbed.
-        timer.update(10, 1);
+        timer.update(10, 1, SystemClock.elapsedRealtime() * 1000);
 
-        timer.update(20, 2);
+        timer.update(20, 2, SystemClock.elapsedRealtime() * 1000);
 
         assertEquals(1, timer.getCountLocked(BatteryStats.STATS_SINCE_CHARGED));
         assertEquals(10, timer.getTotalTimeLocked(200, BatteryStats.STATS_SINCE_CHARGED));
@@ -56,13 +57,13 @@ public class BatteryStatsSamplingTimerTest extends TestCase {
 
     @SmallTest
     public void testEndSampleAndContinueWhenTimeOrCountDecreases() throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         final BatteryStatsImpl.TimeBase timeBase = Mockito.mock(BatteryStatsImpl.TimeBase.class);
         final BatteryStatsImpl.SamplingTimer timer = new BatteryStatsImpl.SamplingTimer(clocks,
                 timeBase);
 
         // First once is absorbed.
-        timer.update(10, 1);
+        timer.update(10, 1, SystemClock.elapsedRealtime() * 1000);
 
         timer.add(10, 1);
 
@@ -70,8 +71,11 @@ public class BatteryStatsSamplingTimerTest extends TestCase {
         assertEquals(0, timer.getTotalTimeLocked(200, BatteryStats.STATS_SINCE_CHARGED));
 
         // This is less than we currently have, so we will end the sample. Time isn't running, so
-        // nothing should happen.
-        timer.update(0, 0);
+        // nothing should happen, except that tracking will stop.
+        timer.update(0, 0, SystemClock.elapsedRealtime() * 1000);
+
+        // Start tracking again
+        timer.update(0, 0, SystemClock.elapsedRealtime() * 1000);
 
         assertEquals(0, timer.getCountLocked(BatteryStats.STATS_SINCE_CHARGED));
         assertEquals(0, timer.getTotalTimeLocked(200, BatteryStats.STATS_SINCE_CHARGED));
@@ -84,9 +88,13 @@ public class BatteryStatsSamplingTimerTest extends TestCase {
         assertEquals(100, timer.getTotalTimeLocked(200, BatteryStats.STATS_SINCE_CHARGED));
         assertEquals(10, timer.getCountLocked(BatteryStats.STATS_SINCE_CHARGED));
 
-        // This is less than we currently have, so we should end our sample and continue with the
-        // entire amount updated here.
-        timer.update(50, 5);
+        // This is less than we currently have, so we should end our sample.
+        timer.update(30, 3, SystemClock.elapsedRealtime() * 1000);
+
+        // Restart tracking
+        timer.update(30, 3, SystemClock.elapsedRealtime() * 1000);
+
+        timer.add(50, 5);
 
         assertEquals(150, timer.getTotalTimeLocked(200, BatteryStats.STATS_SINCE_CHARGED));
         assertEquals(15, timer.getCountLocked(BatteryStats.STATS_SINCE_CHARGED));
@@ -99,14 +107,14 @@ public class BatteryStatsSamplingTimerTest extends TestCase {
 
     @SmallTest
     public void testFirstUpdateIsAbsorbed() throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         final BatteryStatsImpl.TimeBase timeBase = Mockito.mock(BatteryStatsImpl.TimeBase.class);
 
         BatteryStatsImpl.SamplingTimer timer = new BatteryStatsImpl.SamplingTimer(clocks, timeBase);
 
         // This should be absorbed because it is our first update and we don't know what
         // was being counted before.
-        timer.update(10, 1);
+        timer.update(10, 1, SystemClock.elapsedRealtime() * 1000);
 
         assertEquals(0, timer.getTotalTimeLocked(10, BatteryStats.STATS_SINCE_CHARGED));
         assertEquals(0, timer.getCountLocked(BatteryStats.STATS_SINCE_CHARGED));
@@ -115,7 +123,7 @@ public class BatteryStatsSamplingTimerTest extends TestCase {
         timer.onTimeStarted(100, 100, 100);
 
         // This should be absorbed.
-        timer.update(10, 1);
+        timer.update(10, 1, SystemClock.elapsedRealtime() * 1000);
 
         assertEquals(0, timer.getTotalTimeLocked(100, BatteryStats.STATS_SINCE_CHARGED));
         assertEquals(0, timer.getCountLocked(BatteryStats.STATS_SINCE_CHARGED));
@@ -138,7 +146,7 @@ public class BatteryStatsSamplingTimerTest extends TestCase {
 
     @SmallTest
     public void testSampleTimerSummaryParceling() throws Exception {
-        final MockClocks clocks = new MockClocks();
+        final MockClock clocks = new MockClock();
         clocks.realtime = 0;
         clocks.uptime = 0;
 
@@ -206,13 +214,13 @@ public class BatteryStatsSamplingTimerTest extends TestCase {
 
         // Now, just like with a fresh timer, the first update should be absorbed to account for
         // data being collected when we weren't recording.
-        unparceledOnBatteryTimer.update(10, 10);
+        unparceledOnBatteryTimer.update(10, 10, SystemClock.elapsedRealtime() * 1000);
 
         assertEquals(10, unparceledOnBatteryTimer.getTotalTimeLocked(0,
                 BatteryStats.STATS_SINCE_CHARGED));
         assertEquals(1, unparceledOnBatteryTimer.getCountLocked(BatteryStats.STATS_SINCE_CHARGED));
 
-        unparceledOffBatteryTimer.update(10, 10);
+        unparceledOffBatteryTimer.update(10, 10, SystemClock.elapsedRealtime() * 1000);
 
         assertEquals(10, unparceledOffBatteryTimer.getTotalTimeLocked(0,
                 BatteryStats.STATS_SINCE_CHARGED));

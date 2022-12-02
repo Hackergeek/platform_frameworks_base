@@ -48,6 +48,7 @@
 
 #include <jni.h>
 #include <nativehelper/JNIHelp.h>
+#include <nativehelper/ScopedUtfChars.h>
 
 using namespace android;
 using namespace img_utils;
@@ -81,6 +82,22 @@ using android::base::GetProperty;
         jniThrowExceptionFmt(jnienv, "java/lang/IllegalArgumentException", \
                 "Missing metadata fields for tag %s (%x)", (writer)->getTagName(tagId), (tagId)); \
         return nullptr; \
+    }
+
+#define BAIL_IF_EMPTY_RET_BOOL(entry, jnienv, tagId, writer)               \
+    if ((entry).count == 0) {                                              \
+        jniThrowExceptionFmt(jnienv, "java/lang/IllegalArgumentException", \
+                             "Missing metadata fields for tag %s (%x)",    \
+                             (writer)->getTagName(tagId), (tagId));        \
+        return false;                                                      \
+    }
+
+#define BAIL_IF_EMPTY_RET_STATUS(entry, jnienv, tagId, writer)             \
+    if ((entry).count == 0) {                                              \
+        jniThrowExceptionFmt(jnienv, "java/lang/IllegalArgumentException", \
+                             "Missing metadata fields for tag %s (%x)",    \
+                             (writer)->getTagName(tagId), (tagId));        \
+        return BAD_VALUE;                                                  \
     }
 
 #define BAIL_IF_EXPR_RET_NULL_SP(expr, jnienv, tagId, writer) \
@@ -764,15 +781,76 @@ uint32_t DirectStripSource::getIfd() const {
 // End of DirectStripSource
 // ----------------------------------------------------------------------------
 
+// Get the appropriate tag corresponding to default / maximum resolution mode.
+static int32_t getAppropriateModeTag(int32_t tag, bool maximumResolution) {
+    if (!maximumResolution) {
+        return tag;
+    }
+    switch (tag) {
+        case ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE:
+            return ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION;
+        case ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE:
+            return ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION;
+        case ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE:
+            return ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION;
+        default:
+            ALOGE("%s: Tag %d doesn't have sensor info related maximum resolution counterpart",
+                  __FUNCTION__, tag);
+            return -1;
+    }
+}
+
+static bool isMaximumResolutionModeImage(const CameraMetadata& characteristics, uint32_t imageWidth,
+                                         uint32_t imageHeight, const sp<TiffWriter> writer,
+                                         JNIEnv* env) {
+    // If this isn't an ultra-high resolution sensor, return false;
+    camera_metadata_ro_entry capabilitiesEntry =
+            characteristics.find(ANDROID_REQUEST_AVAILABLE_CAPABILITIES);
+    size_t capsCount = capabilitiesEntry.count;
+    const uint8_t* caps = capabilitiesEntry.data.u8;
+    if (std::find(caps, caps + capsCount,
+                  ANDROID_REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR) ==
+        caps + capsCount) {
+        // not an ultra-high resolution sensor, cannot have a maximum resolution
+        // mode image.
+        return false;
+    }
+
+    // If the image width and height are either the maximum resolution
+    // pre-correction active array size or the maximum resolution pixel array
+    // size, this image is a maximum resolution RAW_SENSOR image.
+
+    // Check dimensions
+    camera_metadata_ro_entry entry = characteristics.find(
+            ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION);
+
+    BAIL_IF_EMPTY_RET_BOOL(entry, env, TAG_IMAGEWIDTH, writer);
+
+    uint32_t preWidth = static_cast<uint32_t>(entry.data.i32[2]);
+    uint32_t preHeight = static_cast<uint32_t>(entry.data.i32[3]);
+
+    camera_metadata_ro_entry pixelArrayEntry =
+            characteristics.find(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION);
+
+    BAIL_IF_EMPTY_RET_BOOL(pixelArrayEntry, env, TAG_IMAGEWIDTH, writer);
+
+    uint32_t pixWidth = static_cast<uint32_t>(pixelArrayEntry.data.i32[0]);
+    uint32_t pixHeight = static_cast<uint32_t>(pixelArrayEntry.data.i32[1]);
+
+    return (imageWidth == preWidth && imageHeight == preHeight) ||
+            (imageWidth == pixWidth && imageHeight == pixHeight);
+}
+
 /**
  * Calculate the default crop relative to the "active area" of the image sensor (this active area
  * will always be the pre-correction active area rectangle), and set this.
  */
 static status_t calculateAndSetCrop(JNIEnv* env, const CameraMetadata& characteristics,
-        sp<TiffWriter> writer) {
-
-    camera_metadata_ro_entry entry =
-            characteristics.find(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE);
+                                    sp<TiffWriter> writer, bool maximumResolutionMode) {
+    camera_metadata_ro_entry entry = characteristics.find(
+            getAppropriateModeTag(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE,
+                                  maximumResolutionMode));
+    BAIL_IF_EMPTY_RET_STATUS(entry, env, TAG_IMAGEWIDTH, writer);
     uint32_t width = static_cast<uint32_t>(entry.data.i32[2]);
     uint32_t height = static_cast<uint32_t>(entry.data.i32[3]);
 
@@ -811,11 +889,18 @@ static bool validateDngHeader(JNIEnv* env, sp<TiffWriter> writer,
                         "Image height %d is invalid", height);
         return false;
     }
+    bool isMaximumResolutionMode =
+            isMaximumResolutionModeImage(characteristics, static_cast<uint32_t>(width),
+                                         static_cast<uint32_t>(height), writer, env);
 
-    camera_metadata_ro_entry preCorrectionEntry =
-            characteristics.find(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE);
-    camera_metadata_ro_entry pixelArrayEntry =
-            characteristics.find(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE);
+    camera_metadata_ro_entry preCorrectionEntry = characteristics.find(
+            getAppropriateModeTag(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE,
+                                  isMaximumResolutionMode));
+    BAIL_IF_EMPTY_RET_BOOL(preCorrectionEntry, env, TAG_IMAGEWIDTH, writer);
+
+    camera_metadata_ro_entry pixelArrayEntry = characteristics.find(
+            getAppropriateModeTag(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE, isMaximumResolutionMode));
+    BAIL_IF_EMPTY_RET_BOOL(pixelArrayEntry, env, TAG_IMAGEWIDTH, writer);
 
     int pWidth = static_cast<int>(pixelArrayEntry.data.i32[0]);
     int pHeight = static_cast<int>(pixelArrayEntry.data.i32[1]);
@@ -834,26 +919,6 @@ static bool validateDngHeader(JNIEnv* env, sp<TiffWriter> writer,
     }
 
     return true;
-}
-
-static status_t moveEntries(sp<TiffWriter> writer, uint32_t ifdFrom, uint32_t ifdTo,
-        const Vector<uint16_t>& entries) {
-    for (size_t i = 0; i < entries.size(); ++i) {
-        uint16_t tagId = entries[i];
-        sp<TiffEntry> entry = writer->getEntry(tagId, ifdFrom);
-        if (entry.get() == nullptr) {
-            ALOGE("%s: moveEntries failed, entry %u not found in IFD %u", __FUNCTION__, tagId,
-                    ifdFrom);
-            return BAD_VALUE;
-        }
-        if (writer->addEntry(entry, ifdTo) != OK) {
-            ALOGE("%s: moveEntries failed, could not add entry %u to IFD %u", __FUNCTION__, tagId,
-                    ifdFrom);
-            return BAD_VALUE;
-        }
-        writer->removeEntry(tagId, ifdFrom);
-    }
-    return OK;
 }
 
 /**
@@ -1200,16 +1265,14 @@ static void DngCreator_init(JNIEnv* env, jobject thiz, jobject characteristicsPt
 
     sp<NativeContext> nativeContext = new NativeContext(characteristics, results);
 
-    const char* captureTime = env->GetStringUTFChars(formattedCaptureTime, nullptr);
-
-    size_t len = strlen(captureTime) + 1;
-    if (len != NativeContext::DATETIME_COUNT) {
+    ScopedUtfChars captureTime(env, formattedCaptureTime);
+    if (captureTime.size() + 1 != NativeContext::DATETIME_COUNT) {
         jniThrowException(env, "java/lang/IllegalArgumentException",
                 "Formatted capture time string length is not required 20 characters");
         return;
     }
 
-    nativeContext->setCaptureTime(String8(captureTime));
+    nativeContext->setCaptureTime(String8(captureTime.c_str()));
 
     DngCreator_setNativeContext(env, thiz, nativeContext);
 }
@@ -1236,10 +1299,13 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
     uint32_t preHeight = 0;
     uint8_t colorFilter = 0;
     bool isBayer = true;
+    bool isMaximumResolutionMode =
+            isMaximumResolutionModeImage(characteristics, imageWidth, imageHeight, writer, env);
     {
         // Check dimensions
-        camera_metadata_entry entry =
-                characteristics.find(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE);
+        camera_metadata_entry entry = characteristics.find(
+                getAppropriateModeTag(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE,
+                                      isMaximumResolutionMode));
         BAIL_IF_EMPTY_RET_NULL_SP(entry, env, TAG_IMAGEWIDTH, writer);
         preXMin = static_cast<uint32_t>(entry.data.i32[0]);
         preYMin = static_cast<uint32_t>(entry.data.i32[1]);
@@ -1247,15 +1313,18 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
         preHeight = static_cast<uint32_t>(entry.data.i32[3]);
 
         camera_metadata_entry pixelArrayEntry =
-                characteristics.find(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE);
+                characteristics.find(getAppropriateModeTag(ANDROID_SENSOR_INFO_PIXEL_ARRAY_SIZE,
+                                                           isMaximumResolutionMode));
+
+        BAIL_IF_EMPTY_RET_NULL_SP(pixelArrayEntry, env, TAG_IMAGEWIDTH, writer);
         uint32_t pixWidth = static_cast<uint32_t>(pixelArrayEntry.data.i32[0]);
         uint32_t pixHeight = static_cast<uint32_t>(pixelArrayEntry.data.i32[1]);
 
         if (!((imageWidth == preWidth && imageHeight == preHeight) ||
                 (imageWidth == pixWidth && imageHeight == pixHeight))) {
             jniThrowException(env, "java/lang/AssertionError",
-                    "Height and width of image buffer did not match height and width of"
-                    "either the preCorrectionActiveArraySize or the pixelArraySize.");
+                              "Height and width of image buffer did not match height and width of"
+                              " either the preCorrectionActiveArraySize or the pixelArraySize.");
             return nullptr;
         }
 
@@ -1773,11 +1842,12 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
 
     {
         // Set dimensions
-        if (calculateAndSetCrop(env, characteristics, writer) != OK) {
+        if (calculateAndSetCrop(env, characteristics, writer, isMaximumResolutionMode) != OK) {
             return nullptr;
         }
-        camera_metadata_entry entry =
-                characteristics.find(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE);
+        camera_metadata_entry entry = characteristics.find(
+                getAppropriateModeTag(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE,
+                                      isMaximumResolutionMode));
         BAIL_IF_EMPTY_RET_NULL_SP(entry, env, TAG_ACTIVEAREA, writer);
         uint32_t xmin = static_cast<uint32_t>(entry.data.i32[0]);
         uint32_t ymin = static_cast<uint32_t>(entry.data.i32[1]);
@@ -1872,8 +1942,9 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
 
         camera_metadata_entry entry2 = results.find(ANDROID_STATISTICS_LENS_SHADING_MAP);
 
-        camera_metadata_entry entry =
-                characteristics.find(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE);
+        camera_metadata_entry entry = characteristics.find(
+                getAppropriateModeTag(ANDROID_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE,
+                                      isMaximumResolutionMode));
         BAIL_IF_EMPTY_RET_NULL_SP(entry, env, TAG_IMAGEWIDTH, writer);
         uint32_t xmin = static_cast<uint32_t>(entry.data.i32[0]);
         uint32_t ymin = static_cast<uint32_t>(entry.data.i32[1]);
@@ -1899,7 +1970,12 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
         // Hot pixel map is specific to bayer camera per DNG spec.
         if (isBayer) {
             // Set up bad pixel correction list
-            camera_metadata_entry entry3 = characteristics.find(ANDROID_STATISTICS_HOT_PIXEL_MAP);
+            // We first check the capture result. If the hot pixel map is not
+            // available, as a fallback, try the static characteristics.
+            camera_metadata_entry entry3 = results.find(ANDROID_STATISTICS_HOT_PIXEL_MAP);
+            if (entry3.count == 0) {
+                entry3 = characteristics.find(ANDROID_STATISTICS_HOT_PIXEL_MAP);
+            }
 
             if ((entry3.count % 2) != 0) {
                 ALOGE("%s: Hot pixel map contains odd number of values, cannot map to pairs!",
@@ -1908,7 +1984,8 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
                 return nullptr;
             }
 
-            // Adjust the bad pixel coordinates to be relative to the origin of the active area DNG tag
+            // Adjust the bad pixel coordinates to be relative to the origin of the active area
+            // DNG tag
             std::vector<uint32_t> v;
             for (size_t i = 0; i < entry3.count; i += 2) {
                 int32_t x = entry3.data.i32[i];
@@ -1962,6 +2039,8 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
         std::array<float, 6> distortion = {1.f, 0.f, 0.f, 0.f, 0.f, 0.f};
         bool gotDistortion = false;
 
+        // The capture result would have the correct intrinsic calibration
+        // regardless of the sensor pixel mode.
         camera_metadata_entry entry4 =
                 results.find(ANDROID_LENS_INTRINSIC_CALIBRATION);
 
@@ -2155,66 +2234,27 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
             }
         }
 
-        Vector<uint16_t> tagsToMove;
-        tagsToMove.add(TAG_NEWSUBFILETYPE);
-        tagsToMove.add(TAG_ACTIVEAREA);
-        tagsToMove.add(TAG_BITSPERSAMPLE);
-        tagsToMove.add(TAG_COMPRESSION);
-        tagsToMove.add(TAG_IMAGEWIDTH);
-        tagsToMove.add(TAG_IMAGELENGTH);
-        tagsToMove.add(TAG_PHOTOMETRICINTERPRETATION);
-        tagsToMove.add(TAG_BLACKLEVEL);
-        tagsToMove.add(TAG_BLACKLEVELREPEATDIM);
-        tagsToMove.add(TAG_SAMPLESPERPIXEL);
-        tagsToMove.add(TAG_PLANARCONFIGURATION);
-        if (isBayer) {
-            tagsToMove.add(TAG_CFAREPEATPATTERNDIM);
-            tagsToMove.add(TAG_CFAPATTERN);
-            tagsToMove.add(TAG_CFAPLANECOLOR);
-            tagsToMove.add(TAG_CFALAYOUT);
-        }
-        tagsToMove.add(TAG_XRESOLUTION);
-        tagsToMove.add(TAG_YRESOLUTION);
-        tagsToMove.add(TAG_RESOLUTIONUNIT);
-        tagsToMove.add(TAG_WHITELEVEL);
-        tagsToMove.add(TAG_DEFAULTSCALE);
-        tagsToMove.add(TAG_DEFAULTCROPORIGIN);
-        tagsToMove.add(TAG_DEFAULTCROPSIZE);
-
-        if (nullptr != writer->getEntry(TAG_OPCODELIST2, TIFF_IFD_0).get()) {
-            tagsToMove.add(TAG_OPCODELIST2);
-        }
-
-        if (nullptr != writer->getEntry(TAG_OPCODELIST3, TIFF_IFD_0).get()) {
-            tagsToMove.add(TAG_OPCODELIST3);
-        }
-
-        if (moveEntries(writer, TIFF_IFD_0, TIFF_IFD_SUB1, tagsToMove) != OK) {
-            jniThrowException(env, "java/lang/IllegalStateException", "Failed to move entries");
-            return nullptr;
-        }
-
         // Setup thumbnail tags
 
         {
             // Set photometric interpretation
             uint16_t interpretation = 2; // RGB
             BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_PHOTOMETRICINTERPRETATION, 1,
-                    &interpretation, TIFF_IFD_0), env, TAG_PHOTOMETRICINTERPRETATION, writer);
+                    &interpretation, TIFF_IFD_SUB1), env, TAG_PHOTOMETRICINTERPRETATION, writer);
         }
 
         {
             // Set planar configuration
             uint16_t config = 1; // Chunky
             BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_PLANARCONFIGURATION, 1, &config,
-                    TIFF_IFD_0), env, TAG_PLANARCONFIGURATION, writer);
+                    TIFF_IFD_SUB1), env, TAG_PLANARCONFIGURATION, writer);
         }
 
         {
             // Set samples per pixel
             uint16_t samples = SAMPLES_PER_RGB_PIXEL;
             BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_SAMPLESPERPIXEL, 1, &samples,
-                    TIFF_IFD_0), env, TAG_SAMPLESPERPIXEL, writer);
+                    TIFF_IFD_SUB1), env, TAG_SAMPLESPERPIXEL, writer);
         }
 
         {
@@ -2222,7 +2262,7 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
             uint16_t bits[SAMPLES_PER_RGB_PIXEL];
             for (int i = 0; i < SAMPLES_PER_RGB_PIXEL; i++) bits[i] = BITS_PER_RGB_SAMPLE;
             BAIL_IF_INVALID_RET_NULL_SP(
-                    writer->addEntry(TAG_BITSPERSAMPLE, SAMPLES_PER_RGB_PIXEL, bits, TIFF_IFD_0),
+                    writer->addEntry(TAG_BITSPERSAMPLE, SAMPLES_PER_RGB_PIXEL, bits, TIFF_IFD_SUB1),
                     env, TAG_BITSPERSAMPLE, writer);
         }
 
@@ -2230,55 +2270,55 @@ static sp<TiffWriter> DngCreator_setup(JNIEnv* env, jobject thiz, uint32_t image
             // Set subfiletype
             uint32_t subfileType = 1; // Thumbnail image
             BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_NEWSUBFILETYPE, 1, &subfileType,
-                    TIFF_IFD_0), env, TAG_NEWSUBFILETYPE, writer);
+                    TIFF_IFD_SUB1), env, TAG_NEWSUBFILETYPE, writer);
         }
 
         {
             // Set compression
             uint16_t compression = 1; // None
             BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_COMPRESSION, 1, &compression,
-                    TIFF_IFD_0), env, TAG_COMPRESSION, writer);
+                    TIFF_IFD_SUB1), env, TAG_COMPRESSION, writer);
         }
 
         {
             // Set dimensions
             uint32_t uWidth = nativeContext->getThumbnailWidth();
             uint32_t uHeight = nativeContext->getThumbnailHeight();
-            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_IMAGEWIDTH, 1, &uWidth, TIFF_IFD_0),
+            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_IMAGEWIDTH, 1, &uWidth, TIFF_IFD_SUB1),
                     env, TAG_IMAGEWIDTH, writer);
-            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_IMAGELENGTH, 1, &uHeight, TIFF_IFD_0),
-                    env, TAG_IMAGELENGTH, writer);
+            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_IMAGELENGTH, 1, &uHeight,
+                    TIFF_IFD_SUB1), env, TAG_IMAGELENGTH, writer);
         }
 
         {
             // x resolution
             uint32_t xres[] = { 72, 1 }; // default 72 ppi
-            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_XRESOLUTION, 1, xres, TIFF_IFD_0),
+            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_XRESOLUTION, 1, xres, TIFF_IFD_SUB1),
                     env, TAG_XRESOLUTION, writer);
 
             // y resolution
             uint32_t yres[] = { 72, 1 }; // default 72 ppi
-            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_YRESOLUTION, 1, yres, TIFF_IFD_0),
+            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_YRESOLUTION, 1, yres, TIFF_IFD_SUB1),
                     env, TAG_YRESOLUTION, writer);
 
             uint16_t unit = 2; // inches
-            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_RESOLUTIONUNIT, 1, &unit, TIFF_IFD_0),
-                    env, TAG_RESOLUTIONUNIT, writer);
+            BAIL_IF_INVALID_RET_NULL_SP(writer->addEntry(TAG_RESOLUTIONUNIT, 1, &unit,
+                    TIFF_IFD_SUB1), env, TAG_RESOLUTIONUNIT, writer);
         }
     }
 
     if (writer->addStrip(TIFF_IFD_0) != OK) {
-        ALOGE("%s: Could not setup thumbnail strip tags.", __FUNCTION__);
+        ALOGE("%s: Could not setup main image strip tags.", __FUNCTION__);
         jniThrowException(env, "java/lang/IllegalStateException",
-                "Failed to setup thumbnail strip tags.");
+                "Failed to setup main image strip tags.");
         return nullptr;
     }
 
     if (writer->hasIfd(TIFF_IFD_SUB1)) {
         if (writer->addStrip(TIFF_IFD_SUB1) != OK) {
-            ALOGE("%s: Could not main image strip tags.", __FUNCTION__);
+            ALOGE("%s: Could not thumbnail image strip tags.", __FUNCTION__);
             jniThrowException(env, "java/lang/IllegalStateException",
-                    "Failed to setup main image strip tags.");
+                    "Failed to setup thumbnail image strip tags.");
             return nullptr;
         }
     }
@@ -2448,19 +2488,15 @@ static void DngCreator_nativeWriteImage(JNIEnv* env, jobject thiz, jobject outSt
     Vector<StripSource*> sources;
     sp<DirectStripSource> thumbnailSource;
     uint32_t targetIfd = TIFF_IFD_0;
-
     bool hasThumbnail = writer->hasIfd(TIFF_IFD_SUB1);
-
     if (hasThumbnail) {
         ALOGV("%s: Adding thumbnail strip sources.", __FUNCTION__);
         uint32_t bytesPerPixel = SAMPLES_PER_RGB_PIXEL * BYTES_PER_RGB_SAMPLE;
         uint32_t thumbWidth = context->getThumbnailWidth();
-        thumbnailSource = new DirectStripSource(env, context->getThumbnail(), TIFF_IFD_0,
+        thumbnailSource = new DirectStripSource(env, context->getThumbnail(), TIFF_IFD_SUB1,
                 thumbWidth, context->getThumbnailHeight(), bytesPerPixel,
                 bytesPerPixel * thumbWidth, /*offset*/0, BYTES_PER_RGB_SAMPLE,
                 SAMPLES_PER_RGB_PIXEL);
-        sources.add(thumbnailSource.get());
-        targetIfd = TIFF_IFD_SUB1;
     }
 
     if (isDirect) {
@@ -2484,6 +2520,9 @@ static void DngCreator_nativeWriteImage(JNIEnv* env, jobject thiz, jobject outSt
         DirectStripSource stripSource(env, pixelBytes, targetIfd, uWidth, uHeight, pStride,
                 rStride, uOffset, BYTES_PER_SAMPLE, SAMPLES_PER_RAW_PIXEL);
         sources.add(&stripSource);
+        if (thumbnailSource.get() != nullptr) {
+            sources.add(thumbnailSource.get());
+        }
 
         status_t ret = OK;
         if ((ret = writer->write(out.get(), sources.editArray(), sources.size())) != OK) {
@@ -2501,6 +2540,9 @@ static void DngCreator_nativeWriteImage(JNIEnv* env, jobject thiz, jobject outSt
         InputStripSource stripSource(env, *inBuf, targetIfd, uWidth, uHeight, pStride,
                  rStride, uOffset, BYTES_PER_SAMPLE, SAMPLES_PER_RAW_PIXEL);
         sources.add(&stripSource);
+        if (thumbnailSource.get() != nullptr) {
+            sources.add(thumbnailSource.get());
+        }
 
         status_t ret = OK;
         if ((ret = writer->write(out.get(), sources.editArray(), sources.size())) != OK) {
@@ -2512,6 +2554,7 @@ static void DngCreator_nativeWriteImage(JNIEnv* env, jobject thiz, jobject outSt
             return;
         }
     }
+
 }
 
 static void DngCreator_nativeWriteInputStream(JNIEnv* env, jobject thiz, jobject outStream,
@@ -2554,20 +2597,8 @@ static void DngCreator_nativeWriteInputStream(JNIEnv* env, jobject thiz, jobject
 
     sp<DirectStripSource> thumbnailSource;
     uint32_t targetIfd = TIFF_IFD_0;
-    bool hasThumbnail = writer->hasIfd(TIFF_IFD_SUB1);
     Vector<StripSource*> sources;
 
-    if (hasThumbnail) {
-        ALOGV("%s: Adding thumbnail strip sources.", __FUNCTION__);
-        uint32_t bytesPerPixel = SAMPLES_PER_RGB_PIXEL * BYTES_PER_RGB_SAMPLE;
-        uint32_t width = context->getThumbnailWidth();
-        thumbnailSource = new DirectStripSource(env, context->getThumbnail(), TIFF_IFD_0,
-                width, context->getThumbnailHeight(), bytesPerPixel,
-                bytesPerPixel * width, /*offset*/0, BYTES_PER_RGB_SAMPLE,
-                SAMPLES_PER_RGB_PIXEL);
-        sources.add(thumbnailSource.get());
-        targetIfd = TIFF_IFD_SUB1;
-    }
 
     sp<JniInputStream> in = new JniInputStream(env, inStream);
 
@@ -2575,6 +2606,18 @@ static void DngCreator_nativeWriteInputStream(JNIEnv* env, jobject thiz, jobject
     InputStripSource stripSource(env, *in, targetIfd, uWidth, uHeight, pixStride,
              rowStride, uOffset, BYTES_PER_SAMPLE, SAMPLES_PER_RAW_PIXEL);
     sources.add(&stripSource);
+
+    bool hasThumbnail = writer->hasIfd(TIFF_IFD_SUB1);
+    if (hasThumbnail) {
+        ALOGV("%s: Adding thumbnail strip sources.", __FUNCTION__);
+        uint32_t bytesPerPixel = SAMPLES_PER_RGB_PIXEL * BYTES_PER_RGB_SAMPLE;
+        uint32_t width = context->getThumbnailWidth();
+        thumbnailSource = new DirectStripSource(env, context->getThumbnail(), TIFF_IFD_SUB1,
+                width, context->getThumbnailHeight(), bytesPerPixel,
+                bytesPerPixel * width, /*offset*/0, BYTES_PER_RGB_SAMPLE,
+                SAMPLES_PER_RGB_PIXEL);
+        sources.add(thumbnailSource.get());
+    }
 
     status_t ret = OK;
     if ((ret = writer->write(out.get(), sources.editArray(), sources.size())) != OK) {

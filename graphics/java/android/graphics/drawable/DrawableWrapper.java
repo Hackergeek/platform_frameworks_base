@@ -32,6 +32,7 @@ import android.graphics.Outline;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.Xfermode;
+import android.os.Build;
 import android.util.AttributeSet;
 import android.util.DisplayMetrics;
 import android.view.View;
@@ -47,7 +48,7 @@ import java.io.IOException;
  * Drawable container with only one child element.
  */
 public abstract class DrawableWrapper extends Drawable implements Drawable.Callback {
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private DrawableWrapperState mState;
     private Drawable mDrawable;
     private boolean mMutated;
@@ -345,14 +346,13 @@ public abstract class DrawableWrapper extends Drawable implements Drawable.Callb
         return mDrawable != null && mDrawable.isStateful();
     }
 
-    /** @hide */
     @Override
     public boolean hasFocusStateSpecified() {
         return mDrawable != null && mDrawable.hasFocusStateSpecified();
     }
 
     @Override
-    protected boolean onStateChange(int[] state) {
+    protected boolean onStateChange(@NonNull int[] state) {
         if (mDrawable != null && mDrawable.isStateful()) {
             final boolean changed = mDrawable.setState(state);
             if (changed) {

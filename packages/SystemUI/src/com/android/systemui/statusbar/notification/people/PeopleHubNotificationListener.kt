@@ -31,24 +31,23 @@ import android.util.SparseArray
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
-import com.android.internal.statusbar.NotificationVisibility
 import com.android.internal.widget.MessagingGroup
 import com.android.settingslib.notification.ConversationIconFactory
 import com.android.systemui.R
+import com.android.systemui.dagger.SysUISingleton
 import com.android.systemui.dagger.qualifiers.Background
 import com.android.systemui.dagger.qualifiers.Main
 import com.android.systemui.plugins.NotificationPersonExtractorPlugin
 import com.android.systemui.statusbar.NotificationListener
 import com.android.systemui.statusbar.NotificationLockscreenUserManager
-import com.android.systemui.statusbar.notification.NotificationEntryListener
-import com.android.systemui.statusbar.notification.NotificationEntryManager
 import com.android.systemui.statusbar.notification.collection.NotificationEntry
+import com.android.systemui.statusbar.notification.collection.notifcollection.CommonNotifCollection
+import com.android.systemui.statusbar.notification.collection.notifcollection.NotifCollectionListener
 import com.android.systemui.statusbar.notification.people.PeopleNotificationIdentifier.Companion.TYPE_NON_PERSON
 import com.android.systemui.statusbar.policy.ExtensionController
 import java.util.ArrayDeque
 import java.util.concurrent.Executor
 import javax.inject.Inject
-import javax.inject.Singleton
 
 private const val MAX_STORED_INACTIVE_PEOPLE = 10
 
@@ -58,7 +57,7 @@ interface NotificationPersonExtractor {
     fun isPersonNotification(sbn: StatusBarNotification): Boolean
 }
 
-@Singleton
+@SysUISingleton
 class NotificationPersonExtractorPluginBoundary @Inject constructor(
     extensionController: ExtensionController
 ) : NotificationPersonExtractor {
@@ -87,9 +86,9 @@ class NotificationPersonExtractorPluginBoundary @Inject constructor(
             plugin?.isPersonNotification(sbn) ?: false
 }
 
-@Singleton
+@SysUISingleton
 class PeopleHubDataSourceImpl @Inject constructor(
-    private val notificationEntryManager: NotificationEntryManager,
+    private val notifCollection: CommonNotifCollection,
     private val extractor: NotificationPersonExtractor,
     private val userManager: UserManager,
     launcherApps: LauncherApps,
@@ -119,19 +118,11 @@ class PeopleHubDataSourceImpl @Inject constructor(
         )
     }
 
-    private val notificationEntryListener = object : NotificationEntryListener {
-        override fun onEntryInflated(entry: NotificationEntry) = addVisibleEntry(entry)
-
-        override fun onEntryReinflated(entry: NotificationEntry) = addVisibleEntry(entry)
-
-        override fun onPostEntryUpdated(entry: NotificationEntry) = addVisibleEntry(entry)
-
-        override fun onEntryRemoved(
-            entry: NotificationEntry,
-            visibility: NotificationVisibility?,
-            removedByUser: Boolean,
-            reason: Int
-        ) = removeVisibleEntry(entry, reason)
+    private val notifCollectionListener = object : NotifCollectionListener {
+        override fun onEntryAdded(entry: NotificationEntry) = addVisibleEntry(entry)
+        override fun onEntryUpdated(entry: NotificationEntry) = addVisibleEntry(entry)
+        override fun onEntryRemoved(entry: NotificationEntry, reason: Int) =
+            removeVisibleEntry(entry, reason)
     }
 
     private fun removeVisibleEntry(entry: NotificationEntry, reason: Int) {
@@ -179,7 +170,7 @@ class PeopleHubDataSourceImpl @Inject constructor(
                             currentProfiles: SparseArray<UserInfo>?
                         ) = updateUi()
                     })
-            notificationEntryManager.addNotificationEntryListener(notificationEntryListener)
+            notifCollection.addCollectionListener(notifCollectionListener)
         } else {
             getPeopleHubModelForCurrentUser()?.let(listener::onDataChanged)
         }
@@ -189,8 +180,7 @@ class PeopleHubDataSourceImpl @Inject constructor(
                 if (dataListeners.isEmpty()) {
                     userChangeSubscription?.unsubscribe()
                     userChangeSubscription = null
-                    notificationEntryManager
-                            .removeNotificationEntryListener(notificationEntryListener)
+                    notifCollection.removeCollectionListener(notifCollectionListener)
                 }
             }
         }
@@ -214,13 +204,13 @@ class PeopleHubDataSourceImpl @Inject constructor(
     }
 
     private fun NotificationEntry.extractPerson(): PersonModel? {
-        val type = peopleNotificationIdentifier.getPeopleNotificationType(sbn, ranking)
+        val type = peopleNotificationIdentifier.getPeopleNotificationType(this)
         if (type == TYPE_NON_PERSON) {
             return null
         }
         val clickRunnable = Runnable { notificationListener.unsnoozeNotification(key) }
         val extras = sbn.notification.extras
-        val name = ranking.shortcutInfo?.label
+        val name = ranking.conversationShortcutInfo?.label
                 ?: extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
                 ?: extras.getCharSequence(Notification.EXTRA_TITLE)
                 ?: return null
@@ -238,9 +228,9 @@ class PeopleHubDataSourceImpl @Inject constructor(
         iconFactory: ConversationIconFactory,
         sbn: StatusBarNotification
     ): Drawable? =
-            shortcutInfo?.let { shortcutInfo ->
+            conversationShortcutInfo?.let { conversationShortcutInfo ->
                 iconFactory.getConversationDrawable(
-                        shortcutInfo,
+                        conversationShortcutInfo,
                         sbn.packageName,
                         sbn.uid,
                         channel.isImportantConversation
@@ -249,7 +239,7 @@ class PeopleHubDataSourceImpl @Inject constructor(
 
     private fun NotificationEntry.extractPersonKey(): PersonKey? {
         // TODO migrate to shortcut id when snoozing is conversation wide
-        val type = peopleNotificationIdentifier.getPeopleNotificationType(sbn, ranking)
+        val type = peopleNotificationIdentifier.getPeopleNotificationType(this)
         return if (type != TYPE_NON_PERSON) key else null
     }
 }

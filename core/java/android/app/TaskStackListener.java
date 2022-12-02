@@ -17,12 +17,11 @@
 package android.app;
 
 import android.app.ActivityManager.RunningTaskInfo;
-import android.app.ActivityManager.TaskSnapshot;
 import android.compat.annotation.UnsupportedAppUsage;
 import android.content.ComponentName;
-import android.os.Binder;
-import android.os.IBinder;
+import android.os.Build;
 import android.os.RemoteException;
+import android.window.TaskSnapshot;
 
 /**
  * Classes interested in observing only a subset of changes using ITaskStackListener can extend
@@ -32,41 +31,49 @@ import android.os.RemoteException;
  */
 public abstract class TaskStackListener extends ITaskStackListener.Stub {
 
+    /** Whether this listener and the callback dispatcher are in different processes. */
+    private boolean mIsRemote = true;
+
     @UnsupportedAppUsage
     public TaskStackListener() {
     }
 
+    /** Indicates that this listener lives in system server. */
+    public void setIsLocal() {
+        mIsRemote = false;
+    }
+
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onTaskStackChanged() throws RemoteException {
     }
 
     @Override
-    @UnsupportedAppUsage
-    public void onActivityPinned(String packageName, int userId, int taskId, int stackId)
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public void onActivityPinned(String packageName, int userId, int taskId, int rootTaskId)
             throws RemoteException {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onActivityUnpinned() throws RemoteException {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onActivityRestartAttempt(RunningTaskInfo task, boolean homeTaskVisible,
             boolean clearedTask, boolean wasVisible) throws RemoteException {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onActivityForcedResizable(String packageName, int taskId, int reason)
             throws RemoteException {
     }
 
     @Override
-    @UnsupportedAppUsage
-    public void onActivityDismissingDockedStack() throws RemoteException {
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public void onActivityDismissingDockedTask() throws RemoteException {
     }
 
     @Override
@@ -80,12 +87,12 @@ public abstract class TaskStackListener extends ITaskStackListener.Stub {
      *         #onActivityLaunchOnSecondaryDisplayFailed(RunningTaskInfo, int)}
      */
     @Deprecated
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onActivityLaunchOnSecondaryDisplayFailed() throws RemoteException {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onActivityLaunchOnSecondaryDisplayRerouted(RunningTaskInfo taskInfo,
             int requestedDisplayId) throws RemoteException {
     }
@@ -95,7 +102,7 @@ public abstract class TaskStackListener extends ITaskStackListener.Stub {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onTaskRemoved(int taskId) throws RemoteException {
     }
 
@@ -109,7 +116,7 @@ public abstract class TaskStackListener extends ITaskStackListener.Stub {
      * @deprecated see {@link #onTaskMovedToFront(RunningTaskInfo)}
      */
     @Deprecated
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onTaskMovedToFront(int taskId) throws RemoteException {
     }
 
@@ -141,43 +148,28 @@ public abstract class TaskStackListener extends ITaskStackListener.Stub {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onActivityRequestedOrientationChanged(int taskId, int requestedOrientation)
             throws RemoteException {
     }
 
     @Override
-    @UnsupportedAppUsage
-    public void onTaskProfileLocked(int taskId, int userId) throws RemoteException {
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
+    public void onTaskProfileLocked(RunningTaskInfo taskInfo) throws RemoteException {
     }
 
     @Override
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public void onTaskSnapshotChanged(int taskId, TaskSnapshot snapshot) throws RemoteException {
-        if (Binder.getCallingPid() != android.os.Process.myPid()
-                && snapshot != null && snapshot.getSnapshot() != null) {
+        if (mIsRemote && snapshot != null && snapshot.getHardwareBuffer() != null) {
             // Preemptively clear any reference to the buffer
-            snapshot.getSnapshot().destroy();
+            snapshot.getHardwareBuffer().close();
         }
-    }
-
-    @Override
-    @UnsupportedAppUsage
-    public void onSizeCompatModeActivityChanged(int displayId, IBinder activityToken)
-            throws RemoteException {
     }
 
     @Override
     public void onBackPressedOnTaskRoot(RunningTaskInfo taskInfo)
             throws RemoteException {
-    }
-
-    @Override
-    public void onSingleTaskDisplayDrawn(int displayId) throws RemoteException {
-    }
-
-    @Override
-    public void onSingleTaskDisplayEmpty(int displayId) throws RemoteException {
     }
 
     @Override
@@ -202,5 +194,13 @@ public abstract class TaskStackListener extends ITaskStackListener.Stub {
 
     @Override
     public void onActivityRotation(int displayId) {
+    }
+
+    @Override
+    public void onTaskMovedToBack(RunningTaskInfo taskInfo) {
+    }
+
+    @Override
+    public void onLockTaskModeChanged(int mode) {
     }
 }

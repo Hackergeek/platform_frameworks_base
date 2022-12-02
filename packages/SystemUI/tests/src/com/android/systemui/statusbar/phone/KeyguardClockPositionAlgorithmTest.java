@@ -16,64 +16,104 @@
 
 package com.android.systemui.statusbar.phone;
 
+import static com.android.dx.mockito.inline.extended.ExtendedMockito.mockitoSession;
+
 import static com.google.common.truth.Truth.assertThat;
 
+import static org.mockito.AdditionalAnswers.returnsFirstArg;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.when;
+
+import android.content.res.Resources;
 import android.testing.AndroidTestingRunner;
-import android.testing.TestableLooper;
 
 import androidx.test.filters.SmallTest;
 
+import com.android.systemui.R;
 import com.android.systemui.SysuiTestCase;
+import com.android.systemui.doze.util.BurnInHelperKt;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+import org.mockito.MockitoSession;
 
 @SmallTest
 @RunWith(AndroidTestingRunner.class)
-@TestableLooper.RunWithLooper
 public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
-
     private static final int SCREEN_HEIGHT = 2000;
-    private static final int PREFERRED_CLOCK_Y = SCREEN_HEIGHT / 2;
-    private static final int EMPTY_MARGIN = 0;
     private static final int EMPTY_HEIGHT = 0;
     private static final float ZERO_DRAG = 0.f;
     private static final float OPAQUE = 1.f;
     private static final float TRANSPARENT = 0.f;
-    private static final boolean HAS_CUSTOM_CLOCK = false;
-    private static final boolean HAS_VISIBLE_NOTIFS = false;
+
+    @Mock
+    private Resources mResources;
 
     private KeyguardClockPositionAlgorithm mClockPositionAlgorithm;
     private KeyguardClockPositionAlgorithm.Result mClockPosition;
-    private int mNotificationStackHeight;
+
+    private MockitoSession mStaticMockSession;
+
     private float mPanelExpansion;
+    private int mKeyguardStatusBarHeaderHeight;
     private int mKeyguardStatusHeight;
+    private int mUserSwitchHeight;
     private float mDark;
-    private int mPreferredClockY;
-    private boolean mHasCustomClock;
-    private boolean mHasVisibleNotifs;
+    private float mQsExpansion;
+    private int mCutoutTopInset = 0;
+    private boolean mIsSplitShade = false;
+    private float mUdfpsTop = -1;
+    private float mClockBottom = SCREEN_HEIGHT / 2;
+    private boolean mClockTopAligned;
 
     @Before
     public void setUp() {
-        mClockPositionAlgorithm = new KeyguardClockPositionAlgorithm();
-        mClockPosition = new KeyguardClockPositionAlgorithm.Result();
+        MockitoAnnotations.initMocks(this);
+        mStaticMockSession = mockitoSession()
+                .mockStatic(BurnInHelperKt.class)
+                .startMocking();
 
-        mPreferredClockY = PREFERRED_CLOCK_Y;
-        mHasCustomClock = HAS_CUSTOM_CLOCK;
-        mHasVisibleNotifs = HAS_VISIBLE_NOTIFS;
+        mClockPositionAlgorithm = new KeyguardClockPositionAlgorithm();
+        when(mResources.getDimensionPixelSize(anyInt())).thenReturn(0);
+        mClockPositionAlgorithm.loadDimens(mResources);
+
+        mClockPosition = new KeyguardClockPositionAlgorithm.Result();
+    }
+
+    @After
+    public void tearDown() {
+        mStaticMockSession.finishMocking();
     }
 
     @Test
-    public void clockPositionMiddleOfScreenOnAOD() {
-        // GIVEN on AOD and both stack scroll and clock have 0 height
+    public void clockPositionTopOfScreenOnAOD() {
+        // GIVEN on AOD and clock has 0 height
         givenAOD();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = EMPTY_HEIGHT;
         // WHEN the clock position algorithm is run
         positionClock();
-        // THEN the clock Y position is the middle of the screen (SCREEN_HEIGHT / 2).
-        assertThat(mClockPosition.clockY).isEqualTo(1000);
+        // THEN the clock Y position is the top of the screen
+        assertThat(mClockPosition.clockY).isEqualTo(0);
+        // AND the clock is opaque and positioned on the left.
+        assertThat(mClockPosition.clockX).isEqualTo(0);
+        assertThat(mClockPosition.clockAlpha).isEqualTo(OPAQUE);
+    }
+
+    @Test
+    public void clockPositionBelowCutout() {
+        // GIVEN on AOD and clock has 0 height
+        givenAOD();
+        mKeyguardStatusHeight = EMPTY_HEIGHT;
+        mCutoutTopInset = 300;
+        // WHEN the clock position algorithm is run
+        positionClock();
+        // THEN the clock Y position is below the cutout
+        assertThat(mClockPosition.clockY).isEqualTo(300);
         // AND the clock is opaque and positioned on the left.
         assertThat(mClockPosition.clockX).isEqualTo(0);
         assertThat(mClockPosition.clockAlpha).isEqualTo(OPAQUE);
@@ -83,12 +123,11 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
     public void clockPositionAdjustsForKeyguardStatusOnAOD() {
         // GIVEN on AOD with a clock of height 100
         givenAOD();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = 100;
         // WHEN the clock position algorithm is run
         positionClock();
-        // THEN the clock Y position adjusts for the clock height (SCREEN_HEIGHT / 2 - 100).
-        assertThat(mClockPosition.clockY).isEqualTo(900);
+        // THEN the clock Y position is at the top
+        assertThat(mClockPosition.clockY).isEqualTo(0);
         // AND the clock is opaque and positioned on the left.
         assertThat(mClockPosition.clockX).isEqualTo(0);
         assertThat(mClockPosition.clockAlpha).isEqualTo(OPAQUE);
@@ -98,7 +137,6 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
     public void clockPositionLargeClockOnAOD() {
         // GIVEN on AOD with a full screen clock
         givenAOD();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = SCREEN_HEIGHT;
         // WHEN the clock position algorithm is run
         positionClock();
@@ -110,40 +148,22 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
     }
 
     @Test
-    public void clockPositionMiddleOfScreenOnLockScreen() {
-        // GIVEN on lock screen with stack scroll and clock of 0 height
+    public void clockPositionTopOfScreenOnLockScreen() {
+        // GIVEN on lock screen with clock of 0 height
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = EMPTY_HEIGHT;
         // WHEN the clock position algorithm is run
         positionClock();
-        // THEN the clock Y position is the middle of the screen (SCREEN_HEIGHT / 2).
-        assertThat(mClockPosition.clockY).isEqualTo(1000);
-        // AND the clock is opaque and positioned on the left.
+        // THEN the clock Y position is the top of the screen
+        assertThat(mClockPosition.clockY).isEqualTo(0);
+        // AND the clock is positioned on the left.
         assertThat(mClockPosition.clockX).isEqualTo(0);
-        assertThat(mClockPosition.clockAlpha).isEqualTo(OPAQUE);
-    }
-
-    @Test
-    public void clockPositionWithStackScrollExpandOnLockScreen() {
-        // GIVEN on lock screen with stack scroll of height 500
-        givenLockScreen();
-        mNotificationStackHeight = 500;
-        mKeyguardStatusHeight = EMPTY_HEIGHT;
-        // WHEN the clock position algorithm is run
-        positionClock();
-        // THEN the clock Y position adjusts for stack scroll height ( (SCREEN_HEIGHT - 500 ) / 2).
-        assertThat(mClockPosition.clockY).isEqualTo(750);
-        // AND the clock is opaque and positioned on the left.
-        assertThat(mClockPosition.clockX).isEqualTo(0);
-        assertThat(mClockPosition.clockAlpha).isEqualTo(OPAQUE);
     }
 
     @Test
     public void clockPositionWithPartialDragOnLockScreen() {
         // GIVEN dragging up on lock screen
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = EMPTY_HEIGHT;
         mPanelExpansion = 0.5f;
         // WHEN the clock position algorithm is run
@@ -159,7 +179,6 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
     public void clockPositionWithFullDragOnLockScreen() {
         // GIVEN the lock screen is dragged up
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = EMPTY_HEIGHT;
         mPanelExpansion = 0.f;
         // WHEN the clock position algorithm is run
@@ -172,7 +191,6 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
     public void largeClockOnLockScreenIsTransparent() {
         // GIVEN on lock screen with a full screen clock
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = SCREEN_HEIGHT;
         // WHEN the clock position algorithm is run
         positionClock();
@@ -181,34 +199,31 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
     }
 
     @Test
-    public void notifPositionMiddleOfScreenOnAOD() {
-        // GIVEN on AOD and both stack scroll and clock have 0 height
+    public void notifPositionTopOfScreenOnAOD() {
+        // GIVEN on AOD and clock has 0 height
         givenAOD();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = EMPTY_HEIGHT;
         // WHEN the position algorithm is run
         positionClock();
-        // THEN the notif padding is half of the screen (SCREEN_HEIGHT / 2).
-        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(1000);
+        // THEN the notif padding is 0 (top of screen)
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(0);
     }
 
     @Test
     public void notifPositionIndependentOfKeyguardStatusHeightOnAOD() {
         // GIVEN on AOD and clock has a nonzero height
         givenAOD();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = 100;
         // WHEN the position algorithm is run
         positionClock();
-        // THEN the notif padding is half of the screen (SCREEN_HEIGHT / 2).
-        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(1000);
+        // THEN the notif padding adjusts for keyguard status height
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(100);
     }
 
     @Test
     public void notifPositionWithLargeClockOnAOD() {
         // GIVEN on AOD and clock has a nonzero height
         givenAOD();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = SCREEN_HEIGHT;
         // WHEN the position algorithm is run
         positionClock();
@@ -218,69 +233,128 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
 
     @Test
     public void notifPositionMiddleOfScreenOnLockScreen() {
-        // GIVEN on lock screen and both stack scroll and clock have 0 height
+        // GIVEN on lock screen and clock has 0 height
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = EMPTY_HEIGHT;
         // WHEN the position algorithm is run
         positionClock();
-        // THEN the notif padding is half of the screen (SCREEN_HEIGHT / 2).
-        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(1000);
-    }
-
-    @Test
-    public void notifPositionAdjustsForStackHeightOnLockScreen() {
-        // GIVEN on lock screen and stack scroller has a nonzero height
-        givenLockScreen();
-        mNotificationStackHeight = 500;
-        mKeyguardStatusHeight = EMPTY_HEIGHT;
-        // WHEN the position algorithm is run
-        positionClock();
-        // THEN the notif padding adjusts for the expanded notif stack.
-        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(750);
+        // THEN the notif are placed to the top of the screen
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(0);
     }
 
     @Test
     public void notifPositionAdjustsForClockHeightOnLockScreen() {
         // GIVEN on lock screen and stack scroller has a nonzero height
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = 200;
         // WHEN the position algorithm is run
         positionClock();
-        // THEN the notif padding adjusts for both clock and notif stack.
-        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(1000);
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(200);
     }
 
     @Test
-    public void notifPositionAdjustsForStackHeightAndClockHeightOnLockScreen() {
-        // GIVEN on lock screen and stack scroller has a nonzero height
+    public void notifPositionAlignedWithClockInSplitShadeMode() {
         givenLockScreen();
-        mNotificationStackHeight = 500;
+        mIsSplitShade = true;
         mKeyguardStatusHeight = 200;
         // WHEN the position algorithm is run
         positionClock();
-        // THEN the notif padding adjusts for both clock and notif stack.
-        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(810);
+        // THEN the notif padding DOESN'T adjust for keyguard status height.
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(0);
+    }
+
+    @Test
+    public void clockPositionedDependingOnMarginInSplitShade() {
+        setSplitShadeTopMargin(400);
+        mClockPositionAlgorithm.loadDimens(mResources);
+        givenLockScreen();
+        mIsSplitShade = true;
+        // WHEN the position algorithm is run
+        positionClock();
+
+        assertThat(mClockPosition.clockY).isEqualTo(400);
+    }
+
+    @Test
+    public void notifPaddingMakesUpToFullMarginInSplitShade() {
+        when(mResources.getDimensionPixelSize(R.dimen.keyguard_split_shade_top_margin))
+                .thenReturn(100);
+        when(mResources.getDimensionPixelSize(R.dimen.large_screen_shade_header_height))
+                .thenReturn(70);
+        mClockPositionAlgorithm.loadDimens(mResources);
+        givenLockScreen();
+        mIsSplitShade = true;
+        // WHEN the position algorithm is run
+        positionClock();
+        // THEN the notif padding makes up lacking margin (margin - header height = 30).
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(30);
+    }
+
+    @Test
+    public void notifPaddingAccountsForMultiUserSwitcherInSplitShade() {
+        setSplitShadeTopMargin(100);
+        mUserSwitchHeight = 150;
+        mClockPositionAlgorithm.loadDimens(mResources);
+        givenLockScreen();
+        mIsSplitShade = true;
+        // WHEN the position algorithm is run
+        positionClock();
+        // THEN the notif padding is split shade top margin + user switch height
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(250);
+    }
+
+    @Test
+    public void clockDoesntAccountForMultiUserSwitcherInSplitShade() {
+        setSplitShadeTopMargin(100);
+        mUserSwitchHeight = 150;
+        mClockPositionAlgorithm.loadDimens(mResources);
+        givenLockScreen();
+        mIsSplitShade = true;
+        // WHEN the position algorithm is run
+        positionClock();
+        // THEN clockY = split shade top margin
+        assertThat(mClockPosition.clockY).isEqualTo(100);
+    }
+
+    @Test
+    public void notifPaddingExpandedAlignedWithClockInSplitShadeMode() {
+        givenLockScreen();
+        mIsSplitShade = true;
+        mKeyguardStatusHeight = 200;
+        // WHEN the position algorithm is run
+        positionClock();
+        // THEN the padding DOESN'T adjust for keyguard status height.
+        assertThat(mClockPosition.stackScrollerPaddingExpanded)
+                .isEqualTo(mClockPosition.clockY);
+    }
+
+    @Test
+    public void notifMinPaddingAlignedWithClockInSplitShadeMode() {
+        givenLockScreen();
+        mIsSplitShade = true;
+        mKeyguardStatusHeight = 200;
+        // WHEN the position algorithm is run
+        positionClock();
+        // THEN the padding DOESN'T adjust for keyguard status height.
+        assertThat(mClockPositionAlgorithm.getLockscreenMinStackScrollerPadding())
+                .isEqualTo(mKeyguardStatusBarHeaderHeight);
     }
 
     @Test
     public void notifPositionWithLargeClockOnLockScreen() {
         // GIVEN on lock screen and clock has a nonzero height
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = SCREEN_HEIGHT;
         // WHEN the position algorithm is run
         positionClock();
-        // THEN the notif padding is half of the screen (SCREEN_HEIGHT / 2).
-        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(1000);
+        // THEN the notif padding is below keyguard status area
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(SCREEN_HEIGHT);
     }
 
     @Test
     public void notifPositionWithFullDragOnLockScreen() {
         // GIVEN the lock screen is dragged up
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = EMPTY_HEIGHT;
         mPanelExpansion = 0.f;
         // WHEN the clock position algorithm is run
@@ -293,81 +367,177 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
     public void notifPositionWithLargeClockFullDragOnLockScreen() {
         // GIVEN the lock screen is dragged up and a full screen clock
         givenLockScreen();
-        mNotificationStackHeight = EMPTY_HEIGHT;
         mKeyguardStatusHeight = SCREEN_HEIGHT;
         mPanelExpansion = 0.f;
         // WHEN the clock position algorithm is run
         positionClock();
-        // THEN the notif padding is zero.
-        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(0);
+        assertThat(mClockPosition.stackScrollerPadding).isEqualTo(
+                (int) (mKeyguardStatusHeight * .667f));
     }
 
     @Test
-    public void preferredCustomClockPositionNoNotifications() {
-        // GIVEN on the lock screen with a custom clock and no visible notifications
+    public void clockHiddenWhenQsIsExpanded() {
+        // GIVEN on the lock screen with visible notifications
         givenLockScreen();
-        mPreferredClockY = 100;
-        mHasCustomClock = true;
-        mHasVisibleNotifs = false;
-        // AND given empty height for clock and stack scroller
-        mNotificationStackHeight = EMPTY_HEIGHT;
-        mKeyguardStatusHeight = EMPTY_HEIGHT;
-        // WHEN the clock position algorithm is run
-        positionClock();
-        // THEN the clock Y position is the preferred Y position.
-        assertThat(mClockPosition.clockY).isEqualTo(100);
-        assertThat(mClockPosition.clockAlpha).isEqualTo(OPAQUE);
-    }
-
-    @Test
-    public void preferredDefaultClockPositionNoNotifications() {
-        // GIVEN on the lock screen with a custom clock and no visible notifications
-        givenLockScreen();
-        mPreferredClockY = 100;
-        mHasCustomClock = false;
-        mHasVisibleNotifs = false;
-        // AND given empty height for clock and stack scroller
-        mNotificationStackHeight = EMPTY_HEIGHT;
-        mKeyguardStatusHeight = EMPTY_HEIGHT;
-        // WHEN the clock position algorithm is run
-        positionClock();
-        // THEN the clock Y position is the middle of the screen (SCREEN_HEIGHT / 2) and not
-        // preferred.
-        assertThat(mClockPosition.clockY).isEqualTo(1000);
-        assertThat(mClockPosition.clockAlpha).isEqualTo(OPAQUE);
-    }
-
-    @Test
-    public void preferredCustomClockPositionWithVisibleNotifications() {
-        // GIVEN on the lock screen with a custom clock and visible notifications
-        givenLockScreen();
-        mPreferredClockY = 100;
-        mHasCustomClock = true;
-        mHasVisibleNotifs = true;
-        // AND given empty height for clock and stack scroller
-        mNotificationStackHeight = EMPTY_HEIGHT;
-        mKeyguardStatusHeight = EMPTY_HEIGHT;
+        mQsExpansion = 1;
         // WHEN the clock position algorithm is run
         positionClock();
         // THEN the clock Y position is the middle of the screen (SCREEN_HEIGHT / 2).
-        assertThat(mClockPosition.clockY).isEqualTo(1000);
-        assertThat(mClockPosition.clockAlpha).isEqualTo(OPAQUE);
+        assertThat(mClockPosition.clockAlpha).isEqualTo(TRANSPARENT);
     }
 
     @Test
-    public void preferredCustomClockPositionWithVisibleNotificationsOnAod() {
-        // GIVEN on the lock screen with a custom clock and visible notifications
+    public void clockPositionMinimizesBurnInMovementToAvoidUdfpsOnAOD() {
+        // GIVEN a center aligned clock
+        mClockTopAligned = false;
+
+        // GIVEN the clock + udfps are 100px apart
+        mClockBottom = SCREEN_HEIGHT - 500;
+        mUdfpsTop = SCREEN_HEIGHT - 400;
+
+        // GIVEN it's AOD and the burn-in y value is 200
         givenAOD();
-        mPreferredClockY = 100;
-        mHasCustomClock = true;
-        mHasVisibleNotifs = true;
-        // AND given empty height for clock and stack scroller
-        mNotificationStackHeight = EMPTY_HEIGHT;
-        mKeyguardStatusHeight = EMPTY_HEIGHT;
-        // WHEN the clock position algorithm is run
+        givenMaxBurnInOffset(200);
+
+        // WHEN the clock position algorithm is run with the highest burn in offset
+        givenHighestBurnInOffset();
         positionClock();
-        // THEN the clock Y position is the preferred Y position.
+
+        // THEN the worst-case clock Y position is shifted only by 100 (not the full 200),
+        // so that it's at the same location as mUdfpsTop
         assertThat(mClockPosition.clockY).isEqualTo(100);
+
+        // WHEN the clock position algorithm is run with the lowest burn in offset
+        givenLowestBurnInOffset();
+        positionClock();
+
+        // THEN lowest case starts at 0
+        assertThat(mClockPosition.clockY).isEqualTo(0);
+    }
+
+    @Test
+    public void clockPositionShiftsToAvoidUdfpsOnAOD_usesSpaceAboveClock() {
+        // GIVEN a center aligned clock
+        mClockTopAligned = false;
+
+        // GIVEN there's space at the top of the screen on LS (that's available to be used for
+        // burn-in on AOD)
+        mKeyguardStatusBarHeaderHeight = 150;
+
+        // GIVEN the bottom of the clock is beyond the top of UDFPS
+        mClockBottom = SCREEN_HEIGHT - 300;
+        mUdfpsTop = SCREEN_HEIGHT - 400;
+
+        // GIVEN it's AOD and the burn-in y value is 200
+        givenAOD();
+        givenMaxBurnInOffset(200);
+
+        // WHEN the clock position algorithm is run with the highest burn in offset
+        givenHighestBurnInOffset();
+        positionClock();
+
+        // THEN the algo should shift the clock up and use the area above the clock for
+        // burn-in since the burn in offset > space above clock
+        assertThat(mClockPosition.clockY).isEqualTo(mKeyguardStatusBarHeaderHeight);
+
+        // WHEN the clock position algorithm is run with the lowest burn in offset
+        givenLowestBurnInOffset();
+        positionClock();
+
+        // THEN lowest case starts at mCutoutTopInset (0 in this case)
+        assertThat(mClockPosition.clockY).isEqualTo(mCutoutTopInset);
+    }
+
+    @Test
+    public void clockPositionShiftsToAvoidUdfpsOnAOD_usesMaxBurnInOffset() {
+        // GIVEN a center aligned clock
+        mClockTopAligned = false;
+
+        // GIVEN there's 200px space at the top of the screen on LS (that's available to be used for
+        // burn-in on AOD) but 50px are taken up by the cutout
+        mKeyguardStatusBarHeaderHeight = 200;
+        mCutoutTopInset = 50;
+
+        // GIVEN the bottom of the clock is beyond the top of UDFPS
+        mClockBottom = SCREEN_HEIGHT - 300;
+        mUdfpsTop = SCREEN_HEIGHT - 400;
+
+        // GIVEN it's AOD and the burn-in y value is only 25px (less than space above clock)
+        givenAOD();
+        int maxYBurnInOffset = 25;
+        givenMaxBurnInOffset(maxYBurnInOffset);
+
+        // WHEN the clock position algorithm is run with the highest burn in offset
+        givenHighestBurnInOffset();
+        positionClock();
+
+        // THEN the algo should shift the clock up and use the area above the clock for
+        // burn-in
+        assertThat(mClockPosition.clockY).isEqualTo(mKeyguardStatusBarHeaderHeight);
+
+        // WHEN the clock position algorithm is run with the lowest burn in offset
+        givenLowestBurnInOffset();
+        positionClock();
+
+        // THEN lowest case starts above mKeyguardStatusBarHeaderHeight
+        assertThat(mClockPosition.clockY).isEqualTo(
+                mKeyguardStatusBarHeaderHeight - 2 * maxYBurnInOffset);
+    }
+
+    @Test
+    public void clockPositionShiftsToMaximizeUdfpsBurnInMovement() {
+        // GIVEN a center aligned clock
+        mClockTopAligned = false;
+
+        // GIVEN there's 200px space at the top of the screen on LS (that's available to be used for
+        // burn-in on AOD) but 50px are taken up by the cutout
+        mKeyguardStatusBarHeaderHeight = 200;
+        mCutoutTopInset = 50;
+        int upperSpaceAvailable = mKeyguardStatusBarHeaderHeight - mCutoutTopInset;
+
+        // GIVEN the bottom of the clock and the top of UDFPS are 100px apart
+        mClockBottom = SCREEN_HEIGHT - 500;
+        mUdfpsTop = SCREEN_HEIGHT - 400;
+        float lowerSpaceAvailable = mUdfpsTop - mClockBottom;
+
+        // GIVEN it's AOD and the burn-in y value is 200
+        givenAOD();
+        givenMaxBurnInOffset(200);
+
+        // WHEN the clock position algorithm is run with the highest burn in offset
+        givenHighestBurnInOffset();
+        positionClock();
+
+        // THEN the algo should shift the clock up and use both the area above
+        // the clock and below the clock (vertically centered in its allowed area)
+        assertThat(mClockPosition.clockY).isEqualTo(
+                (int) (mCutoutTopInset + upperSpaceAvailable + lowerSpaceAvailable));
+
+        // WHEN the clock position algorithm is run with the lowest burn in offset
+        givenLowestBurnInOffset();
+        positionClock();
+
+        // THEN lowest case starts at mCutoutTopInset
+        assertThat(mClockPosition.clockY).isEqualTo(mCutoutTopInset);
+    }
+
+    private void setSplitShadeTopMargin(int value) {
+        when(mResources.getDimensionPixelSize(R.dimen.keyguard_split_shade_top_margin))
+                .thenReturn(value);
+    }
+
+    private void givenHighestBurnInOffset() {
+        when(BurnInHelperKt.getBurnInOffset(anyInt(), anyBoolean())).then(returnsFirstArg());
+    }
+
+    private void givenLowestBurnInOffset() {
+        when(BurnInHelperKt.getBurnInOffset(anyInt(), anyBoolean())).thenReturn(0);
+    }
+
+    private void givenMaxBurnInOffset(int offset) {
+        when(mResources.getDimensionPixelSize(R.dimen.burn_in_prevention_offset_y_clock))
+                .thenReturn(offset);
+        mClockPositionAlgorithm.loadDimens(mResources);
     }
 
     private void givenAOD() {
@@ -380,11 +550,28 @@ public class KeyguardClockPositionAlgorithmTest extends SysuiTestCase {
         mDark = 0.f;
     }
 
+    /**
+     * Setup and run the clock position algorithm.
+     *
+     * mClockPosition.clockY will contain the top y-coordinate for the clock position
+     */
     private void positionClock() {
-        mClockPositionAlgorithm.setup(EMPTY_MARGIN, SCREEN_HEIGHT, mNotificationStackHeight,
-                mPanelExpansion, SCREEN_HEIGHT, mKeyguardStatusHeight, mPreferredClockY,
-                mHasCustomClock, mHasVisibleNotifs, mDark, ZERO_DRAG, false /* bypassEnabled */,
-                0 /* unlockedStackScrollerPadding */);
+        mClockPositionAlgorithm.setup(
+                mKeyguardStatusBarHeaderHeight,
+                mPanelExpansion,
+                mKeyguardStatusHeight,
+                mUserSwitchHeight,
+                0 /* userSwitchPreferredY */,
+                mDark,
+                ZERO_DRAG,
+                false /* bypassEnabled */,
+                0 /* unlockedStackScrollerPadding */,
+                mQsExpansion,
+                mCutoutTopInset,
+                mIsSplitShade,
+                mUdfpsTop,
+                mClockBottom,
+                mClockTopAligned);
         mClockPositionAlgorithm.run(mClockPosition);
     }
 }

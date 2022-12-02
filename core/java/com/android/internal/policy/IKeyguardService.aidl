@@ -15,6 +15,7 @@
  */
 package com.android.internal.policy;
 
+import android.content.Intent;
 import com.android.internal.policy.IKeyguardDrawnCallback;
 import com.android.internal.policy.IKeyguardDismissCallback;
 import com.android.internal.policy.IKeyguardStateCallback;
@@ -42,26 +43,31 @@ oneway interface IKeyguardService {
     /**
      * Called when the device has started going to sleep.
      *
-     * @param why {@link #OFF_BECAUSE_OF_USER}, {@link #OFF_BECAUSE_OF_ADMIN},
-     * or {@link #OFF_BECAUSE_OF_TIMEOUT}.
+     * @param pmSleepReason One of PowerManager.GO_TO_SLEEP_REASON_*, detailing the specific reason
+     * we're going to sleep, such as GO_TO_SLEEP_REASON_POWER_BUTTON or GO_TO_SLEEP_REASON_TIMEOUT.
      */
-    void onStartedGoingToSleep(int reason);
+    void onStartedGoingToSleep(int pmSleepReason);
 
     /**
      * Called when the device has finished going to sleep.
      *
-     * @param why {@link #OFF_BECAUSE_OF_USER}, {@link #OFF_BECAUSE_OF_ADMIN},
-     *            or {@link #OFF_BECAUSE_OF_TIMEOUT}.
+     * @param pmSleepReason One of PowerManager.GO_TO_SLEEP_REASON_*, detailing the specific reason
+     * we're going to sleep, such as GO_TO_SLEEP_REASON_POWER_BUTTON or GO_TO_SLEEP_REASON_TIMEOUT.
      * @param cameraGestureTriggered whether the camera gesture was triggered between
      *                               {@link #onStartedGoingToSleep} and this method; if it's been
      *                               triggered, we shouldn't lock the device.
      */
-    void onFinishedGoingToSleep(int reason, boolean cameraGestureTriggered);
+    void onFinishedGoingToSleep(int pmSleepReason, boolean cameraGestureTriggered);
 
     /**
      * Called when the device has started waking up.
+
+     * @param pmWakeReason One of PowerManager.WAKE_REASON_*, detailing the reason we're waking up,
+     * such as WAKE_REASON_POWER_BUTTON or WAKE_REASON_GESTURE.
+     * @param cameraGestureTriggered Whether we're waking up due to a power button double tap
+     * gesture.
      */
-    void onStartedWakingUp();
+    void onStartedWakingUp(int pmWakeReason,  boolean cameraGestureTriggered);
 
     /**
      * Called when the device has finished waking up.
@@ -108,7 +114,20 @@ oneway interface IKeyguardService {
 
     /**
      * Notifies the Keyguard that the power key was pressed while locked and launched Home rather
-     * than putting the device to sleep or waking up.
+     * than putting the device to sleep or waking up. Note that it's called only if the device is
+     * interactive.
      */
     void onShortPowerPressedGoHome();
+
+    /**
+     * Notifies the Keyguard that it needs to bring up a bouncer and then launch the intent as soon
+     * as user unlocks the watch.
+     */
+    void dismissKeyguardToLaunch(in Intent intentToLaunch);
+
+    /**
+     * Notifies the Keyguard that a key was pressed while locked so the Keyguard can handle it.
+     * Note that it's called only if the device is interactive.
+     */
+    void onSystemKeyPressed(int keycode);
 }

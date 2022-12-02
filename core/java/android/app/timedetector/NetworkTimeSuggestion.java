@@ -17,30 +17,19 @@
 package android.app.timedetector;
 
 import android.annotation.NonNull;
-import android.annotation.Nullable;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.os.ShellCommand;
 import android.os.TimestampedValue;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
+import java.io.PrintWriter;
 import java.util.List;
 import java.util.Objects;
 
 /**
  * A time signal from a network time source like NTP.
  *
- * <p>{@code utcTime} contains the suggested time. The {@code utcTime.value} is the number of
- * milliseconds elapsed since 1/1/1970 00:00:00 UTC. The {@code utcTime.referenceTimeMillis} is the
- * value of the elapsed realtime clock when the {@code utcTime.value} was established.
- * Note that the elapsed realtime clock is considered accurate but it is volatile, so time
- * suggestions cannot be persisted across device resets.
- *
- * <p>{@code debugInfo} contains debugging metadata associated with the suggestion. This is used to
- * record why the suggestion exists and how it was determined. This information exists only to aid
- * in debugging and therefore is used by {@link #toString()}, but it is not for use in detection
- * logic and is not considered in {@link #hashCode()} or {@link #equals(Object)}.
+ * <p>See {@link TimeSuggestionHelper} for property information.
  *
  * @hide
  */
@@ -49,7 +38,9 @@ public final class NetworkTimeSuggestion implements Parcelable {
     public static final @NonNull Creator<NetworkTimeSuggestion> CREATOR =
             new Creator<NetworkTimeSuggestion>() {
                 public NetworkTimeSuggestion createFromParcel(Parcel in) {
-                    return NetworkTimeSuggestion.createFromParcel(in);
+                    TimeSuggestionHelper helper = TimeSuggestionHelper.handleCreateFromParcel(
+                            NetworkTimeSuggestion.class, in);
+                    return new NetworkTimeSuggestion(helper);
                 }
 
                 public NetworkTimeSuggestion[] newArray(int size) {
@@ -57,21 +48,15 @@ public final class NetworkTimeSuggestion implements Parcelable {
                 }
             };
 
-    @NonNull private final TimestampedValue<Long> mUtcTime;
-    @Nullable private ArrayList<String> mDebugInfo;
+    @NonNull private final TimeSuggestionHelper mTimeSuggestionHelper;
 
-    public NetworkTimeSuggestion(@NonNull TimestampedValue<Long> utcTime) {
-        mUtcTime = Objects.requireNonNull(utcTime);
-        Objects.requireNonNull(utcTime.getValue());
+    public NetworkTimeSuggestion(@NonNull TimestampedValue<Long> unixEpochTime) {
+        mTimeSuggestionHelper = new TimeSuggestionHelper(
+                NetworkTimeSuggestion.class, unixEpochTime);
     }
 
-    private static NetworkTimeSuggestion createFromParcel(Parcel in) {
-        TimestampedValue<Long> utcTime = in.readParcelable(null /* classLoader */);
-        NetworkTimeSuggestion suggestion = new NetworkTimeSuggestion(utcTime);
-        @SuppressWarnings("unchecked")
-        ArrayList<String> debugInfo = (ArrayList<String>) in.readArrayList(null /* classLoader */);
-        suggestion.mDebugInfo = debugInfo;
-        return suggestion;
+    private NetworkTimeSuggestion(@NonNull TimeSuggestionHelper helper) {
+        mTimeSuggestionHelper = Objects.requireNonNull(helper);
     }
 
     @Override
@@ -81,31 +66,26 @@ public final class NetworkTimeSuggestion implements Parcelable {
 
     @Override
     public void writeToParcel(@NonNull Parcel dest, int flags) {
-        dest.writeParcelable(mUtcTime, 0);
-        dest.writeList(mDebugInfo);
+        mTimeSuggestionHelper.handleWriteToParcel(dest, flags);
     }
 
     @NonNull
-    public TimestampedValue<Long> getUtcTime() {
-        return mUtcTime;
+    public TimestampedValue<Long> getUnixEpochTime() {
+        return mTimeSuggestionHelper.getUnixEpochTime();
     }
 
     @NonNull
     public List<String> getDebugInfo() {
-        return mDebugInfo == null
-                ? Collections.emptyList() : Collections.unmodifiableList(mDebugInfo);
+        return mTimeSuggestionHelper.getDebugInfo();
     }
 
     /**
      * Associates information with the instance that can be useful for debugging / logging. The
-     * information is present in {@link #toString()} but is not considered for
-     * {@link #equals(Object)} and {@link #hashCode()}.
+     * information is present in {@link #toString()} but is not considered for {@link
+     * #equals(Object)} and {@link #hashCode()}.
      */
     public void addDebugInfo(String... debugInfos) {
-        if (mDebugInfo == null) {
-            mDebugInfo = new ArrayList<>();
-        }
-        mDebugInfo.addAll(Arrays.asList(debugInfos));
+        mTimeSuggestionHelper.addDebugInfo(debugInfos);
     }
 
     @Override
@@ -117,19 +97,28 @@ public final class NetworkTimeSuggestion implements Parcelable {
             return false;
         }
         NetworkTimeSuggestion that = (NetworkTimeSuggestion) o;
-        return Objects.equals(mUtcTime, that.mUtcTime);
+        return mTimeSuggestionHelper.handleEquals(that.mTimeSuggestionHelper);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(mUtcTime);
+        return mTimeSuggestionHelper.hashCode();
     }
 
     @Override
     public String toString() {
-        return "NetworkTimeSuggestion{"
-                + "mUtcTime=" + mUtcTime
-                + ", mDebugInfo=" + mDebugInfo
-                + '}';
+        return mTimeSuggestionHelper.handleToString();
+    }
+
+    /** @hide */
+    public static NetworkTimeSuggestion parseCommandLineArg(@NonNull ShellCommand cmd)
+            throws IllegalArgumentException {
+        return new NetworkTimeSuggestion(
+                TimeSuggestionHelper.handleParseCommandLineArg(NetworkTimeSuggestion.class, cmd));
+    }
+
+    /** @hide */
+    public static void printCommandLineOpts(PrintWriter pw) {
+        TimeSuggestionHelper.handlePrintCommandLineOpts(pw, "Network", NetworkTimeSuggestion.class);
     }
 }

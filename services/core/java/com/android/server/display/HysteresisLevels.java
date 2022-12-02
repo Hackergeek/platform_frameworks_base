@@ -30,27 +30,25 @@ import java.util.Arrays;
 public class HysteresisLevels {
     private static final String TAG = "HysteresisLevels";
 
-    // Default hysteresis constraints for brightening or darkening.
-    // The recent value must have changed by at least this fraction relative to the
-    // current value before a change will be considered.
-    private static final float DEFAULT_BRIGHTENING_HYSTERESIS = 0.10f;
-    private static final float DEFAULT_DARKENING_HYSTERESIS = 0.20f;
-
     private static final boolean DEBUG = false;
 
     private final float[] mBrighteningThresholds;
     private final float[] mDarkeningThresholds;
     private final float[] mThresholdLevels;
+    private final float mMinDarkening;
+    private final float mMinBrightening;
 
     /**
-     * Creates a {@code HysteresisLevels} object with the given equal-length
-     * integer arrays.
+     * Creates a {@code HysteresisLevels} object for ambient brightness.
      * @param brighteningThresholds an array of brightening hysteresis constraint constants.
      * @param darkeningThresholds an array of darkening hysteresis constraint constants.
      * @param thresholdLevels a monotonically increasing array of threshold levels.
+     * @param minBrighteningThreshold the minimum value for which the brightening value needs to
+     *                                return.
+     * @param minDarkeningThreshold the minimum value for which the darkening value needs to return.
     */
     HysteresisLevels(int[] brighteningThresholds, int[] darkeningThresholds,
-            int[] thresholdLevels) {
+            int[] thresholdLevels, float minDarkeningThreshold, float minBrighteningThreshold) {
         if (brighteningThresholds.length != darkeningThresholds.length
                 || darkeningThresholds.length != thresholdLevels.length + 1) {
             throw new IllegalArgumentException("Mismatch between hysteresis array lengths.");
@@ -58,6 +56,30 @@ public class HysteresisLevels {
         mBrighteningThresholds = setArrayFormat(brighteningThresholds, 1000.0f);
         mDarkeningThresholds = setArrayFormat(darkeningThresholds, 1000.0f);
         mThresholdLevels = setArrayFormat(thresholdLevels, 1.0f);
+        mMinDarkening = minDarkeningThreshold;
+        mMinBrightening = minBrighteningThreshold;
+    }
+
+    /**
+     * Creates a {@code HysteresisLevels} object for screen brightness.
+     * @param brighteningThresholds an array of brightening hysteresis constraint constants.
+     * @param darkeningThresholds an array of darkening hysteresis constraint constants.
+     * @param thresholdLevels a monotonically increasing array of threshold levels.
+     * @param minBrighteningThreshold the minimum value for which the brightening value needs to
+     *                                return.
+     * @param minDarkeningThreshold the minimum value for which the darkening value needs to return.
+     */
+    HysteresisLevels(int[] brighteningThresholds, int[] darkeningThresholds,
+            float[] thresholdLevels, float minDarkeningThreshold, float minBrighteningThreshold) {
+        if (brighteningThresholds.length != darkeningThresholds.length
+                || darkeningThresholds.length != thresholdLevels.length + 1) {
+            throw new IllegalArgumentException("Mismatch between hysteresis array lengths.");
+        }
+        mBrighteningThresholds = setArrayFormat(brighteningThresholds, 1000.0f);
+        mDarkeningThresholds = setArrayFormat(darkeningThresholds, 1000.0f);
+        mThresholdLevels = constraintInRangeIfNeeded(thresholdLevels);
+        mMinDarkening = minDarkeningThreshold;
+        mMinBrightening = minBrighteningThreshold;
     }
 
     /**
@@ -65,11 +87,13 @@ public class HysteresisLevels {
      */
     public float getBrighteningThreshold(float value) {
         final float brightConstant = getReferenceLevel(value, mBrighteningThresholds);
-        final float brightThreshold = value * (1.0f + brightConstant);
+        float brightThreshold = value * (1.0f + brightConstant);
         if (DEBUG) {
             Slog.d(TAG, "bright hysteresis constant=" + brightConstant + ", threshold="
                     + brightThreshold + ", value=" + value);
         }
+
+        brightThreshold = Math.max(brightThreshold, value + mMinBrightening);
         return brightThreshold;
     }
 
@@ -78,12 +102,13 @@ public class HysteresisLevels {
      */
     public float getDarkeningThreshold(float value) {
         final float darkConstant = getReferenceLevel(value, mDarkeningThresholds);
-        final float darkThreshold = value * (1.0f - darkConstant);
+        float darkThreshold = value * (1.0f - darkConstant);
         if (DEBUG) {
             Slog.d(TAG, "dark hysteresis constant=: " + darkConstant + ", threshold="
                     + darkThreshold + ", value=" + value);
         }
-        return darkThreshold;
+        darkThreshold = Math.min(darkThreshold, value - mMinDarkening);
+        return Math.max(darkThreshold, 0.0f);
     }
 
     /**
@@ -103,9 +128,40 @@ public class HysteresisLevels {
     private float[] setArrayFormat(int[] configArray, float divideFactor) {
         float[] levelArray = new float[configArray.length];
         for (int index = 0; levelArray.length > index; ++index) {
-            levelArray[index] = (float)configArray[index] / divideFactor;
+            levelArray[index] = (float) configArray[index] / divideFactor;
         }
         return levelArray;
+    }
+
+    /**
+     * This check is due to historical reasons, where screen thresholdLevels used to be
+     * integer values in the range of [0-255], but then was changed to be float values from [0,1].
+     * To accommodate both the possibilities, we first check if all the thresholdLevels are in [0,
+     * 1], and if not, we divide all the levels with 255 to bring them down to the same scale.
+     */
+    private float[] constraintInRangeIfNeeded(float[] thresholdLevels) {
+        if (isAllInRange(thresholdLevels, /* minValueInclusive = */ 0.0f, /* maxValueInclusive = */
+                1.0f)) {
+            return thresholdLevels;
+        }
+
+        Slog.w(TAG, "Detected screen thresholdLevels on a deprecated brightness scale");
+        float[] thresholdLevelsScaled = new float[thresholdLevels.length];
+        for (int index = 0; thresholdLevels.length > index; ++index) {
+            thresholdLevelsScaled[index] = thresholdLevels[index] / 255.0f;
+        }
+        return thresholdLevelsScaled;
+    }
+
+    private boolean isAllInRange(float[] configArray, float minValueInclusive,
+                                 float maxValueInclusive) {
+        int configArraySize = configArray.length;
+        for (int index = 0; configArraySize > index; ++index) {
+            if (configArray[index] < minValueInclusive || configArray[index] > maxValueInclusive) {
+                return false;
+            }
+        }
+        return true;
     }
 
     void dump(PrintWriter pw) {

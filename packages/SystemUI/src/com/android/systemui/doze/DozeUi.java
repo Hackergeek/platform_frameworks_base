@@ -26,50 +26,60 @@ import android.os.SystemClock;
 import android.text.format.Formatter;
 import android.util.Log;
 
-import com.android.internal.annotations.VisibleForTesting;
 import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.keyguard.KeyguardUpdateMonitorCallback;
+import com.android.systemui.dagger.qualifiers.Main;
+import com.android.systemui.doze.dagger.DozeScope;
+import com.android.systemui.plugins.statusbar.StatusBarStateController;
 import com.android.systemui.statusbar.phone.DozeParameters;
 import com.android.systemui.util.AlarmTimeout;
 import com.android.systemui.util.wakelock.WakeLock;
 
 import java.util.Calendar;
 
+import javax.inject.Inject;
+
 /**
  * The policy controlling doze.
  */
+@DozeScope
 public class DozeUi implements DozeMachine.Part {
-
+    // if enabled, calls dozeTimeTick() whenever the time changes:
+    private static final boolean BURN_IN_TESTING_ENABLED = false;
     private static final long TIME_TICK_DEADLINE_MILLIS = 90 * 1000; // 1.5min
     private final Context mContext;
     private final DozeHost mHost;
     private final Handler mHandler;
     private final WakeLock mWakeLock;
-    private final DozeMachine mMachine;
+    private DozeMachine mMachine;
     private final AlarmTimeout mTimeTicker;
     private final boolean mCanAnimateTransition;
     private final DozeParameters mDozeParameters;
     private final DozeLog mDozeLog;
-
-    private boolean mKeyguardShowing;
+    private final StatusBarStateController mStatusBarStateController;
     private final KeyguardUpdateMonitorCallback mKeyguardVisibilityCallback =
             new KeyguardUpdateMonitorCallback() {
-
                 @Override
-                public void onKeyguardVisibilityChanged(boolean showing) {
-                    mKeyguardShowing = showing;
-                    updateAnimateScreenOff();
+                public void onTimeChanged() {
+                    if (BURN_IN_TESTING_ENABLED && mStatusBarStateController.isDozing()) {
+                        // update whenever the time changes for manual burn in testing
+                        mHost.dozeTimeTick();
+
+                        // Keep wakelock until a frame has been pushed.
+                        mHandler.post(mWakeLock.wrap(() -> {}));
+                    }
                 }
             };
 
     private long mLastTimeTickElapsed = 0;
 
-    public DozeUi(Context context, AlarmManager alarmManager, DozeMachine machine,
-            WakeLock wakeLock, DozeHost host, Handler handler,
+    @Inject
+    public DozeUi(Context context, AlarmManager alarmManager,
+            WakeLock wakeLock, DozeHost host, @Main Handler handler,
             DozeParameters params, KeyguardUpdateMonitor keyguardUpdateMonitor,
+            StatusBarStateController statusBarStateController,
             DozeLog dozeLog) {
         mContext = context;
-        mMachine = machine;
         mWakeLock = wakeLock;
         mHost = host;
         mHandler = handler;
@@ -78,19 +88,12 @@ public class DozeUi implements DozeMachine.Part {
         mTimeTicker = new AlarmTimeout(alarmManager, this::onTimeTick, "doze_time_tick", handler);
         keyguardUpdateMonitor.registerCallback(mKeyguardVisibilityCallback);
         mDozeLog = dozeLog;
+        mStatusBarStateController = statusBarStateController;
     }
 
-    /**
-     * Decide if we're taking over the screen-off animation
-     * when the device was configured to skip doze after screen off.
-     */
-    private void updateAnimateScreenOff() {
-        if (mCanAnimateTransition) {
-            final boolean controlScreenOff = mDozeParameters.getAlwaysOn() && mKeyguardShowing
-                    && !mHost.isPowerSaveActive();
-            mDozeParameters.setControlScreenOffAnimation(controlScreenOff);
-            mHost.setAnimateScreenOff(controlScreenOff);
-        }
+    @Override
+    public void setDozeMachine(DozeMachine dozeMachine) {
+        mMachine = dozeMachine;
     }
 
     private void pulseWhileDozing(int reason) {
@@ -100,7 +103,7 @@ public class DozeUi implements DozeMachine.Part {
                     public void onPulseStarted() {
                         try {
                             mMachine.requestState(
-                                    reason == DozeLog.PULSE_REASON_SENSOR_WAKE_LOCK_SCREEN
+                                    reason == DozeLog.PULSE_REASON_SENSOR_WAKE_REACH
                                             ? DozeMachine.State.DOZE_PULSING_BRIGHT
                                             : DozeMachine.State.DOZE_PULSING);
                         } catch (IllegalStateException e) {
@@ -220,10 +223,5 @@ public class DozeUi implements DozeMachine.Part {
         mHandler.post(mWakeLock.wrap(() -> {}));
 
         scheduleTimeTick();
-    }
-
-    @VisibleForTesting
-    KeyguardUpdateMonitorCallback getKeyguardCallback() {
-        return mKeyguardVisibilityCallback;
     }
 }

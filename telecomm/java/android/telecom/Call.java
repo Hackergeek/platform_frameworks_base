@@ -138,6 +138,27 @@ public final class Call {
     public static final int STATE_SIMULATED_RINGING = 13;
 
     /**
+     * @hide
+     */
+    @IntDef(prefix = { "STATE_" },
+            value = {
+                    STATE_NEW,
+                    STATE_DIALING,
+                    STATE_RINGING,
+                    STATE_HOLDING,
+                    STATE_ACTIVE,
+                    STATE_DISCONNECTED,
+                    STATE_SELECT_PHONE_ACCOUNT,
+                    STATE_CONNECTING,
+                    STATE_DISCONNECTING,
+                    STATE_PULLING_CALL,
+                    STATE_AUDIO_PROCESSING,
+                    STATE_SIMULATED_RINGING
+            })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface CallState {};
+
+    /**
      * The key to retrieve the optional {@code PhoneAccount}s Telecom can bundle with its Call
      * extras. Used to pass the phone accounts to display on the front end to the user in order to
      * select phone accounts to (for example) place a call.
@@ -267,6 +288,64 @@ public final class Call {
     public static final String EVENT_HANDOVER_FAILED =
             "android.telecom.event.HANDOVER_FAILED";
 
+    /**
+     * Event reported from the Telecom stack to report an in-call diagnostic message which the
+     * dialer app may opt to display to the user.  A diagnostic message is used to communicate
+     * scenarios the device has detected which may impact the quality of the ongoing call.
+     * <p>
+     * For example a problem with a bluetooth headset may generate a recommendation for the user to
+     * try using the speakerphone instead, or if the device detects it has entered a poor service
+     * area, the user might be warned so that they can finish their call prior to it dropping.
+     * <p>
+     * A diagnostic message is considered persistent in nature.  When the user enters a poor service
+     * area, for example, the accompanying diagnostic message persists until they leave the area
+     * of poor service.  Each message is accompanied with a {@link #EXTRA_DIAGNOSTIC_MESSAGE_ID}
+     * which uniquely identifies the diagnostic condition being reported.  The framework raises a
+     * call event of type {@link #EVENT_CLEAR_DIAGNOSTIC_MESSAGE} when the condition reported has
+     * been cleared.  The dialer app should display the diagnostic message until it is cleared.
+     * If multiple diagnostic messages are sent with different IDs (which have not yet been cleared)
+     * the dialer app should prioritize the most recently received message, but still provide the
+     * user with a means to review past messages.
+     * <p>
+     * The text of the message is found in {@link #EXTRA_DIAGNOSTIC_MESSAGE} in the form of a human
+     * readable {@link CharSequence} which is intended for display in the call UX.
+     * <p>
+     * The telecom framework audibly notifies the user of the presence of a diagnostic message, so
+     * the dialer app needs only to concern itself with visually displaying the message.
+     * <p>
+     * The dialer app receives this event via
+     * {@link Call.Callback#onConnectionEvent(Call, String, Bundle)}.
+     */
+    public static final String EVENT_DISPLAY_DIAGNOSTIC_MESSAGE =
+            "android.telecom.event.DISPLAY_DIAGNOSTIC_MESSAGE";
+
+    /**
+     * Event reported from the telecom framework when a diagnostic message previously raised with
+     * {@link #EVENT_DISPLAY_DIAGNOSTIC_MESSAGE} has cleared and is no longer pertinent.
+     * <p>
+     * The {@link #EXTRA_DIAGNOSTIC_MESSAGE_ID} indicates the diagnostic message which has been
+     * cleared.
+     * <p>
+     * The dialer app receives this event via
+     * {@link Call.Callback#onConnectionEvent(Call, String, Bundle)}.
+     */
+    public static final String EVENT_CLEAR_DIAGNOSTIC_MESSAGE =
+            "android.telecom.event.CLEAR_DIAGNOSTIC_MESSAGE";
+
+    /**
+     * Integer extra representing a message ID for a message posted via
+     * {@link #EVENT_DISPLAY_DIAGNOSTIC_MESSAGE}.  Used to ensure that the dialer app knows when
+     * the message in question has cleared via {@link #EVENT_CLEAR_DIAGNOSTIC_MESSAGE}.
+     */
+    public static final String EXTRA_DIAGNOSTIC_MESSAGE_ID =
+            "android.telecom.extra.DIAGNOSTIC_MESSAGE_ID";
+
+    /**
+     * {@link CharSequence} extra used with {@link #EVENT_DISPLAY_DIAGNOSTIC_MESSAGE}.  This is the
+     * diagnostic message the dialer app should display.
+     */
+    public static final String EXTRA_DIAGNOSTIC_MESSAGE =
+            "android.telecom.extra.DIAGNOSTIC_MESSAGE";
 
     /**
      * Reject reason used with {@link #reject(int)} to indicate that the user is rejecting this
@@ -485,8 +564,14 @@ public final class Call {
          */
         public static final int CAPABILITY_TRANSFER_CONSULTATIVE = 0x08000000;
 
+        /**
+         * Indicates whether the remote party supports RTT or not to the UI.
+         */
+
+        public static final int CAPABILITY_REMOTE_PARTY_SUPPORTS_RTT = 0x10000000;
+
         //******************************************************************************************
-        // Next CAPABILITY value: 0x10000000
+        // Next CAPABILITY value: 0x20000000
         //******************************************************************************************
 
         /**
@@ -607,10 +692,20 @@ public final class Call {
          */
         public static final int PROPERTY_IS_ADHOC_CONFERENCE = 0x00002000;
 
+        /**
+         * Connection is using cross sim technology.
+         * <p>
+         * Indicates that the {@link Connection} is using a cross sim technology which would
+         * register IMS over internet APN of default data subscription.
+         * <p>
+         */
+        public static final int PROPERTY_CROSS_SIM = 0x00004000;
+
         //******************************************************************************************
         // Next PROPERTY value: 0x00004000
         //******************************************************************************************
 
+        private final @CallState int mState;
         private final String mTelecomCallId;
         private final Uri mHandle;
         private final int mHandlePresentation;
@@ -728,6 +823,9 @@ public final class Call {
             if (can(capabilities, CAPABILITY_TRANSFER_CONSULTATIVE)) {
                 builder.append(" CAPABILITY_TRANSFER_CONSULTATIVE");
             }
+            if (can(capabilities, CAPABILITY_REMOTE_PARTY_SUPPORTS_RTT)) {
+                builder.append(" CAPABILITY_REMOTE_PARTY_SUPPORTS_RTT");
+            }
             builder.append("]");
             return builder.toString();
         }
@@ -798,8 +896,18 @@ public final class Call {
             if (hasProperty(properties, PROPERTY_IS_ADHOC_CONFERENCE)) {
                 builder.append(" PROPERTY_IS_ADHOC_CONFERENCE");
             }
+            if (hasProperty(properties, PROPERTY_CROSS_SIM)) {
+                builder.append(" PROPERTY_CROSS_SIM");
+            }
             builder.append("]");
             return builder.toString();
+        }
+
+        /**
+         * @return the state of the {@link Call} represented by this {@link Call.Details}.
+         */
+        public final @CallState int getState() {
+            return mState;
         }
 
         /** {@hide} */
@@ -1003,6 +1111,7 @@ public final class Call {
             if (o instanceof Details) {
                 Details d = (Details) o;
                 return
+                        Objects.equals(mState, d.mState) &&
                         Objects.equals(mHandle, d.mHandle) &&
                         Objects.equals(mHandlePresentation, d.mHandlePresentation) &&
                         Objects.equals(mCallerDisplayName, d.mCallerDisplayName) &&
@@ -1029,7 +1138,8 @@ public final class Call {
 
         @Override
         public int hashCode() {
-            return Objects.hash(mHandle,
+            return Objects.hash(mState,
+                            mHandle,
                             mHandlePresentation,
                             mCallerDisplayName,
                             mCallerDisplayNamePresentation,
@@ -1051,6 +1161,7 @@ public final class Call {
 
         /** {@hide} */
         public Details(
+                @CallState int state,
                 String telecomCallId,
                 Uri handle,
                 int handlePresentation,
@@ -1070,6 +1181,7 @@ public final class Call {
                 String contactDisplayName,
                 int callDirection,
                 int callerNumberVerificationStatus) {
+            mState = state;
             mTelecomCallId = telecomCallId;
             mHandle = handle;
             mHandlePresentation = handlePresentation;
@@ -1094,6 +1206,7 @@ public final class Call {
         /** {@hide} */
         public static Details createFromParcelableCall(ParcelableCall parcelableCall) {
             return new Details(
+                    parcelableCall.getState(),
                     parcelableCall.getId(),
                     parcelableCall.getHandle(),
                     parcelableCall.getHandlePresentation(),
@@ -1120,6 +1233,8 @@ public final class Call {
             StringBuilder sb = new StringBuilder();
             sb.append("[id: ");
             sb.append(mTelecomCallId);
+            sb.append(", state: ");
+            sb.append(Call.stateToString(mState));
             sb.append(", pa: ");
             sb.append(mAccountHandle);
             sb.append(", hdl: ");
@@ -1236,7 +1351,7 @@ public final class Call {
          * @param call The {@code Call} invoking this method.
          * @param state The new state of the {@code Call}.
          */
-        public void onStateChanged(Call call, int state) {}
+        public void onStateChanged(Call call, @CallState int state) {}
 
         /**
          * Invoked when the parent of this {@code Call} has changed. See {@link #getParent()}.
@@ -1361,12 +1476,21 @@ public final class Call {
         /**
          * Invoked when the RTT session failed to initiate for some reason, including rejection
          * by the remote party.
+         * <p>
+         * This callback will ONLY be invoked to report a failure related to a user initiated
+         * session modification request (i.e. {@link Call#sendRttRequest()}).
+         * <p>
+         * If a call is initiated with {@link TelecomManager#EXTRA_START_CALL_WITH_RTT} specified,
+         * the availability of RTT can be determined by checking {@link Details#PROPERTY_RTT}
+         * once the call enters state {@link Details#STATE_ACTIVE}.
+         *
          * @param call The call which the RTT initiation failure occurred on.
          * @param reason One of the status codes defined in
-         *               {@link android.telecom.Connection.RttModifyStatus}, with the exception of
-         *               {@link android.telecom.Connection.RttModifyStatus#SESSION_MODIFY_REQUEST_SUCCESS}.
+         *      {@link android.telecom.Connection.RttModifyStatus}, with the exception of
+         *      {@link android.telecom.Connection.RttModifyStatus#SESSION_MODIFY_REQUEST_SUCCESS}.
          */
-        public void onRttInitiationFailure(Call call, int reason) {}
+        public void onRttInitiationFailure(Call call,
+                @android.telecom.Connection.RttModifyStatus.RttSessionModifyStatus int reason) {}
 
         /**
          * Invoked when Call handover from one {@link PhoneAccount} to other {@link PhoneAccount}
@@ -1468,8 +1592,11 @@ public final class Call {
 
         /**
          * Writes the string {@param input} into the outgoing text stream for this RTT call. Since
-         * RTT transmits text in real-time, this method should be called once for each character
-         * the user enters into the device.
+         * RTT transmits text in real-time, this method should be called once for each user action.
+         * For example, when the user enters text as discrete characters using the keyboard, this
+         * method should be called once for each character. However, if the user enters text by
+         * pasting or autocomplete, the entire contents of the pasted or autocompleted text should
+         * be sent in one call to this method.
          *
          * This method is not thread-safe -- calling it from multiple threads simultaneously may
          * lead to interleaved text.
@@ -1683,7 +1810,6 @@ public final class Call {
      * @hide
      */
     @SystemApi
-    @TestApi
     public void enterBackgroundAudioProcessing() {
         if (mState != STATE_ACTIVE && mState != STATE_RINGING) {
             throw new IllegalStateException("Call must be active or ringing");
@@ -1704,7 +1830,6 @@ public final class Call {
      * @hide
      */
     @SystemApi
-    @TestApi
     public void exitBackgroundAudioProcessing(boolean shouldRing) {
         if (mState != STATE_AUDIO_PROCESSING) {
             throw new IllegalStateException("Call must in the audio processing state");
@@ -2104,9 +2229,11 @@ public final class Call {
     /**
      * Obtains the state of this {@code Call}.
      *
-     * @return A state value, chosen from the {@code STATE_*} constants.
+     * @return The call state.
+     * @deprecated The call state is available via {@link Call.Details#getState()}.
      */
-    public int getState() {
+    @Deprecated
+    public @CallState int getState() {
         return mState;
     }
 
@@ -2434,6 +2561,7 @@ public final class Call {
         } else if (mRttCall != null && parcelableCall.getParcelableRttCall() == null
                 && parcelableCall.getIsRttCallChanged()) {
             isRttChanged = true;
+            mRttCall.close();
             mRttCall = null;
         }
 
@@ -2484,6 +2612,30 @@ public final class Call {
     final void internalSetDisconnected() {
         if (mState != Call.STATE_DISCONNECTED) {
             mState = Call.STATE_DISCONNECTED;
+            if (mDetails != null) {
+                mDetails = new Details(mState,
+                        mDetails.getTelecomCallId(),
+                        mDetails.getHandle(),
+                        mDetails.getHandlePresentation(),
+                        mDetails.getCallerDisplayName(),
+                        mDetails.getCallerDisplayNamePresentation(),
+                        mDetails.getAccountHandle(),
+                        mDetails.getCallCapabilities(),
+                        mDetails.getCallProperties(),
+                        mDetails.getDisconnectCause(),
+                        mDetails.getConnectTimeMillis(),
+                        mDetails.getGatewayInfo(),
+                        mDetails.getVideoState(),
+                        mDetails.getStatusHints(),
+                        mDetails.getExtras(),
+                        mDetails.getIntentExtras(),
+                        mDetails.getCreationTimeMillis(),
+                        mDetails.getContactDisplayName(),
+                        mDetails.getCallDirection(),
+                        mDetails.getCallerNumberVerificationStatus()
+                        );
+                fireDetailsChanged(mDetails);
+            }
             fireStateChanged(mState);
             fireCallDestroyed();
         }
@@ -2743,7 +2895,19 @@ public final class Call {
             if (key != null) {
                 final Object value = bundle.get(key);
                 final Object newValue = newBundle.get(key);
-                if (!Objects.equals(value, newValue)) {
+                if (!newBundle.containsKey(key)) {
+                    return false;
+                }
+                if (value instanceof Bundle && newValue instanceof Bundle) {
+                    if (!areBundlesEqual((Bundle) value, (Bundle) newValue)) {
+                        return false;
+                    }
+                }
+                if (value instanceof byte[] && newValue instanceof byte[]) {
+                    if (!Arrays.equals((byte[]) value, (byte[]) newValue)) {
+                        return false;
+                    }
+                } else if (!Objects.equals(value, newValue)) {
                     return false;
                 }
             }

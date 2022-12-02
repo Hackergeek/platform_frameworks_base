@@ -27,6 +27,8 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.ResolveInfo;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.Parcel;
+import android.os.Parcelable;
 import android.os.UserHandle;
 
 import com.android.internal.app.ResolverActivity;
@@ -39,12 +41,7 @@ import java.util.List;
  * A TargetInfo plus additional information needed to render it (such as icon and label) and
  * resolve it to an activity.
  */
-public class DisplayResolveInfo implements TargetInfo {
-    // Temporary flag for new chooser delegate behavior. There are occassional token
-    // permission errors from bouncing through the delegate. Watch out before reenabling:
-    // b/157272342 is one example but this issue has been reported many times
-    private static final boolean ENABLE_CHOOSER_DELEGATE = false;
-
+public class DisplayResolveInfo implements TargetInfo, Parcelable {
     private final ResolveInfo mResolveInfo;
     private CharSequence mDisplayLabel;
     private Drawable mDisplayIcon;
@@ -175,12 +172,8 @@ public class DisplayResolveInfo implements TargetInfo {
 
     @Override
     public boolean startAsCaller(ResolverActivity activity, Bundle options, int userId) {
-        if (ENABLE_CHOOSER_DELEGATE) {
-            return activity.startAsCallerImpl(mResolvedIntent, options, false, userId);
-        } else {
-            activity.startActivityAsCaller(mResolvedIntent, options, null, false, userId);
-            return true;
-        }
+        activity.startActivityAsCaller(mResolvedIntent, options, false, userId);
+        return true;
     }
 
     @Override
@@ -202,4 +195,40 @@ public class DisplayResolveInfo implements TargetInfo {
         mPinned = pinned;
     }
 
+    @Override
+    public int describeContents() {
+        return 0;
+    }
+
+    @Override
+    public void writeToParcel(Parcel dest, int flags) {
+        dest.writeCharSequence(mDisplayLabel);
+        dest.writeCharSequence(mExtendedInfo);
+        dest.writeParcelable(mResolvedIntent, 0);
+        dest.writeTypedList(mSourceIntents);
+        dest.writeBoolean(mIsSuspended);
+        dest.writeBoolean(mPinned);
+        dest.writeParcelable(mResolveInfo, 0);
+    }
+
+    public static final Parcelable.Creator<DisplayResolveInfo> CREATOR =
+            new Parcelable.Creator<DisplayResolveInfo>() {
+        public DisplayResolveInfo createFromParcel(Parcel in) {
+            return new DisplayResolveInfo(in);
+        }
+
+        public DisplayResolveInfo[] newArray(int size) {
+            return new DisplayResolveInfo[size];
+        }
+    };
+
+    private DisplayResolveInfo(Parcel in) {
+        mDisplayLabel = in.readCharSequence();
+        mExtendedInfo = in.readCharSequence();
+        mResolvedIntent = in.readParcelable(null /* ClassLoader */, android.content.Intent.class);
+        in.readTypedList(mSourceIntents, Intent.CREATOR);
+        mIsSuspended = in.readBoolean();
+        mPinned = in.readBoolean();
+        mResolveInfo = in.readParcelable(null /* ClassLoader */, android.content.pm.ResolveInfo.class);
+    }
 }

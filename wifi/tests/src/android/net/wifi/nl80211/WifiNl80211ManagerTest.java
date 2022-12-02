@@ -30,6 +30,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -44,6 +45,7 @@ import android.net.wifi.SoftApInfo;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiScanner;
 import android.net.wifi.util.HexEncoding;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.RemoteException;
@@ -96,26 +98,31 @@ public class WifiNl80211ManagerTest {
     @Mock
     private WifiNl80211Manager.PnoScanRequestCallback mPnoScanRequestCallback;
     @Mock
+    private WifiNl80211Manager.CountryCodeChangedListener mCountryCodeChangedListener;
+    @Mock
+    private WifiNl80211Manager.CountryCodeChangedListener mCountryCodeChangedListener2;
+    @Mock
     private Context mContext;
     private TestLooper mLooper;
     private TestAlarmManager mTestAlarmManager;
     private AlarmManager mAlarmManager;
     private WifiNl80211Manager mWificondControl;
+    private WifiNl80211Manager.WificondEventHandler mWificondEventHandler;
     private static final String TEST_INTERFACE_NAME = "test_wlan_if";
     private static final String TEST_INTERFACE_NAME1 = "test_wlan_if1";
     private static final String TEST_INVALID_INTERFACE_NAME = "asdf";
+    private static final String TEST_COUNTRY_CODE = "US";
     private static final byte[] TEST_SSID =
             new byte[]{'G', 'o', 'o', 'g', 'l', 'e', 'G', 'u', 'e', 's', 't'};
     private static final byte[] TEST_PSK =
             new byte[]{'T', 'e', 's', 't'};
 
-    private static final Set<Integer> SCAN_FREQ_SET =
-            new HashSet<Integer>() {{
-                add(2410);
-                add(2450);
-                add(5050);
-                add(5200);
-            }};
+    private static final Set<Integer> SCAN_FREQ_SET = Set.of(
+            2410,
+            2450,
+            5050,
+            5200);
+
     private static final String TEST_QUOTED_SSID_1 = "\"testSsid1\"";
     private static final String TEST_QUOTED_SSID_2 = "\"testSsid2\"";
     private static final int[] TEST_FREQUENCIES_1 = {};
@@ -123,13 +130,11 @@ public class WifiNl80211ManagerTest {
     private static final MacAddress TEST_RAW_MAC_BYTES = MacAddress.fromBytes(
             new byte[]{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
 
-    private static final List<byte[]> SCAN_HIDDEN_NETWORK_SSID_LIST =
-            new ArrayList<byte[]>() {{
-                add(LocalNativeUtil.byteArrayFromArrayList(
-                        LocalNativeUtil.decodeSsid(TEST_QUOTED_SSID_1)));
-                add(LocalNativeUtil.byteArrayFromArrayList(
-                        LocalNativeUtil.decodeSsid(TEST_QUOTED_SSID_2)));
-            }};
+    private static final List<byte[]> SCAN_HIDDEN_NETWORK_SSID_LIST = List.of(
+            LocalNativeUtil.byteArrayFromArrayList(
+                    LocalNativeUtil.decodeSsid(TEST_QUOTED_SSID_1)),
+            LocalNativeUtil.byteArrayFromArrayList(
+                    LocalNativeUtil.decodeSsid(TEST_QUOTED_SSID_2)));
 
     private static final PnoSettings TEST_PNO_SETTINGS = new PnoSettings();
     static {
@@ -181,6 +186,7 @@ public class WifiNl80211ManagerTest {
         when(mClientInterface.getWifiScannerImpl()).thenReturn(mWifiScannerImpl);
         when(mClientInterface.getInterfaceName()).thenReturn(TEST_INTERFACE_NAME);
         mWificondControl = new WifiNl80211Manager(mContext, mWificond);
+        mWificondEventHandler = mWificondControl.getWificondEventHandler();
         assertEquals(true,
                 mWificondControl.setupInterfaceForClientMode(TEST_INTERFACE_NAME, Runnable::run,
                         mNormalScanCallback, mPnoScanCallback));
@@ -506,7 +512,51 @@ public class WifiNl80211ManagerTest {
                 SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST));
         verify(mWifiScannerImpl).scan(argThat(new ScanMatcher(
                 IWifiScannerImpl.SCAN_TYPE_LOW_POWER,
-                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST)));
+                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST, false)));
+    }
+
+    /**
+     * Verify the new startScan() API can convert input parameters to SingleScanSettings correctly.
+     */
+    @Test
+    public void testScanWithBundle() throws Exception {
+        when(mWifiScannerImpl.scan(any(SingleScanSettings.class))).thenReturn(true);
+        Bundle bundle = new Bundle();
+        bundle.putBoolean(WifiNl80211Manager.SCANNING_PARAM_ENABLE_6GHZ_RNR, true);
+        assertTrue(mWificondControl.startScan(
+                TEST_INTERFACE_NAME, WifiScanner.SCAN_TYPE_LOW_POWER,
+                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST, bundle));
+        verify(mWifiScannerImpl).scan(argThat(new ScanMatcher(
+                IWifiScannerImpl.SCAN_TYPE_LOW_POWER,
+                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST, true)));
+    }
+
+    /**
+     * Verify default values in SingleScanSettings when the input Bundle to startScan is null.
+     */
+    @Test
+    public void testScanWithNullBundle() throws Exception {
+        when(mWifiScannerImpl.scan(any(SingleScanSettings.class))).thenReturn(true);
+        assertTrue(mWificondControl.startScan(
+                TEST_INTERFACE_NAME, WifiScanner.SCAN_TYPE_LOW_POWER,
+                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST, null));
+        verify(mWifiScannerImpl).scan(argThat(new ScanMatcher(
+                IWifiScannerImpl.SCAN_TYPE_LOW_POWER,
+                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST, false)));
+    }
+
+    /**
+     * Verify default values in SingleScanSettings when the input Bundle to startScan is empty.
+     */
+    @Test
+    public void testScanWithEmptyBundle() throws Exception {
+        when(mWifiScannerImpl.scan(any(SingleScanSettings.class))).thenReturn(true);
+        assertTrue(mWificondControl.startScan(
+                TEST_INTERFACE_NAME, WifiScanner.SCAN_TYPE_LOW_POWER,
+                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST, new Bundle()));
+        verify(mWifiScannerImpl).scan(argThat(new ScanMatcher(
+                IWifiScannerImpl.SCAN_TYPE_LOW_POWER,
+                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST, false)));
     }
 
     /**
@@ -527,7 +577,7 @@ public class WifiNl80211ManagerTest {
         // But the argument passed down should have the duplicate removed.
         verify(mWifiScannerImpl).scan(argThat(new ScanMatcher(
                 IWifiScannerImpl.SCAN_TYPE_LOW_POWER,
-                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST)));
+                SCAN_FREQ_SET, SCAN_HIDDEN_NETWORK_SSID_LIST, false)));
     }
 
     /**
@@ -539,7 +589,7 @@ public class WifiNl80211ManagerTest {
         assertTrue(mWificondControl.startScan(
                 TEST_INTERFACE_NAME, WifiScanner.SCAN_TYPE_HIGH_ACCURACY, null, null));
         verify(mWifiScannerImpl).scan(argThat(new ScanMatcher(
-                IWifiScannerImpl.SCAN_TYPE_HIGH_ACCURACY, null, null)));
+                IWifiScannerImpl.SCAN_TYPE_HIGH_ACCURACY, null, null, false)));
     }
 
     /**
@@ -712,6 +762,28 @@ public class WifiNl80211ManagerTest {
                 channelBandwidth);
         verify(mSoftApListener).onSoftApChannelSwitched(eq(channelFrequency),
                 eq(SoftApInfo.CHANNEL_WIDTH_20MHZ));
+    }
+
+    /**
+     * Ensures callback works after register CountryCodeChangedListener.
+     */
+    @Test
+    public void testCountryCodeChangedListenerInvocation() throws Exception {
+        assertTrue(mWificondControl.registerCountryCodeChangedListener(
+                Runnable::run, mCountryCodeChangedListener));
+        assertTrue(mWificondControl.registerCountryCodeChangedListener(
+                Runnable::run, mCountryCodeChangedListener2));
+
+        mWificondEventHandler.OnRegDomainChanged(TEST_COUNTRY_CODE);
+        verify(mCountryCodeChangedListener).onCountryCodeChanged(TEST_COUNTRY_CODE);
+        verify(mCountryCodeChangedListener2).onCountryCodeChanged(TEST_COUNTRY_CODE);
+
+        reset(mCountryCodeChangedListener);
+        reset(mCountryCodeChangedListener2);
+        mWificondControl.unregisterCountryCodeChangedListener(mCountryCodeChangedListener2);
+        mWificondEventHandler.OnRegDomainChanged(TEST_COUNTRY_CODE);
+        verify(mCountryCodeChangedListener).onCountryCodeChanged(TEST_COUNTRY_CODE);
+        verify(mCountryCodeChangedListener2, never()).onCountryCodeChanged(TEST_COUNTRY_CODE);
     }
 
     /**
@@ -1062,22 +1134,48 @@ public class WifiNl80211ManagerTest {
         assertEquals(capaExpected, capaActual);
     }
 
+    /**
+     * Tests notifyCountryCodeChanged
+     */
+    @Test
+    public void testNotifyCountryCodeChanged() throws Exception {
+        doNothing().when(mWificond).notifyCountryCodeChanged();
+        mWificondControl.notifyCountryCodeChanged(TEST_COUNTRY_CODE);
+        verify(mWificond).notifyCountryCodeChanged();
+    }
+
+    /**
+     * Tests notifyCountryCodeChanged with RemoteException
+     */
+    @Test(expected = RuntimeException.class)
+    public void testNotifyCountryCodeChangedRemoteException() throws Exception {
+        doThrow(new RemoteException()).when(mWificond).notifyCountryCodeChanged();
+        mWificondControl.notifyCountryCodeChanged(TEST_COUNTRY_CODE);
+        verify(mWificond).notifyCountryCodeChanged();
+    }
+
     // Create a ArgumentMatcher which captures a SingleScanSettings parameter and checks if it
     // matches the provided frequency set and ssid set.
     private class ScanMatcher implements ArgumentMatcher<SingleScanSettings> {
         int mExpectedScanType;
         private final Set<Integer> mExpectedFreqs;
         private final List<byte[]> mExpectedSsids;
+        private final boolean mExpectedEnable6GhzRnr;
 
-        ScanMatcher(int expectedScanType, Set<Integer> expectedFreqs, List<byte[]> expectedSsids) {
+        ScanMatcher(int expectedScanType, Set<Integer> expectedFreqs, List<byte[]> expectedSsids,
+                boolean expectedEnable6GhzRnr) {
             this.mExpectedScanType = expectedScanType;
             this.mExpectedFreqs = expectedFreqs;
             this.mExpectedSsids = expectedSsids;
+            this.mExpectedEnable6GhzRnr = expectedEnable6GhzRnr;
         }
 
         @Override
         public boolean matches(SingleScanSettings settings) {
             if (settings.scanType != mExpectedScanType) {
+                return false;
+            }
+            if (settings.enable6GhzRnr != mExpectedEnable6GhzRnr) {
                 return false;
             }
             ArrayList<ChannelSettings> channelSettings = settings.channelSettings;

@@ -22,6 +22,9 @@ import android.media.tv.tuner.frontend.FrontendSettings.Type;
 import android.media.tv.tuner.frontend.FrontendStatus.FrontendStatusType;
 import android.util.Range;
 
+import java.util.Arrays;
+import java.util.Objects;
+
 /**
  * This class is used to specify meta information of a frontend.
  *
@@ -31,18 +34,22 @@ import android.util.Range;
 public class FrontendInfo {
     private final int mId;
     private final int mType;
-    private final Range<Integer> mFrequencyRange;
+    private final Range<Long> mFrequencyRange;
     private final Range<Integer> mSymbolRateRange;
-    private final int mAcquireRange;
+    private final long mAcquireRange;
     private final int mExclusiveGroupId;
     private final int[] mStatusCaps;
     private final FrontendCapabilities mFrontendCap;
 
-    private FrontendInfo(int id, int type, int minFrequency, int maxFrequency, int minSymbolRate,
-            int maxSymbolRate, int acquireRange, int exclusiveGroupId, int[] statusCaps,
+    private FrontendInfo(int id, int type, long minFrequency, long maxFrequency, int minSymbolRate,
+            int maxSymbolRate, long acquireRange, int exclusiveGroupId, int[] statusCaps,
             FrontendCapabilities frontendCap) {
         mId = id;
         mType = type;
+        // if max Frequency is negative, we set it as max value of the Integer.
+        if (maxFrequency < 0) {
+            maxFrequency = Integer.MAX_VALUE;
+        }
         mFrequencyRange = new Range<>(minFrequency, maxFrequency);
         mSymbolRateRange = new Range<>(minSymbolRate, maxSymbolRate);
         mAcquireRange = acquireRange;
@@ -53,6 +60,9 @@ public class FrontendInfo {
 
     /**
      * Gets frontend ID.
+     *
+     * @return the frontend ID or {@link android.media.tv.tuner.Tuner#INVALID_FRONTEND_ID}
+     *         if invalid
      */
     public int getId() {
         return mId;
@@ -67,9 +77,21 @@ public class FrontendInfo {
 
     /**
      * Gets supported frequency range in Hz.
+     *
+     * @deprecated Use {@link #getFrequencyRangeLong()}
      */
+    @Deprecated
     @NonNull
     public Range<Integer> getFrequencyRange() {
+        return new Range<>(
+                (int) (long) mFrequencyRange.getLower(), (int) (long) mFrequencyRange.getUpper());
+    }
+
+    /**
+     * Gets supported frequency range in Hz.
+     */
+    @NonNull
+    public Range<Long> getFrequencyRangeLong() {
         return mFrequencyRange;
     }
 
@@ -85,10 +107,22 @@ public class FrontendInfo {
      * Gets acquire range in Hz.
      *
      * <p>The maximum frequency difference the frontend can detect.
+     @deprecated Use {@link #getAcquireRangeLong(long)}
      */
+    @Deprecated
     public int getAcquireRange() {
+        return (int) getAcquireRangeLong();
+    }
+
+    /**
+     * Gets acquire range in Hz.
+     *
+     * <p>The maximum frequency difference the frontend can detect.
+     */
+    public long getAcquireRangeLong() {
         return mAcquireRange;
     }
+
     /**
      * Gets exclusive group ID.
      *
@@ -98,6 +132,7 @@ public class FrontendInfo {
     public int getExclusiveGroupId() {
         return mExclusiveGroupId;
     }
+
     /**
      * Gets status capabilities.
      *
@@ -108,11 +143,37 @@ public class FrontendInfo {
     public int[] getStatusCapabilities() {
         return mStatusCaps;
     }
+
     /**
      * Gets frontend capabilities.
      */
     @NonNull
     public FrontendCapabilities getFrontendCapabilities() {
         return mFrontendCap;
+    }
+
+    /** @hide */
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) {
+            return true;
+        }
+        if (o == null || !(o instanceof FrontendInfo)) {
+            return false;
+        }
+        // TODO: compare FrontendCapabilities
+        FrontendInfo info = (FrontendInfo) o;
+        return mId == info.getId() && mType == info.getType()
+                && Objects.equals(mFrequencyRange, info.getFrequencyRangeLong())
+                && Objects.equals(mSymbolRateRange, info.getSymbolRateRange())
+                && mAcquireRange == info.getAcquireRangeLong()
+                && mExclusiveGroupId == info.getExclusiveGroupId()
+                && Arrays.equals(mStatusCaps, info.getStatusCapabilities());
+    }
+
+    /** @hide */
+    @Override
+    public int hashCode() {
+        return mId;
     }
 }

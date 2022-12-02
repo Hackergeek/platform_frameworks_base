@@ -16,45 +16,41 @@
 
 package com.android.server.wm;
 
-import android.graphics.Point;
-import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.util.MergedConfiguration;
-import android.view.DisplayCutout;
 import android.view.DragEvent;
-import android.view.IScrollCaptureController;
+import android.view.IScrollCaptureResponseListener;
 import android.view.IWindow;
 import android.view.InsetsSourceControl;
 import android.view.InsetsState;
+import android.view.ScrollCaptureResponse;
+import android.window.ClientWindowFrames;
 
 import com.android.internal.os.IResultReceiver;
 
+import java.util.ArrayList;
+
 public class TestIWindow extends IWindow.Stub {
+
+    private ArrayList<DragEvent> mDragEvents;
+
     @Override
     public void executeCommand(String command, String parameters,
             ParcelFileDescriptor descriptor) throws RemoteException {
     }
 
     @Override
-    public void resized(Rect frame, Rect contentInsets, Rect visibleInsets,
-            Rect stableInsets, boolean reportDraw, MergedConfiguration mergedConfig,
-            Rect backDropFrame, boolean forceLayout, boolean alwaysConsumeSystemBars, int displayId,
-            DisplayCutout.ParcelableWrapper displayCutout) throws RemoteException {
-    }
-
-    @Override
-    public void locationInParentDisplayChanged(Point offset) throws RemoteException {
-    }
-
-    @Override
-    public void insetsChanged(InsetsState insetsState) throws RemoteException {
-    }
-
-    @Override
-    public void insetsControlChanged(InsetsState insetsState, InsetsSourceControl[] activeControls)
+    public void resized(ClientWindowFrames frames, boolean reportDraw,
+            MergedConfiguration mergedConfig, InsetsState insetsState, boolean forceLayout,
+            boolean alwaysConsumeSystemBars, int displayId, int seqId, int resizeMode)
             throws RemoteException {
+    }
+
+    @Override
+    public void insetsControlChanged(InsetsState insetsState,
+            InsetsSourceControl[] activeControls) {
     }
 
     @Override
@@ -67,10 +63,6 @@ public class TestIWindow extends IWindow.Stub {
 
     @Override
     public void dispatchGetNewSurface() throws RemoteException {
-    }
-
-    @Override
-    public void windowFocusChanged(boolean hasFocus, boolean inTouchMode) throws RemoteException {
     }
 
     @Override
@@ -87,17 +79,20 @@ public class TestIWindow extends IWindow.Stub {
     public void dispatchWallpaperCommand(String action, int x, int y, int z, Bundle extras,
             boolean sync) throws RemoteException {
     }
+
+    public void setDragEventJournal(ArrayList<DragEvent> journal) {
+        mDragEvents = journal;
+    }
+
     @Override
     public void dispatchDragEvent(DragEvent event) throws RemoteException {
+        if (mDragEvents != null) {
+            mDragEvents.add(DragEvent.obtain(event));
+        }
     }
 
     @Override
     public void updatePointerIcon(float x, float y) throws RemoteException {
-    }
-
-    @Override
-    public void dispatchSystemUiVisibilityChanged(int seq, int globalVisibility, int localValue,
-            int localChanges) throws RemoteException {
     }
 
     @Override
@@ -110,11 +105,15 @@ public class TestIWindow extends IWindow.Stub {
     }
 
     @Override
-    public void dispatchPointerCaptureChanged(boolean hasCapture) {
-    }
+    public void requestScrollCapture(IScrollCaptureResponseListener listener)
+            throws RemoteException {
+        try {
+            listener.onScrollCaptureResponse(
+                    new ScrollCaptureResponse.Builder().setDescription("Not Implemented").build());
 
-    @Override
-    public void requestScrollCapture(IScrollCaptureController controller) throws RemoteException {
+        } catch (RemoteException ex) {
+            // ignore
+        }
     }
 
     @Override

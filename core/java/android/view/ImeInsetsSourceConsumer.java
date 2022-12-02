@@ -16,21 +16,21 @@
 
 package android.view;
 
+import static android.os.Trace.TRACE_TAG_VIEW;
+import static android.view.ImeInsetsSourceConsumerProto.INSETS_SOURCE_CONSUMER;
+import static android.view.ImeInsetsSourceConsumerProto.IS_HIDE_ANIMATION_RUNNING;
+import static android.view.ImeInsetsSourceConsumerProto.IS_REQUESTED_VISIBLE_AWAITING_CONTROL;
+import static android.view.ImeInsetsSourceConsumerProto.IS_SHOW_REQUESTED_DURING_HIDE_ANIMATION;
 import static android.view.InsetsController.AnimationType;
 import static android.view.InsetsState.ITYPE_IME;
 
 import android.annotation.Nullable;
-import android.inputmethodservice.InputMethodService;
 import android.os.IBinder;
-import android.os.Parcel;
-import android.text.TextUtils;
+import android.os.Trace;
+import android.util.proto.ProtoOutputStream;
 import android.view.SurfaceControl.Transaction;
-import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 
-import com.android.internal.annotations.VisibleForTesting;
-
-import java.util.Arrays;
 import java.util.function.Supplier;
 
 /**
@@ -38,13 +38,6 @@ import java.util.function.Supplier;
  * @hide
  */
 public final class ImeInsetsSourceConsumer extends InsetsSourceConsumer {
-    private EditorInfo mFocusedEditor;
-    private EditorInfo mPreRenderedEditor;
-    /**
-     * Determines if IME would be shown next time IME is pre-rendered for currently focused
-     * editor {@link #mFocusedEditor} if {@link #isServedEditorRendered} is {@code true}.
-     */
-    private boolean mShowOnNextImeRender;
 
     /**
      * Tracks whether we have an outstanding request from the IME to show, but weren't able to
@@ -52,37 +45,29 @@ public final class ImeInsetsSourceConsumer extends InsetsSourceConsumer {
      */
     private boolean mIsRequestedVisibleAwaitingControl;
 
+    private boolean mIsHideAnimationRunning;
+
+    /**
+     * Tracks whether {@link WindowInsetsController#show(int)} or
+     * {@link InputMethodManager#showSoftInput(View, int)} is called during IME hide animation.
+     * If it was called, we should not call {@link InputMethodManager#notifyImeHidden(IBinder)},
+     * because the IME is being shown.
+     */
+    private boolean mIsShowRequestedDuringHideAnimation;
+
     public ImeInsetsSourceConsumer(
             InsetsState state, Supplier<Transaction> transactionSupplier,
             InsetsController controller) {
         super(ITYPE_IME, state, transactionSupplier, controller);
     }
 
-    public void onPreRendered(EditorInfo info) {
-        mPreRenderedEditor = info;
-        if (mShowOnNextImeRender) {
-            mShowOnNextImeRender = false;
-            if (isServedEditorRendered()) {
-                applyImeVisibility(true /* setVisible */);
-            }
-        }
-    }
-
-    public void onServedEditorChanged(EditorInfo info) {
-        if (isFallbackOrEmptyEditor(info)) {
-            mShowOnNextImeRender = false;
-        }
-        mFocusedEditor = info;
-    }
-
-    public void applyImeVisibility(boolean setVisible) {
-        mController.applyImeVisibility(setVisible);
-    }
-
     @Override
-    public void onWindowFocusGained() {
-        super.onWindowFocusGained();
+    public void onWindowFocusGained(boolean hasViewFocus) {
+        super.onWindowFocusGained(hasViewFocus);
         getImm().registerImeConsumer(this);
+        if (isRequestedVisible() && getControl() == null) {
+            mIsRequestedVisibleAwaitingControl = true;
+        }
     }
 
     @Override
@@ -93,14 +78,36 @@ public final class ImeInsetsSourceConsumer extends InsetsSourceConsumer {
     }
 
     @Override
-    void hide(boolean animationFinished, @AnimationType int animationType) {
+    public void show(boolean fromIme) {
+        super.show(fromIme);
+        onShowRequested();
+    }
+
+    @Override
+    public void hide() {
         super.hide();
+        mIsRequestedVisibleAwaitingControl = false;
+    }
+
+    @Override
+    void hide(boolean animationFinished, @AnimationType int animationType) {
+        hide();
 
         if (animationFinished) {
-            // remove IME surface as IME has finished hide animation.
-            notifyHidden();
-            removeSurface();
+            // Remove IME surface as IME has finished hide animation, if there is no pending
+            // show request.
+            if (!mIsShowRequestedDuringHideAnimation) {
+                notifyHidden();
+                removeSurface();
+            }
         }
+        // This method is called
+        // (1) before the hide animation starts.
+        // (2) after the hide animation ends.
+        // (3) if the IME is not controllable (animationFinished == true in this case).
+        // We should reset mIsShowRequestedDuringHideAnimation in all cases.
+        mIsHideAnimationRunning = !animationFinished;
+        mIsShowRequestedDuringHideAnimation = false;
     }
 
     /**
@@ -111,7 +118,6 @@ public final class ImeInsetsSourceConsumer extends InsetsSourceConsumer {
     public @ShowResult int requestShow(boolean fromIme) {
         // TODO: ResultReceiver for IME.
         // TODO: Set mShowOnNextImeRender to automatically show IME and guard it with a flag.
-
         if (getControl() == null) {
             // If control is null, schedule to show IME when control is available.
             mIsRequestedVisibleAwaitingControl = true;
@@ -128,11 +134,13 @@ public final class ImeInsetsSourceConsumer extends InsetsSourceConsumer {
     }
 
     /**
-     * Notify {@link InputMethodService} that IME window is hidden.
+     * Notify {@link com.android.server.inputmethod.InputMethodManagerService} that
+     * IME insets are hidden.
      */
     @Override
     void notifyHidden() {
         getImm().notifyImeHidden(mController.getHost().getWindowToken());
+        Trace.asyncTraceEnd(TRACE_TAG_VIEW, "IC.hideRequestFromApi", 0);
     }
 
     @Override
@@ -144,13 +152,19 @@ public final class ImeInsetsSourceConsumer extends InsetsSourceConsumer {
     }
 
     @Override
-    public void setControl(@Nullable InsetsSourceControl control, int[] showTypes,
+    public boolean setControl(@Nullable InsetsSourceControl control, int[] showTypes,
             int[] hideTypes) {
-        super.setControl(control, showTypes, hideTypes);
+        if (!super.setControl(control, showTypes, hideTypes)) {
+            return false;
+        }
         if (control == null && !mIsRequestedVisibleAwaitingControl) {
             hide();
             removeSurface();
         }
+        if (control != null) {
+            mIsRequestedVisibleAwaitingControl = false;
+        }
+        return true;
     }
 
     @Override
@@ -167,64 +181,23 @@ public final class ImeInsetsSourceConsumer extends InsetsSourceConsumer {
         }
     }
 
-    private boolean isFallbackOrEmptyEditor(EditorInfo info) {
-        // TODO(b/123044812): Handle fallback input gracefully in IME Insets API
-        return info == null || (info.fieldId <= 0 && info.inputType <= 0);
+    @Override
+    public void dumpDebug(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        super.dumpDebug(proto, INSETS_SOURCE_CONSUMER);
+        proto.write(IS_REQUESTED_VISIBLE_AWAITING_CONTROL, mIsRequestedVisibleAwaitingControl);
+        proto.write(IS_HIDE_ANIMATION_RUNNING, mIsHideAnimationRunning);
+        proto.write(IS_SHOW_REQUESTED_DURING_HIDE_ANIMATION, mIsShowRequestedDuringHideAnimation);
+        proto.end(token);
     }
 
-    private boolean isServedEditorRendered() {
-        if (mFocusedEditor == null || mPreRenderedEditor == null
-                || isFallbackOrEmptyEditor(mFocusedEditor)
-                || isFallbackOrEmptyEditor(mPreRenderedEditor)) {
-            // No view is focused or ready.
-            return false;
+    /**
+     * Called when {@link #show} or {@link InputMethodManager#showSoftInput(View, int)} is called.
+     */
+    public void onShowRequested() {
+        if (mIsHideAnimationRunning) {
+            mIsShowRequestedDuringHideAnimation = true;
         }
-        return areEditorsSimilar(mFocusedEditor, mPreRenderedEditor);
-    }
-
-    @VisibleForTesting
-    public static boolean areEditorsSimilar(EditorInfo info1, EditorInfo info2) {
-        // We don't need to compare EditorInfo.fieldId (View#id) since that shouldn't change
-        // IME views.
-        boolean areOptionsSimilar =
-                info1.imeOptions == info2.imeOptions
-                && info1.inputType == info2.inputType
-                && TextUtils.equals(info1.packageName, info2.packageName);
-        areOptionsSimilar &= info1.privateImeOptions != null
-                ? info1.privateImeOptions.equals(info2.privateImeOptions) : true;
-
-        if (!areOptionsSimilar) {
-            return false;
-        }
-
-        // compare bundle extras.
-        if ((info1.extras == null && info2.extras == null) || info1.extras == info2.extras) {
-            return true;
-        }
-        if ((info1.extras == null && info2.extras != null)
-                || (info1.extras == null && info2.extras != null)) {
-            return false;
-        }
-        if (info1.extras.hashCode() == info2.extras.hashCode()
-                || info1.extras.equals(info1)) {
-            return true;
-        }
-        if (info1.extras.size() != info2.extras.size()) {
-            return false;
-        }
-        if (info1.extras.toString().equals(info2.extras.toString())) {
-            return true;
-        }
-
-        // Compare bytes
-        Parcel parcel1 = Parcel.obtain();
-        info1.extras.writeToParcel(parcel1, 0);
-        parcel1.setDataPosition(0);
-        Parcel parcel2 = Parcel.obtain();
-        info2.extras.writeToParcel(parcel2, 0);
-        parcel2.setDataPosition(0);
-
-        return Arrays.equals(parcel1.createByteArray(), parcel2.createByteArray());
     }
 
     private InputMethodManager getImm() {

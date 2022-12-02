@@ -16,6 +16,8 @@
 
 package com.android.internal.os;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.os.BatteryStats;
 import android.os.Parcel;
 import android.os.StatFs;
@@ -61,6 +63,7 @@ public class BatteryStatsHistory {
     public static final String FILE_SUFFIX = ".bin";
     private static final int MIN_FREE_SPACE = 100 * 1024 * 1024;
 
+    @Nullable
     private final BatteryStatsImpl mStats;
     private final Parcel mHistoryBuffer;
     private final File mHistoryDir;
@@ -107,7 +110,8 @@ public class BatteryStatsHistory {
      * @param systemDir typically /data/system
      * @param historyBuffer The in-memory history buffer.
      */
-    public BatteryStatsHistory(BatteryStatsImpl stats, File systemDir, Parcel historyBuffer) {
+    public BatteryStatsHistory(@NonNull BatteryStatsImpl stats, File systemDir,
+            Parcel historyBuffer) {
         mStats = stats;
         mHistoryBuffer = historyBuffer;
         mHistoryDir = new File(systemDir, HISTORY_DIR);
@@ -149,14 +153,18 @@ public class BatteryStatsHistory {
     /**
      * Used when BatteryStatsImpl object is created from deserialization of a parcel,
      * such as Settings app or checkin file.
-     * @param stats BatteryStatsImpl object.
-     * @param historyBuffer the history buffer inside BatteryStatsImpl
+     * @param historyBuffer the history buffer
      */
-    public BatteryStatsHistory(BatteryStatsImpl stats, Parcel historyBuffer) {
-        mStats = stats;
+    public BatteryStatsHistory(Parcel historyBuffer) {
+        mStats = null;
         mHistoryDir = null;
         mHistoryBuffer = historyBuffer;
     }
+
+    public File getHistoryDirectory() {
+        return mHistoryDir;
+    }
+
     /**
      * Set the active file that mHistoryBuffer is backed up into.
      *
@@ -184,10 +192,16 @@ public class BatteryStatsHistory {
      * create next history file.
      */
     public void startNextFile() {
+        if (mStats == null) {
+            Slog.wtf(TAG, "mStats should not be null when writing history");
+            return;
+        }
+
         if (mFileNumbers.isEmpty()) {
             Slog.wtf(TAG, "mFileNumbers should never be empty");
             return;
         }
+
         // The last number in mFileNumbers is the highest number. The next file number is highest
         // number plus one.
         final int next = mFileNumbers.get(mFileNumbers.size() - 1) + 1;
@@ -357,7 +371,7 @@ public class BatteryStatsHistory {
     private boolean skipHead(Parcel p) {
         p.setDataPosition(0);
         final int version = p.readInt();
-        if (version != mStats.VERSION) {
+        if (version != BatteryStatsImpl.VERSION) {
             return false;
         }
         // skip historyBaseTime field.
@@ -366,12 +380,26 @@ public class BatteryStatsHistory {
     }
 
     /**
-     * Read all history files and serialize into a big Parcel. This is to send history files to
-     * Settings app since Settings app can not access /data/system directory.
-     * Checkin file also call this method.
+     * Read all history files and serialize into a big Parcel.
+     * Checkin file calls this method.
+     *
      * @param out the output parcel
      */
     public void writeToParcel(Parcel out) {
+        writeToParcel(out, false /* useBlobs */);
+    }
+
+    /**
+     * This is for Settings app, when Settings app receives big history parcel, it call
+     * this method to parse it into list of parcels.
+     * @param out the output parcel
+     */
+    public void writeToBatteryUsageStatsParcel(Parcel out) {
+        out.writeBlob(mHistoryBuffer.marshall());
+        writeToParcel(out, true /* useBlobs */);
+    }
+
+    private void writeToParcel(Parcel out, boolean useBlobs) {
         final long start = SystemClock.uptimeMillis();
         out.writeInt(mFileNumbers.size() - 1);
         for(int i = 0;  i < mFileNumbers.size() - 1; i++) {
@@ -382,7 +410,12 @@ public class BatteryStatsHistory {
             } catch(Exception e) {
                 Slog.e(TAG, "Error reading file "+ file.getBaseFile().getPath(), e);
             }
-            out.writeByteArray(raw);
+            if (useBlobs) {
+                out.writeBlob(raw);
+            } else {
+                // Avoiding blobs in the check-in file for compatibility
+                out.writeByteArray(raw);
+            }
         }
         if (DEBUG) {
             Slog.d(TAG, "writeToParcel duration ms:" + (SystemClock.uptimeMillis() - start));
@@ -390,18 +423,36 @@ public class BatteryStatsHistory {
     }
 
     /**
-     * This is for Settings app, when Settings app receives big history parcel, it call
-     * this method to parse it into list of parcels.
-     * Checkin file also call this method.
+     * Reads a BatteryStatsHistory from a parcel written with
+     * the {@link #writeToBatteryUsageStatsParcel} method.
+     */
+    public static BatteryStatsHistory createFromBatteryUsageStatsParcel(Parcel in) {
+        final byte[] historyBlob = in.readBlob();
+
+        Parcel historyBuffer = Parcel.obtain();
+        historyBuffer.unmarshall(historyBlob, 0, historyBlob.length);
+
+        BatteryStatsHistory history = new BatteryStatsHistory(historyBuffer);
+        history.readFromParcel(in, true /* useBlobs */);
+        return history;
+    }
+
+    /**
+     * This is for the check-in file, which has all history files embedded.
+     *
      * @param in the input parcel.
      */
     public void readFromParcel(Parcel in) {
+        readFromParcel(in, false /* useBlobs */);
+    }
+
+    private void readFromParcel(Parcel in, boolean useBlobs) {
         final long start = SystemClock.uptimeMillis();
         mHistoryParcels = new ArrayList<>();
         final int count = in.readInt();
         for(int i = 0; i < count; i++) {
-            byte[] temp = in.createByteArray();
-            if (temp.length == 0) {
+            byte[] temp = useBlobs ? in.readBlob() : in.createByteArray();
+            if (temp == null || temp.length == 0) {
                 continue;
             }
             Parcel p = Parcel.obtain();

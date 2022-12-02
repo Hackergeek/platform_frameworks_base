@@ -23,10 +23,14 @@ import android.annotation.CallbackExecutor;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.annotation.TestApi;
 import android.annotation.UiThread;
+import android.annotation.UserIdInt;
+import android.app.Activity;
+import android.app.Service;
 import android.content.ComponentName;
 import android.content.ContentCaptureOptions;
 import android.content.Context;
@@ -38,6 +42,7 @@ import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.util.Dumpable;
 import android.util.Log;
 import android.util.Slog;
 import android.view.View;
@@ -46,7 +51,6 @@ import android.view.WindowManager;
 import android.view.contentcapture.ContentCaptureSession.FlushReason;
 
 import com.android.internal.annotations.GuardedBy;
-import com.android.internal.util.Preconditions;
 import com.android.internal.util.SyncResultReceiver;
 
 import java.io.PrintWriter;
@@ -56,6 +60,7 @@ import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.function.Consumer;
@@ -67,7 +72,7 @@ import java.util.function.Consumer;
  * <p>Content capture provides real-time, continuous capture of application activity, display and
  * events to an intelligence service that is provided by the Android system. The intelligence
  * service then uses that info to mediate and speed user journey through different apps. For
- * example, when the user receives a restaurant address in a chat app and switchs to a map app
+ * example, when the user receives a restaurant address in a chat app and switches to a map app
  * to search for that restaurant, the intelligence service could offer an autofill dialog to
  * let the user automatically select its address.
  *
@@ -208,6 +213,13 @@ import java.util.function.Consumer;
 public final class ContentCaptureManager {
 
     private static final String TAG = ContentCaptureManager.class.getSimpleName();
+
+    /** @hide */
+    public static final boolean DEBUG = false;
+
+    /** @hide */
+    @TestApi
+    public static final String DUMPABLE_NAME = "ContentCaptureManager";
 
     /** Error happened during the data sharing session. */
     public static final int DATA_SHARE_ERROR_UNKNOWN = 1;
@@ -380,6 +392,9 @@ public final class ContentCaptureManager {
     @GuardedBy("mLock")
     private MainContentCaptureSession mMainSession;
 
+    @Nullable // set on-demand by addDumpable()
+    private Dumper mDumpable;
+
     /** @hide */
     public interface ContentCaptureClient {
         /**
@@ -392,9 +407,9 @@ public final class ContentCaptureManager {
     /** @hide */
     public ContentCaptureManager(@NonNull Context context,
             @NonNull IContentCaptureManager service, @NonNull ContentCaptureOptions options) {
-        mContext = Preconditions.checkNotNull(context, "context cannot be null");
-        mService = Preconditions.checkNotNull(service, "service cannot be null");
-        mOptions = Preconditions.checkNotNull(options, "options cannot be null");
+        mContext = Objects.requireNonNull(context, "context cannot be null");
+        mService = Objects.requireNonNull(service, "service cannot be null");
+        mOptions = Objects.requireNonNull(options, "options cannot be null");
 
         ContentCaptureHelper.setLoggingLevel(mOptions.loggingLevel);
 
@@ -432,10 +447,11 @@ public final class ContentCaptureManager {
     /** @hide */
     @UiThread
     public void onActivityCreated(@NonNull IBinder applicationToken,
-            @NonNull ComponentName activityComponent) {
+            @NonNull IBinder shareableActivityToken, @NonNull ComponentName activityComponent) {
         if (mOptions.lite) return;
         synchronized (mLock) {
-            getMainContentCaptureSession().start(applicationToken, activityComponent, mFlags);
+            getMainContentCaptureSession().start(applicationToken, shareableActivityToken,
+                    activityComponent, mFlags);
         }
     }
 
@@ -476,6 +492,8 @@ public final class ContentCaptureManager {
     /**
      * Returns the component name of the system service that is consuming the captured events for
      * the current user.
+     *
+     * @throws RuntimeException if getting the component name is timed out.
      */
     @Nullable
     public ComponentName getServiceComponentName() {
@@ -644,7 +662,6 @@ public final class ContentCaptureManager {
      * @hide
      */
     @SystemApi
-    @TestApi
     public boolean isContentCaptureFeatureEnabled() {
         final SyncResultReceiver resultReceiver = syncRun(
                 (r) -> mService.isContentCaptureFeatureEnabled(r));
@@ -673,7 +690,7 @@ public final class ContentCaptureManager {
      * @param request object specifying what user data should be removed.
      */
     public void removeData(@NonNull DataRemovalRequest request) {
-        Preconditions.checkNotNull(request);
+        Objects.requireNonNull(request);
 
         try {
             mService.removeData(request);
@@ -697,9 +714,9 @@ public final class ContentCaptureManager {
     public void shareData(@NonNull DataShareRequest request,
             @NonNull @CallbackExecutor Executor executor,
             @NonNull DataShareWriteAdapter dataShareWriteAdapter) {
-        Preconditions.checkNotNull(request);
-        Preconditions.checkNotNull(dataShareWriteAdapter);
-        Preconditions.checkNotNull(executor);
+        Objects.requireNonNull(request);
+        Objects.requireNonNull(dataShareWriteAdapter);
+        Objects.requireNonNull(executor);
 
         try {
             mService.shareData(request,
@@ -733,27 +750,112 @@ public final class ContentCaptureManager {
     }
 
     /** @hide */
-    public void dump(String prefix, PrintWriter pw) {
-        pw.print(prefix); pw.println("ContentCaptureManager");
-        final String prefix2 = prefix + "  ";
-        synchronized (mLock) {
-            pw.print(prefix2); pw.print("isContentCaptureEnabled(): ");
-            pw.println(isContentCaptureEnabled());
-            pw.print(prefix2); pw.print("Debug: "); pw.print(sDebug);
-            pw.print(" Verbose: "); pw.println(sVerbose);
-            pw.print(prefix2); pw.print("Context: "); pw.println(mContext);
-            pw.print(prefix2); pw.print("User: "); pw.println(mContext.getUserId());
-            pw.print(prefix2); pw.print("Service: "); pw.println(mService);
-            pw.print(prefix2); pw.print("Flags: "); pw.println(mFlags);
-            pw.print(prefix2); pw.print("Options: "); mOptions.dumpShort(pw); pw.println();
-            if (mMainSession != null) {
-                final String prefix3 = prefix2 + "  ";
-                pw.print(prefix2); pw.println("Main session:");
-                mMainSession.dump(prefix3, pw);
-            } else {
-                pw.print(prefix2); pw.println("No sessions");
+    public void addDumpable(Activity activity) {
+        if (mDumpable == null) {
+            mDumpable = new Dumper();
+        }
+        activity.addDumpable(mDumpable);
+    }
+
+    // NOTE: ContentCaptureManager cannot implement it directly as it would be exposed as public API
+    private final class Dumper implements Dumpable {
+        @Override
+        public void dump(@NonNull PrintWriter pw, @Nullable String[] args) {
+            String prefix = "";
+            pw.print(prefix); pw.println("ContentCaptureManager");
+            final String prefix2 = prefix + "  ";
+            synchronized (mLock) {
+                pw.print(prefix2); pw.print("isContentCaptureEnabled(): ");
+                pw.println(isContentCaptureEnabled());
+                pw.print(prefix2); pw.print("Debug: "); pw.print(sDebug);
+                pw.print(" Verbose: "); pw.println(sVerbose);
+                pw.print(prefix2); pw.print("Context: "); pw.println(mContext);
+                pw.print(prefix2); pw.print("User: "); pw.println(mContext.getUserId());
+                pw.print(prefix2); pw.print("Service: "); pw.println(mService);
+                pw.print(prefix2); pw.print("Flags: "); pw.println(mFlags);
+                pw.print(prefix2); pw.print("Options: "); mOptions.dumpShort(pw); pw.println();
+                if (mMainSession != null) {
+                    final String prefix3 = prefix2 + "  ";
+                    pw.print(prefix2); pw.println("Main session:");
+                    mMainSession.dump(prefix3, pw);
+                } else {
+                    pw.print(prefix2); pw.println("No sessions");
+                }
             }
         }
+
+        @Override
+        public String getDumpableName() {
+            return DUMPABLE_NAME;
+        }
+    }
+
+    /**
+     * Resets the temporary content capture service implementation to the default component.
+     *
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.MANAGE_CONTENT_CAPTURE)
+    public static void resetTemporaryService(@UserIdInt int userId) {
+        final IContentCaptureManager service = getService();
+        if (service == null) {
+            Log.e(TAG, "IContentCaptureManager is null");
+        }
+        try {
+            service.resetTemporaryService(userId);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Temporarily sets the content capture service implementation.
+     *
+     * @param userId user Id to set the temporary service on.
+     * @param serviceName name of the new component
+     * @param duration how long the change will be valid (the service will be automatically reset
+     * to the default component after this timeout expires).
+     *
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.MANAGE_CONTENT_CAPTURE)
+    public static void setTemporaryService(
+            @UserIdInt int userId, @NonNull String serviceName, int duration) {
+        final IContentCaptureManager service = getService();
+        if (service == null) {
+            Log.e(TAG, "IContentCaptureManager is null");
+        }
+        try {
+            service.setTemporaryService(userId, serviceName, duration);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Sets whether the default content capture service should be used.
+     *
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.MANAGE_CONTENT_CAPTURE)
+    public static void setDefaultServiceEnabled(@UserIdInt int userId, boolean enabled) {
+        final IContentCaptureManager service = getService();
+        if (service == null) {
+            Log.e(TAG, "IContentCaptureManager is null");
+        }
+        try {
+            service.setDefaultServiceEnabled(userId, enabled);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    private static IContentCaptureManager getService() {
+        return IContentCaptureManager.Stub.asInterface(ServiceManager.getService(
+                Service.CONTENT_CAPTURE_MANAGER_SERVICE));
     }
 
     private interface MyRunnable {
@@ -766,9 +868,9 @@ public final class ContentCaptureManager {
 
         private DataShareAdapterDelegate(Executor executor, DataShareWriteAdapter adapter,
                 LocalDataShareAdapterResourceManager resourceManager) {
-            Preconditions.checkNotNull(executor);
-            Preconditions.checkNotNull(adapter);
-            Preconditions.checkNotNull(resourceManager);
+            Objects.requireNonNull(executor);
+            Objects.requireNonNull(adapter);
+            Objects.requireNonNull(resourceManager);
 
             resourceManager.initializeForDelegate(this, adapter, executor);
             mResourceManagerReference = new WeakReference<>(resourceManager);

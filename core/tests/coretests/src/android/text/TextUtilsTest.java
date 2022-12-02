@@ -16,6 +16,8 @@
 
 package android.text;
 
+import static android.text.TextUtils.formatSimple;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -41,6 +43,7 @@ import com.google.android.collect.Lists;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -780,6 +783,81 @@ public class TextUtilsTest {
     }
 
     @Test
+    public void truncateStringForUtf8Storage() {
+        assertEquals("", TextUtils.truncateStringForUtf8Storage("abc", 0));
+
+        //================ long normal case ================
+        StringBuilder builder = new StringBuilder();
+
+        int n = 50;
+        for (int i = 0; i < 2 * n; i++) {
+            builder.append("哈");
+        }
+        String initial = builder.toString();
+        String result = TextUtils.truncateStringForUtf8Storage(initial, n);
+
+        // Result should be the beginning of initial
+        assertTrue(initial.startsWith(result));
+
+        // Result should take less than n bytes in UTF-8
+        assertTrue(result.getBytes(StandardCharsets.UTF_8).length <= n);
+
+        // result + the next codePoint should take strictly more than
+        // n bytes in UTF-8
+        assertTrue(initial.substring(0, initial.offsetByCodePoints(result.length(), 1))
+                .getBytes(StandardCharsets.UTF_8).length > n);
+
+        // =================== short normal case =====================
+        String s = "sf\u20ACgk\u00E9ls\u00E9fg";
+        result = TextUtils.truncateStringForUtf8Storage(s, 100);
+        assertEquals(s, result);
+    }
+
+    @Test
+    public void testTruncateInMiddleOfSurrogate() {
+        StringBuilder builder = new StringBuilder();
+        String beginning = "a";
+        builder.append(beginning);
+        builder.append(Character.toChars(0x1D11E));
+
+        String result = TextUtils.truncateStringForUtf8Storage(builder.toString(), 3);
+
+        // \u1D11E is a surrogate and needs 4 bytes in UTF-8. beginning == "a" uses
+        // only 1 bytes in UTF8
+        // As we allow only 3 bytes for the whole string, so just 2 for this
+        // codePoint, there is not enough place and the string will be truncated
+        // just before it
+        assertEquals(beginning, result);
+    }
+
+    @Test
+    public void testTruncateInMiddleOfChar() {
+        StringBuilder builder = new StringBuilder();
+        String beginning = "a";
+        builder.append(beginning);
+        builder.append(Character.toChars(0x20AC));
+
+        String result = TextUtils.truncateStringForUtf8Storage(builder.toString(), 3);
+
+        // Like above, \u20AC uses 3 bytes in UTF-8, with "beginning", that makes
+        // 4 bytes so it is too big and should be truncated
+        assertEquals(beginning, result);
+    }
+
+    @Test
+    public void testTruncateSubString() {
+        String test = "sdgkl;hjsl;gjhdgkljdfhglkdj";
+        String sub = test.substring(10, 20);
+        String res = TextUtils.truncateStringForUtf8Storage(sub, 255);
+        assertEquals(sub, res);
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    public void truncateStringForUtf8StorageThrowsExceptionForNegativeSize() {
+        TextUtils.truncateStringForUtf8Storage("abc", -1);
+    }
+
+    @Test
     public void length() {
         assertEquals(0, TextUtils.length(null));
         assertEquals(0, TextUtils.length(""));
@@ -792,5 +870,83 @@ public class TextUtilsTest {
         assertEquals("ABC...", TextUtils.trimToLengthWithEllipsis("ABCDEF", 3));
         assertEquals("ABC", TextUtils.trimToLengthWithEllipsis("ABC", 3));
         assertEquals("", TextUtils.trimToLengthWithEllipsis("", 3));
+        assertNull(TextUtils.trimToLengthWithEllipsis(null, 3));
+    }
+
+    @Test
+    public void testFormatSimple_Types() {
+        assertEquals("true", formatSimple("%b", true));
+        assertEquals("false", formatSimple("%b", false));
+        assertEquals("true", formatSimple("%b", this));
+        assertEquals("false", formatSimple("%b", new Object[] { null }));
+
+        assertEquals("!", formatSimple("%c", '!'));
+
+        assertEquals("42", formatSimple("%d", 42));
+        assertEquals("281474976710656", formatSimple("%d", 281474976710656L));
+
+        assertEquals("3.14159", formatSimple("%f", 3.14159));
+        assertEquals("NaN", formatSimple("%f", Float.NaN));
+
+        assertEquals("example", formatSimple("%s", "example"));
+        assertEquals("null", formatSimple("%s", new Object[] { null }));
+
+        assertEquals("2a", formatSimple("%x", 42));
+        assertEquals("1000000000000", formatSimple("%x", 281474976710656L));
+
+        assertEquals("%", formatSimple("%%"));
+    }
+
+    @Test
+    public void testFormatSimple_Width() {
+        assertEquals("42", formatSimple("%1d", 42));
+        assertEquals("42", formatSimple("%2d", 42));
+        assertEquals(" 42", formatSimple("%3d", 42));
+        assertEquals("  42", formatSimple("%4d", 42));
+        assertEquals("  42  42", formatSimple("%4d%4d", 42, 42));
+        assertEquals(" -42", formatSimple("%4d", -42));
+        assertEquals("        42", formatSimple("%10d", 42));
+
+        assertEquals("42", formatSimple("%01d", 42));
+        assertEquals("42", formatSimple("%02d", 42));
+        assertEquals("042", formatSimple("%03d", 42));
+        assertEquals("0042", formatSimple("%04d", 42));
+        assertEquals("00420042", formatSimple("%04d%04d", 42, 42));
+        assertEquals("-042", formatSimple("%04d", -42));
+        assertEquals("0000000042", formatSimple("%010d", 42));
+    }
+
+    @Test
+    public void testFormatSimple_Empty() {
+        assertEquals("", formatSimple(""));
+    }
+
+    @Test
+    public void testFormatSimple_Typical() {
+        assertEquals("String foobar and %% number -42 together",
+                formatSimple("String %s%s and %%%% number %d%d together", "foo", "bar", -4, 2));
+    }
+
+    @Test
+    public void testFormatSimple_Advanced() {
+        assertEquals("000000000000002a.ext",
+                formatSimple("%016x.%s", 42, "ext"));
+        assertEquals("crtcl=0x002a:intrsv=Y:grnk=0x0018:gsmry=A:example:rnk=0x0000",
+                formatSimple("crtcl=0x%04x:intrsv=%c:grnk=0x%04x:gsmry=%c:%s:rnk=0x%04x",
+                        42, 'Y', 24, 'A', "example", 0));
+    }
+
+    @Test
+    public void testFormatSimple_Mismatch() {
+        try {
+            formatSimple("%s");
+            fail();
+        } catch (IllegalArgumentException expected) {
+        }
+        try {
+            formatSimple("%s", "foo", "bar");
+            fail();
+        } catch (IllegalArgumentException expected) {
+        }
     }
 }

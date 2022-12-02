@@ -19,9 +19,10 @@ package android.telephony;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.SystemApi;
-import android.annotation.TestApi;
 import android.os.Parcel;
 import android.os.Parcelable;
+
+import com.android.internal.annotations.VisibleForTesting;
 
 import java.util.Objects;
 
@@ -31,7 +32,6 @@ import java.util.Objects;
  * @hide
  */
 @SystemApi
-@TestApi
 public final class DataSpecificRegistrationInfo implements Parcelable {
     /**
      * @hide
@@ -70,22 +70,23 @@ public final class DataSpecificRegistrationInfo implements Parcelable {
     public final boolean isEnDcAvailable;
 
     /**
-     * Provides network support info for LTE VoPS and LTE Emergency bearer support
+     * Provides network support info for VoPS and Emergency bearer support
      */
     @Nullable
-    private final LteVopsSupportInfo mLteVopsSupportInfo;
+    private final VopsSupportInfo mVopsSupportInfo;
 
     /**
      * @hide
      */
-    DataSpecificRegistrationInfo(
+    @VisibleForTesting
+    public DataSpecificRegistrationInfo(
             int maxDataCalls, boolean isDcNrRestricted, boolean isNrAvailable,
-            boolean isEnDcAvailable, @Nullable LteVopsSupportInfo lteVops) {
+            boolean isEnDcAvailable, @Nullable VopsSupportInfo vops) {
         this.maxDataCalls = maxDataCalls;
         this.isDcNrRestricted = isDcNrRestricted;
         this.isNrAvailable = isNrAvailable;
         this.isEnDcAvailable = isEnDcAvailable;
-        this.mLteVopsSupportInfo = lteVops;
+        this.mVopsSupportInfo = vops;
     }
 
     /**
@@ -99,7 +100,7 @@ public final class DataSpecificRegistrationInfo implements Parcelable {
         isDcNrRestricted = dsri.isDcNrRestricted;
         isNrAvailable = dsri.isNrAvailable;
         isEnDcAvailable = dsri.isEnDcAvailable;
-        mLteVopsSupportInfo = dsri.mLteVopsSupportInfo;
+        mVopsSupportInfo = dsri.mVopsSupportInfo;
     }
 
     private DataSpecificRegistrationInfo(/* @NonNull */ Parcel source) {
@@ -107,7 +108,7 @@ public final class DataSpecificRegistrationInfo implements Parcelable {
         isDcNrRestricted = source.readBoolean();
         isNrAvailable = source.readBoolean();
         isEnDcAvailable = source.readBoolean();
-        mLteVopsSupportInfo = LteVopsSupportInfo.CREATOR.createFromParcel(source);
+        mVopsSupportInfo = source.readParcelable(VopsSupportInfo.class.getClassLoader(), android.telephony.VopsSupportInfo.class);
     }
 
     @Override
@@ -116,7 +117,7 @@ public final class DataSpecificRegistrationInfo implements Parcelable {
         dest.writeBoolean(isDcNrRestricted);
         dest.writeBoolean(isNrAvailable);
         dest.writeBoolean(isEnDcAvailable);
-        mLteVopsSupportInfo.writeToParcel(dest, flags);
+        dest.writeParcelable(mVopsSupportInfo, flags);
     }
 
     @Override
@@ -133,15 +134,15 @@ public final class DataSpecificRegistrationInfo implements Parcelable {
                 .append(" isDcNrRestricted = " + isDcNrRestricted)
                 .append(" isNrAvailable = " + isNrAvailable)
                 .append(" isEnDcAvailable = " + isEnDcAvailable)
-                .append(" " + mLteVopsSupportInfo)
+                .append(" " + mVopsSupportInfo)
                 .append(" }")
                 .toString();
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(maxDataCalls, isDcNrRestricted, isNrAvailable, isEnDcAvailable,
-                mLteVopsSupportInfo);
+        return Objects.hash(maxDataCalls, isDcNrRestricted, isNrAvailable,
+                isEnDcAvailable, mVopsSupportInfo);
     }
 
     @Override
@@ -155,7 +156,7 @@ public final class DataSpecificRegistrationInfo implements Parcelable {
                 && this.isDcNrRestricted == other.isDcNrRestricted
                 && this.isNrAvailable == other.isNrAvailable
                 && this.isEnDcAvailable == other.isEnDcAvailable
-                && Objects.equals(mLteVopsSupportInfo, other.mLteVopsSupportInfo);
+                && Objects.equals(mVopsSupportInfo, other.mVopsSupportInfo);
     }
 
     public static final @NonNull Parcelable.Creator<DataSpecificRegistrationInfo> CREATOR =
@@ -173,10 +174,26 @@ public final class DataSpecificRegistrationInfo implements Parcelable {
 
     /**
      * @return The LTE VOPS (Voice over Packet Switched) support information
+     *
+     * @deprecated use {@link #getVopsSupportInfo()}
      */
+    @Deprecated
     @NonNull
     public LteVopsSupportInfo getLteVopsSupportInfo() {
-        return mLteVopsSupportInfo;
+        return mVopsSupportInfo instanceof LteVopsSupportInfo
+                ? (LteVopsSupportInfo) mVopsSupportInfo
+                : new LteVopsSupportInfo(LteVopsSupportInfo.LTE_STATUS_NOT_AVAILABLE,
+                LteVopsSupportInfo.LTE_STATUS_NOT_AVAILABLE);
     }
 
+    /**
+     * @return The VOPS (Voice over Packet Switched) support information.
+     *
+     * The instance of {@link LteVopsSupportInfo}, or {@link NrVopsSupportInfo},
+     * null if there is there is no VOPS support information available.
+     */
+    @Nullable
+    public VopsSupportInfo getVopsSupportInfo() {
+        return mVopsSupportInfo;
+    }
 }

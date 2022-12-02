@@ -132,8 +132,8 @@ class Optimizer {
     if (context_->IsVerbose()) {
       context_->GetDiagnostics()->Note(DiagMessage() << "Optimizing APK...");
     }
-    if (!options_.resources_blacklist.empty()) {
-      ResourceFilter filter(options_.resources_blacklist);
+    if (!options_.resources_exclude_list.empty()) {
+      ResourceFilter filter(options_.resources_exclude_list);
       if (!filter.Consume(context_, apk->GetResourceTable())) {
         context_->GetDiagnostics()->Error(DiagMessage() << "failed filtering resources");
         return 1;
@@ -328,7 +328,7 @@ bool ParseConfig(const std::string& content, IAaptContext* context, OptimizeOpti
     }
     for (StringPiece directive : util::Tokenize(directives, ',')) {
       if (directive == "remove") {
-        options->resources_blacklist.insert(resource_name.ToResourceName());
+        options->resources_exclude_list.insert(resource_name.ToResourceName());
       } else if (directive == "no_collapse" || directive == "no_obfuscate") {
         options->table_flattener_options.name_collapse_exemptions.insert(
             resource_name.ToResourceName());
@@ -354,7 +354,7 @@ bool ExtractAppDataFromManifest(OptimizeContext* context, const LoadedApk* apk,
     return false;
   }
 
-  Maybe<AppInfo> app_info = ExtractAppInfoFromBinaryManifest(*manifest, context->GetDiagnostics());
+  auto app_info = ExtractAppInfoFromBinaryManifest(*manifest, context->GetDiagnostics());
   if (!app_info) {
     context->GetDiagnostics()->Error(DiagMessage()
                                      << "failed to extract data from AndroidManifest.xml");
@@ -362,7 +362,7 @@ bool ExtractAppDataFromManifest(OptimizeContext* context, const LoadedApk* apk,
   }
 
   out_options->app_info = std::move(app_info.value());
-  context->SetMinSdkVersion(out_options->app_info.min_sdk_version.value_or_default(0));
+  context->SetMinSdkVersion(out_options->app_info.min_sdk_version.value_or(0));
   return true;
 }
 
@@ -380,7 +380,7 @@ int OptimizeCommand::Action(const std::vector<std::string>& args) {
 
   if (config_path_) {
     std::string& path = config_path_.value();
-    Maybe<ConfigurationParser> for_path = ConfigurationParser::ForPath(path);
+    std::optional<ConfigurationParser> for_path = ConfigurationParser::ForPath(path);
     if (for_path) {
       options_.apk_artifacts = for_path.value().WithDiagnostics(diag).Parse(apk_path);
       if (!options_.apk_artifacts) {
@@ -427,7 +427,7 @@ int OptimizeCommand::Action(const std::vector<std::string>& args) {
   if (target_densities_) {
     // Parse the target screen densities.
     for (const StringPiece& config_str : util::Tokenize(target_densities_.value(), ',')) {
-      Maybe<uint16_t> target_density = ParseTargetDensityParameter(config_str, diag);
+      std::optional<uint16_t> target_density = ParseTargetDensityParameter(config_str, diag);
       if (!target_density) {
         return 1;
       }

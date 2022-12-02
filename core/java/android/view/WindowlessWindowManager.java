@@ -16,18 +16,25 @@
 
 package android.view;
 
+import static android.view.WindowCallbacks.RESIZE_MODE_INVALID;
+
 import android.annotation.Nullable;
 import android.content.res.Configuration;
 import android.graphics.PixelFormat;
-import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.Region;
+import android.os.Binder;
+import android.os.Bundle;
 import android.os.IBinder;
+import android.os.RemoteCallback;
 import android.os.RemoteException;
 import android.util.Log;
 import android.util.MergedConfiguration;
+import android.window.ClientWindowFrames;
+import android.window.OnBackInvokedCallbackInfo;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -46,12 +53,14 @@ public class WindowlessWindowManager implements IWindowSession {
         int mDisplayId;
         IBinder mInputChannelToken;
         Region mInputRegion;
+        IWindow mClient;
         State(SurfaceControl sc, WindowManager.LayoutParams p, int displayId,
-                IBinder inputChannelToken) {
+              IBinder inputChannelToken, IWindow client) {
             mSurfaceControl = sc;
             mParams.copyFrom(p);
             mDisplayId = displayId;
             mInputChannelToken = inputChannelToken;
+            mClient = client;
         }
     };
 
@@ -69,13 +78,14 @@ public class WindowlessWindowManager implements IWindowSession {
         new HashMap<IBinder, ResizeCompleteCallback>();
 
     private final SurfaceSession mSurfaceSession = new SurfaceSession();
-    private final SurfaceControl mRootSurface;
+    protected final SurfaceControl mRootSurface;
     private final Configuration mConfiguration;
     private final IWindowSession mRealWm;
     private final IBinder mHostInputToken;
-
-    private int mForceHeight = -1;
-    private int mForceWidth = -1;
+    private final IBinder mFocusGrantToken = new Binder();
+    private InsetsState mInsetsState;
+    private final ClientWindowFrames mTmpFrames = new ClientWindowFrames();
+    private final MergedConfiguration mTmpConfig = new MergedConfiguration();
 
     public WindowlessWindowManager(Configuration c, SurfaceControl rootSurface,
             IBinder hostInputToken) {
@@ -85,8 +95,12 @@ public class WindowlessWindowManager implements IWindowSession {
         mHostInputToken = hostInputToken;
     }
 
-    protected void setConfiguration(Configuration configuration) {
+    public void setConfiguration(Configuration configuration) {
         mConfiguration.setTo(configuration);
+    }
+
+    IBinder getFocusGrantToken() {
+        return mFocusGrantToken;
     }
 
     /**
@@ -115,7 +129,8 @@ public class WindowlessWindowManager implements IWindowSession {
             if (state.mInputChannelToken != null) {
                 try {
                     mRealWm.updateInputChannel(state.mInputChannelToken, state.mDisplayId,
-                            state.mSurfaceControl, state.mParams.flags, state.mInputRegion);
+                            state.mSurfaceControl, state.mParams.flags, state.mParams.privateFlags,
+                            state.mInputRegion);
                 } catch (RemoteException e) {
                     Log.e(TAG, "Failed to update surface input channel: ", e);
                 }
@@ -123,60 +138,72 @@ public class WindowlessWindowManager implements IWindowSession {
         }
     }
 
+    protected void attachToParentSurface(IWindow window, SurfaceControl.Builder b) {
+        b.setParent(mRootSurface);
+    }
+
     /**
      * IWindowSession implementation.
      */
     @Override
-    public int addToDisplay(IWindow window, int seq, WindowManager.LayoutParams attrs,
-            int viewVisibility, int displayId, Rect outFrame, Rect outContentInsets,
-            Rect outStableInsets,
-            DisplayCutout.ParcelableWrapper outDisplayCutout, InputChannel outInputChannel,
-            InsetsState outInsetsState, InsetsSourceControl[] outActiveControls) {
+    public int addToDisplay(IWindow window, WindowManager.LayoutParams attrs,
+            int viewVisibility, int displayId, InsetsVisibilities requestedVisibilities,
+            InputChannel outInputChannel, InsetsState outInsetsState,
+            InsetsSourceControl[] outActiveControls) {
         final SurfaceControl.Builder b = new SurfaceControl.Builder(mSurfaceSession)
-                .setParent(mRootSurface)
                 .setFormat(attrs.format)
-                .setBufferSize(getSurfaceWidth(attrs), getSurfaceHeight(attrs))
+                .setBLASTLayer()
                 .setName(attrs.getTitle().toString())
                 .setCallsite("WindowlessWindowManager.addToDisplay");
+        attachToParentSurface(window, b);
         final SurfaceControl sc = b.build();
 
         if (((attrs.inputFeatures &
                 WindowManager.LayoutParams.INPUT_FEATURE_NO_INPUT_CHANNEL) == 0)) {
             try {
-                mRealWm.grantInputChannel(displayId, sc, window, mHostInputToken, attrs.flags,
-                        attrs.type, outInputChannel);
+                if (mRealWm instanceof IWindowSession.Stub) {
+                    mRealWm.grantInputChannel(displayId,
+                            new SurfaceControl(sc, "WindowlessWindowManager.addToDisplay"),
+                            window, mHostInputToken, attrs.flags, attrs.privateFlags, attrs.type,
+                            mFocusGrantToken, attrs.getTitle().toString(), outInputChannel);
+                } else {
+                    mRealWm.grantInputChannel(displayId, sc, window, mHostInputToken, attrs.flags,
+                            attrs.privateFlags, attrs.type, mFocusGrantToken,
+                            attrs.getTitle().toString(), outInputChannel);
+                }
             } catch (RemoteException e) {
                 Log.e(TAG, "Failed to grant input to surface: ", e);
             }
         }
 
         final State state = new State(sc, attrs, displayId,
-                outInputChannel != null ? outInputChannel.getToken() : null);
+            outInputChannel != null ? outInputChannel.getToken() : null, window);
         synchronized (this) {
             mStateForWindow.put(window.asBinder(), state);
         }
 
-        return WindowManagerGlobal.ADD_OKAY | WindowManagerGlobal.ADD_FLAG_APP_VISIBLE;
+        final int res = WindowManagerGlobal.ADD_OKAY | WindowManagerGlobal.ADD_FLAG_APP_VISIBLE |
+                        WindowManagerGlobal.ADD_FLAG_USE_BLAST;
+
+        // Include whether the window is in touch mode.
+        return isInTouchMode() ? res | WindowManagerGlobal.ADD_FLAG_IN_TOUCH_MODE : res;
     }
 
     /**
      * IWindowSession implementation. Currently this class doesn't need to support for multi-user.
      */
     @Override
-    public int addToDisplayAsUser(IWindow window, int seq, WindowManager.LayoutParams attrs,
-            int viewVisibility, int displayId, int userId, Rect outFrame,
-            Rect outContentInsets, Rect outStableInsets,
-            DisplayCutout.ParcelableWrapper outDisplayCutout, InputChannel outInputChannel,
-            InsetsState outInsetsState, InsetsSourceControl[] outActiveControls) {
-        return addToDisplay(window, seq, attrs, viewVisibility, displayId,
-                outFrame, outContentInsets, outStableInsets, outDisplayCutout, outInputChannel,
-                outInsetsState, outActiveControls);
+    public int addToDisplayAsUser(IWindow window, WindowManager.LayoutParams attrs,
+            int viewVisibility, int displayId, int userId, InsetsVisibilities requestedVisibilities,
+            InputChannel outInputChannel, InsetsState outInsetsState,
+            InsetsSourceControl[] outActiveControls) {
+        return addToDisplay(window, attrs, viewVisibility, displayId, requestedVisibilities,
+                outInputChannel, outInsetsState, outActiveControls);
     }
 
     @Override
-    public int addToDisplayWithoutInputChannel(android.view.IWindow window, int seq,
+    public int addToDisplayWithoutInputChannel(android.view.IWindow window,
             android.view.WindowManager.LayoutParams attrs, int viewVisibility, int layerStackId,
-            android.graphics.Rect outContentInsets, android.graphics.Rect outStableInsets,
             android.view.InsetsState insetsState) {
         return 0;
     }
@@ -192,9 +219,13 @@ public class WindowlessWindowManager implements IWindowSession {
             throw new IllegalArgumentException(
                     "Invalid window token (never added or removed already)");
         }
+        removeSurface(state.mSurfaceControl);
+    }
 
+    /** Separate from {@link #remove} so that subclasses can put removal on a sync transaction. */
+    protected void removeSurface(SurfaceControl sc) {
         try (SurfaceControl.Transaction t = new SurfaceControl.Transaction()) {
-            t.remove(state.mSurfaceControl).apply();
+            t.remove(sc).apply();
         }
     }
 
@@ -207,13 +238,40 @@ public class WindowlessWindowManager implements IWindowSession {
         return !PixelFormat.formatHasAlpha(attrs.format);
     }
 
+    private boolean isInTouchMode() {
+        try {
+            return WindowManagerGlobal.getWindowSession().getInTouchMode();
+        } catch (RemoteException e) {
+            Log.e(TAG, "Unable to check if the window is in touch mode", e);
+        }
+        return false;
+    }
+
+    /** Access to package members for SystemWindow leashing
+     * @hide
+     */
+    protected IBinder getWindowBinder(View rootView) {
+        final ViewRootImpl root = rootView.getViewRootImpl();
+        if (root == null) {
+            return null;
+        }
+        return root.mWindow.asBinder();
+    }
+
     /** @hide */
+    @Nullable
     protected SurfaceControl getSurfaceControl(View rootView) {
         final ViewRootImpl root = rootView.getViewRootImpl();
         if (root == null) {
             return null;
         }
-        final State s = mStateForWindow.get(root.mWindow.asBinder());
+        return getSurfaceControl(root.mWindow);
+    }
+
+    /** @hide */
+    @Nullable
+    protected SurfaceControl getSurfaceControl(IWindow window) {
+        final State s = mStateForWindow.get(window.asBinder());
         if (s == null) {
             return null;
         }
@@ -221,14 +279,11 @@ public class WindowlessWindowManager implements IWindowSession {
     }
 
     @Override
-    public int relayout(IWindow window, int seq, WindowManager.LayoutParams inAttrs,
-            int requestedWidth, int requestedHeight, int viewFlags, int flags, long frameNumber,
-            Rect outFrame, Rect outContentInsets, Rect outVisibleInsets,
-            Rect outStableInsets, Rect outBackdropFrame,
-            DisplayCutout.ParcelableWrapper cutout, MergedConfiguration mergedConfiguration,
+    public int relayout(IWindow window, WindowManager.LayoutParams inAttrs,
+            int requestedWidth, int requestedHeight, int viewFlags, int flags,
+            ClientWindowFrames outFrames, MergedConfiguration mergedConfiguration,
             SurfaceControl outSurfaceControl, InsetsState outInsetsState,
-            InsetsSourceControl[] outActiveControls, Point outSurfaceSize,
-            SurfaceControl outBLASTSurfaceControl) {
+            InsetsSourceControl[] outActiveControls, Bundle outSyncSeqIdBundle) {
         final State state;
         synchronized (this) {
             state = mStateForWindow.get(window.asBinder());
@@ -247,28 +302,53 @@ public class WindowlessWindowManager implements IWindowSession {
         WindowManager.LayoutParams attrs = state.mParams;
 
         if (viewFlags == View.VISIBLE) {
-            t.setBufferSize(sc, getSurfaceWidth(attrs), getSurfaceHeight(attrs))
-                    .setOpaque(sc, isOpaque(attrs)).show(sc).apply();
+            t.setOpaque(sc, isOpaque(attrs)).show(sc).apply();
             outSurfaceControl.copyFrom(sc, "WindowlessWindowManager.relayout");
         } else {
             t.hide(sc).apply();
             outSurfaceControl.release();
         }
-        outFrame.set(0, 0, attrs.width, attrs.height);
+        outFrames.frame.set(0, 0, attrs.width, attrs.height);
+        outFrames.displayFrame.set(outFrames.frame);
 
         mergedConfiguration.setConfiguration(mConfiguration, mConfiguration);
 
         if ((attrChanges & WindowManager.LayoutParams.FLAGS_CHANGED) != 0
                 && state.mInputChannelToken != null) {
             try {
-                mRealWm.updateInputChannel(state.mInputChannelToken, state.mDisplayId, sc,
-                        attrs.flags, state.mInputRegion);
+                if(mRealWm instanceof IWindowSession.Stub) {
+                    mRealWm.updateInputChannel(state.mInputChannelToken, state.mDisplayId,
+                            new SurfaceControl(sc, "WindowlessWindowManager.relayout"),
+                            attrs.flags, attrs.privateFlags, state.mInputRegion);
+                } else {
+                    mRealWm.updateInputChannel(state.mInputChannelToken, state.mDisplayId, sc,
+                            attrs.flags, attrs.privateFlags, state.mInputRegion);
+                }
             } catch (RemoteException e) {
                 Log.e(TAG, "Failed to update surface input channel: ", e);
             }
         }
 
+        if (mInsetsState != null) {
+            outInsetsState.set(mInsetsState);
+        }
+
         return 0;
+    }
+
+    @Override
+    public int updateVisibility(IWindow window, WindowManager.LayoutParams inAttrs,
+            int viewVisibility, MergedConfiguration outMergedConfiguration,
+            SurfaceControl outSurfaceControl, InsetsState outInsetsState,
+            InsetsSourceControl[] outActiveControls) {
+        // TODO(b/161810301): Finish the implementation.
+        return 0;
+    }
+
+    @Override
+    public void updateLayout(IWindow window, WindowManager.LayoutParams inAttrs, int flags,
+            ClientWindowFrames clientWindowFrames, int requestedWidth, int requestedHeight) {
+        // TODO(b/161810301): Finish the implementation.
     }
 
     @Override
@@ -281,23 +361,20 @@ public class WindowlessWindowManager implements IWindowSession {
     }
 
     @Override
-    public void setTransparentRegion(android.view.IWindow window, android.graphics.Region region) {
-    }
-
-    @Override
     public void setInsets(android.view.IWindow window, int touchableInsets,
             android.graphics.Rect contentInsets, android.graphics.Rect visibleInsets,
             android.graphics.Region touchableRegion) {
+        setTouchRegion(window.asBinder(), touchableRegion);
     }
 
     @Override
-    public void getDisplayFrame(android.view.IWindow window,
-            android.graphics.Rect outDisplayFrame) {
+    public void clearTouchableRegion(android.view.IWindow window) {
+        setTouchRegion(window.asBinder(), null);
     }
 
     @Override
     public void finishDrawing(android.view.IWindow window,
-            android.view.SurfaceControl.Transaction postDrawTransaction) {
+            android.view.SurfaceControl.Transaction postDrawTransaction, int seqId) {
         synchronized (this) {
             final ResizeCompleteCallback c =
                 mResizeCompletionForWindow.get(window.asBinder());
@@ -407,37 +484,33 @@ public class WindowlessWindowManager implements IWindowSession {
     }
 
     @Override
-    public void reparentDisplayContent(android.view.IWindow window, android.view.SurfaceControl sc,
-            int displayId) {
-    }
-
-    @Override
-    public void updateDisplayContentLocation(android.view.IWindow window, int x, int y,
-            int displayId) {
-    }
-
-    @Override
     public void updateTapExcludeRegion(android.view.IWindow window,
             android.graphics.Region region) {
     }
 
     @Override
-    public void insetsModified(android.view.IWindow window, android.view.InsetsState state) {
+    public void updateRequestedVisibilities(IWindow window, InsetsVisibilities visibilities)  {
     }
 
     @Override
     public void reportSystemGestureExclusionChanged(android.view.IWindow window,
-            java.util.List<android.graphics.Rect> exclusionRects) {
+            List<Rect> exclusionRects) {
+    }
+
+    @Override
+    public void reportKeepClearAreasChanged(android.view.IWindow window, List<Rect> restrictedRects,
+            List<Rect> unrestrictedRects) {
     }
 
     @Override
     public void grantInputChannel(int displayId, SurfaceControl surface, IWindow window,
-            IBinder hostInputToken, int flags, int type, InputChannel outInputChannel) {
+            IBinder hostInputToken, int flags, int privateFlags, int type, IBinder focusGrantToken,
+            String inputHandleName, InputChannel outInputChannel) {
     }
 
     @Override
     public void updateInputChannel(IBinder channelToken, int displayId, SurfaceControl surface,
-            int flags, Region region) {
+            int flags, int privateFlags, Region region) {
     }
 
     @Override
@@ -445,14 +518,38 @@ public class WindowlessWindowManager implements IWindowSession {
         return null;
     }
 
-    private int getSurfaceWidth(WindowManager.LayoutParams attrs) {
-      final Rect surfaceInsets = attrs.surfaceInsets;
-      return surfaceInsets != null
-          ? attrs.width + surfaceInsets.left + surfaceInsets.right : attrs.width;
+    @Override
+    public void grantEmbeddedWindowFocus(IWindow callingWindow, IBinder targetInputToken,
+                                         boolean grantFocus) {
     }
-    private int getSurfaceHeight(WindowManager.LayoutParams attrs) {
-      final Rect surfaceInsets = attrs.surfaceInsets;
-      return surfaceInsets != null
-          ? attrs.height + surfaceInsets.top + surfaceInsets.bottom : attrs.height;
+
+    @Override
+    public void generateDisplayHash(IWindow window, Rect boundsInWindow, String hashAlgorithm,
+            RemoteCallback callback) {
+    }
+
+    @Override
+    public void setOnBackInvokedCallbackInfo(IWindow iWindow,
+            OnBackInvokedCallbackInfo callbackInfo) throws RemoteException { }
+
+    @Override
+    public boolean dropForAccessibility(IWindow window, int x, int y) {
+        return false;
+    }
+
+    public void setInsetsState(InsetsState state) {
+        mInsetsState = state;
+        for (State s : mStateForWindow.values()) {
+            try {
+                mTmpFrames.frame.set(0, 0, s.mParams.width, s.mParams.height);
+                mTmpFrames.displayFrame.set(mTmpFrames.frame);
+                mTmpConfig.setConfiguration(mConfiguration, mConfiguration);
+                s.mClient.resized(mTmpFrames, false /* reportDraw */, mTmpConfig, state,
+                        false /* forceLayout */, false /* alwaysConsumeSystemBars */, s.mDisplayId,
+                        Integer.MAX_VALUE, RESIZE_MODE_INVALID);
+            } catch (RemoteException e) {
+                // Too bad
+            }
+        }
     }
 }

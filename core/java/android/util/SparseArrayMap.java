@@ -26,16 +26,17 @@ import java.util.function.Consumer;
  * A sparse array of ArrayMaps, which is suitable for holding (userId, packageName)->object
  * associations.
  *
- * @param <T> Any class
+ * @param <K> Any class
+ * @param <V> Any class
  * @hide
  */
 @TestApi
-public class SparseArrayMap<T> {
-    private final SparseArray<ArrayMap<String, T>> mData = new SparseArray<>();
+public class SparseArrayMap<K, V> {
+    private final SparseArray<ArrayMap<K, V>> mData = new SparseArray<>();
 
-    /** Add an entry associating obj with the int-String pair. */
-    public void add(int key, @NonNull String mapKey, @Nullable T obj) {
-        ArrayMap<String, T> data = mData.get(key);
+    /** Add an entry associating obj with the int-K pair. */
+    public void add(int key, @NonNull K mapKey, @Nullable V obj) {
+        ArrayMap<K, V> data = mData.get(key);
         if (data == null) {
             data = new ArrayMap<>();
             mData.put(key, data);
@@ -50,8 +51,8 @@ public class SparseArrayMap<T> {
         }
     }
 
-    /** Return true if the structure contains an explicit entry for the int-String pair. */
-    public boolean contains(int key, @NonNull String mapKey) {
+    /** Return true if the structure contains an explicit entry for the int-K pair. */
+    public boolean contains(int key, @NonNull K mapKey) {
         return mData.contains(key) && mData.get(key).containsKey(mapKey);
     }
 
@@ -61,13 +62,21 @@ public class SparseArrayMap<T> {
     }
 
     /**
+     * Removes all the data for the keyIndex, if there was any.
+     * @hide
+     */
+    public void deleteAt(int keyIndex) {
+        mData.removeAt(keyIndex);
+    }
+
+    /**
      * Removes the data for the key and mapKey, if there was any.
      *
      * @return Returns the value that was stored under the keys, or null if there was none.
      */
     @Nullable
-    public T delete(int key, @NonNull String mapKey) {
-        ArrayMap<String, T> data = mData.get(key);
+    public V delete(int key, @NonNull K mapKey) {
+        ArrayMap<K, V> data = mData.get(key);
         if (data != null) {
             return data.remove(mapKey);
         }
@@ -75,11 +84,11 @@ public class SparseArrayMap<T> {
     }
 
     /**
-     * Get the value associated with the int-String pair.
+     * Get the value associated with the int-K pair.
      */
     @Nullable
-    public T get(int key, @NonNull String mapKey) {
-        ArrayMap<String, T> data = mData.get(key);
+    public V get(int key, @NonNull K mapKey) {
+        ArrayMap<K, V> data = mData.get(key);
         if (data != null) {
             return data.get(mapKey);
         }
@@ -91,9 +100,9 @@ public class SparseArrayMap<T> {
      * map contains no mapping for them.
      */
     @Nullable
-    public T getOrDefault(int key, @NonNull String mapKey, T defaultValue) {
+    public V getOrDefault(int key, @NonNull K mapKey, V defaultValue) {
         if (mData.contains(key)) {
-            ArrayMap<String, T> data = mData.get(key);
+            ArrayMap<K, V> data = mData.get(key);
             if (data != null && data.containsKey(mapKey)) {
                 return data.get(mapKey);
             }
@@ -111,8 +120,8 @@ public class SparseArrayMap<T> {
      *
      * @see SparseArray#indexOfKey
      */
-    public int indexOfKey(int key, @NonNull String mapKey) {
-        ArrayMap<String, T> data = mData.get(key);
+    public int indexOfKey(int key, @NonNull K mapKey) {
+        ArrayMap<K, V> data = mData.get(key);
         if (data != null) {
             return data.indexOfKey(mapKey);
         }
@@ -126,7 +135,7 @@ public class SparseArrayMap<T> {
 
     /** Returns the map's key at the given mapIndex for the given keyIndex. */
     @NonNull
-    public String keyAt(int keyIndex, int mapIndex) {
+    public K keyAt(int keyIndex, int mapIndex) {
         return mData.valueAt(keyIndex).keyAt(mapIndex);
     }
 
@@ -137,22 +146,55 @@ public class SparseArrayMap<T> {
 
     /** Returns the number of elements in the map of the given key. */
     public int numElementsForKey(int key) {
-        ArrayMap<String, T> data = mData.get(key);
+        ArrayMap<K, V> data = mData.get(key);
         return data == null ? 0 : data.size();
     }
 
-    /** Returns the value T at the given key and map index. */
+    /**
+     * Returns the number of elements in the map of the given keyIndex.
+     * @hide
+     */
+    public int numElementsForKeyAt(int keyIndex) {
+        ArrayMap<K, V> data = mData.valueAt(keyIndex);
+        return data == null ? 0 : data.size();
+    }
+
+    /** Returns the value V at the given key and map index. */
     @Nullable
-    public T valueAt(int keyIndex, int mapIndex) {
+    public V valueAt(int keyIndex, int mapIndex) {
         return mData.valueAt(keyIndex).valueAt(mapIndex);
     }
 
-    /** Iterate through all int-String pairs and operate on all of the values. */
-    public void forEach(@NonNull Consumer<T> consumer) {
+    /** Iterate through all int-K pairs and operate on all of the values. */
+    public void forEach(@NonNull Consumer<V> consumer) {
         for (int i = numMaps() - 1; i >= 0; --i) {
-            ArrayMap<String, T> data = mData.valueAt(i);
+            ArrayMap<K, V> data = mData.valueAt(i);
             for (int j = data.size() - 1; j >= 0; --j) {
                 consumer.accept(data.valueAt(j));
+            }
+        }
+    }
+
+    /**
+     * @param <K> Any class
+     * @param <V> Any class
+     * @hide
+     */
+    public interface TriConsumer<K, V> {
+        /** Consume the int-K-V tuple. */
+        void accept(int key, K mapKey, V value);
+    }
+
+    /**
+     * Iterate through all int-K pairs and operate on all of the values.
+     * @hide
+     */
+    public void forEach(@NonNull TriConsumer<K, V> consumer) {
+        for (int iIdx = numMaps() - 1; iIdx >= 0; --iIdx) {
+            final int i = mData.keyAt(iIdx);
+            final ArrayMap<K, V> data = mData.valueAt(iIdx);
+            for (int kIdx = data.size() - 1; kIdx >= 0; --kIdx) {
+                consumer.accept(i, data.keyAt(kIdx), data.valueAt(kIdx));
             }
         }
     }

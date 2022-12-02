@@ -17,16 +17,20 @@
 package com.android.server.job.controllers;
 
 import static com.android.server.job.JobSchedulerService.NEVER_INDEX;
+import static com.android.server.job.JobSchedulerService.sElapsedRealtimeClock;
 
+import android.app.ActivityManagerInternal;
 import android.os.SystemClock;
 import android.os.UserHandle;
+import android.util.ArraySet;
+import android.util.IndentingPrintWriter;
 import android.util.Log;
 import android.util.Slog;
 import android.util.proto.ProtoOutputStream;
 
-import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.AppStateTracker;
-import com.android.server.AppStateTracker.Listener;
+import com.android.server.AppStateTrackerImpl;
+import com.android.server.AppStateTrackerImpl.Listener;
 import com.android.server.LocalServices;
 import com.android.server.job.JobSchedulerService;
 import com.android.server.job.JobStore;
@@ -56,24 +60,38 @@ public final class BackgroundJobsController extends StateController {
     static final int KNOWN_ACTIVE = 1;
     static final int KNOWN_INACTIVE = 2;
 
-    private final AppStateTracker mAppStateTracker;
+    private final ActivityManagerInternal mActivityManagerInternal;
+    private final AppStateTrackerImpl mAppStateTracker;
+
+    private final UpdateJobFunctor mUpdateJobFunctor = new UpdateJobFunctor();
 
     public BackgroundJobsController(JobSchedulerService service) {
         super(service);
 
-        mAppStateTracker = Objects.requireNonNull(
+        mActivityManagerInternal = (ActivityManagerInternal) Objects.requireNonNull(
+                LocalServices.getService(ActivityManagerInternal.class));
+        mAppStateTracker = (AppStateTrackerImpl) Objects.requireNonNull(
                 LocalServices.getService(AppStateTracker.class));
         mAppStateTracker.addListener(mForceAppStandbyListener);
     }
 
     @Override
     public void maybeStartTrackingJobLocked(JobStatus jobStatus, JobStatus lastJob) {
-        updateSingleJobRestrictionLocked(jobStatus, UNKNOWN);
+        updateSingleJobRestrictionLocked(jobStatus, sElapsedRealtimeClock.millis(), UNKNOWN);
     }
 
     @Override
     public void maybeStopTrackingJobLocked(JobStatus jobStatus, JobStatus incomingJob,
             boolean forUpdate) {
+    }
+
+    @Override
+    public void evaluateStateLocked(JobStatus jobStatus) {
+        if (jobStatus.isRequestedExpeditedJob()) {
+            // Only requested-EJs could have their run-in-bg constraint change outside of something
+            // coming through the ForceAppStandbyListener.
+            updateSingleJobRestrictionLocked(jobStatus, sElapsedRealtimeClock.millis(), UNKNOWN);
+        }
     }
 
     @Override
@@ -90,9 +108,9 @@ public final class BackgroundJobsController extends StateController {
             pw.print(" from ");
             UserHandle.formatUid(pw, uid);
             pw.print(mAppStateTracker.isUidActive(uid) ? " active" : " idle");
-            if (mAppStateTracker.isUidPowerSaveWhitelisted(uid) ||
-                    mAppStateTracker.isUidTempPowerSaveWhitelisted(uid)) {
-                pw.print(", whitelisted");
+            if (mAppStateTracker.isUidPowerSaveExempt(uid)
+                    || mAppStateTracker.isUidTempPowerSaveExempt(uid)) {
+                pw.print(", exempted");
             }
             pw.print(": ");
             pw.print(sourcePkg);
@@ -131,8 +149,8 @@ public final class BackgroundJobsController extends StateController {
 
             proto.write(TrackedJob.IS_IN_FOREGROUND, mAppStateTracker.isUidActive(sourceUid));
             proto.write(TrackedJob.IS_WHITELISTED,
-                    mAppStateTracker.isUidPowerSaveWhitelisted(sourceUid) ||
-                    mAppStateTracker.isUidTempPowerSaveWhitelisted(sourceUid));
+                    mAppStateTracker.isUidPowerSaveExempt(sourceUid)
+                            || mAppStateTracker.isUidTempPowerSaveExempt(sourceUid));
 
             proto.write(TrackedJob.CAN_RUN_ANY_IN_BACKGROUND,
                     mAppStateTracker.isRunAnyInBackgroundAppOpsAllowed(sourceUid, sourcePkg));
@@ -157,39 +175,39 @@ public final class BackgroundJobsController extends StateController {
     }
 
     private void updateJobRestrictionsLocked(int filterUid, int newActiveState) {
-        final UpdateJobFunctor updateTrackedJobs = new UpdateJobFunctor(newActiveState);
+        mUpdateJobFunctor.prepare(newActiveState);
 
         final long start = DEBUG ? SystemClock.elapsedRealtimeNanos() : 0;
 
         final JobStore store = mService.getJobStore();
         if (filterUid > 0) {
-            store.forEachJobForSourceUid(filterUid, updateTrackedJobs);
+            store.forEachJobForSourceUid(filterUid, mUpdateJobFunctor);
         } else {
-            store.forEachJob(updateTrackedJobs);
+            store.forEachJob(mUpdateJobFunctor);
         }
 
         final long time = DEBUG ? (SystemClock.elapsedRealtimeNanos() - start) : 0;
         if (DEBUG) {
             Slog.d(TAG, String.format(
                     "Job status updated: %d/%d checked/total jobs, %d us",
-                    updateTrackedJobs.mCheckedCount,
-                    updateTrackedJobs.mTotalCount,
+                    mUpdateJobFunctor.mCheckedCount,
+                    mUpdateJobFunctor.mTotalCount,
                     (time / 1000)
-                    ));
+            ));
         }
 
-        if (updateTrackedJobs.mChanged) {
-            mStateChangedListener.onControllerStateChanged();
+        if (mUpdateJobFunctor.mChangedJobs.size() > 0) {
+            mStateChangedListener.onControllerStateChanged(mUpdateJobFunctor.mChangedJobs);
         }
     }
 
-    boolean updateSingleJobRestrictionLocked(JobStatus jobStatus, int activeState) {
+    boolean updateSingleJobRestrictionLocked(JobStatus jobStatus, final long nowElapsed,
+            int activeState) {
         final int uid = jobStatus.getSourceUid();
         final String packageName = jobStatus.getSourcePackageName();
 
         final boolean canRun = !mAppStateTracker.areJobsRestricted(uid, packageName,
-                (jobStatus.getInternalFlags() & JobStatus.INTERNAL_FLAG_HAS_FOREGROUND_EXEMPTION)
-                        != 0);
+                jobStatus.canRunInBatterySaver());
 
         final boolean isActive;
         if (activeState == UNKNOWN) {
@@ -198,29 +216,37 @@ public final class BackgroundJobsController extends StateController {
             isActive = (activeState == KNOWN_ACTIVE);
         }
         if (isActive && jobStatus.getStandbyBucket() == NEVER_INDEX) {
-            Slog.wtf(TAG, "App " + packageName + " became active but still in NEVER bucket");
+            jobStatus.maybeLogBucketMismatch();
         }
-        boolean didChange = jobStatus.setBackgroundNotRestrictedConstraintSatisfied(canRun);
+        boolean didChange =
+                jobStatus.setBackgroundNotRestrictedConstraintSatisfied(nowElapsed, canRun,
+                        !mActivityManagerInternal.isBgAutoRestrictedBucketFeatureFlagEnabled()
+                        && !mAppStateTracker.isRunAnyInBackgroundAppOpsAllowed(uid, packageName));
         didChange |= jobStatus.setUidActive(isActive);
         return didChange;
     }
 
     private final class UpdateJobFunctor implements Consumer<JobStatus> {
-        final int activeState;
-        boolean mChanged = false;
+        int mActiveState;
+        final ArraySet<JobStatus> mChangedJobs = new ArraySet<>();
         int mTotalCount = 0;
         int mCheckedCount = 0;
+        long mUpdateTimeElapsed = 0;
 
-        public UpdateJobFunctor(int newActiveState) {
-            activeState = newActiveState;
+        void prepare(int newActiveState) {
+            mActiveState = newActiveState;
+            mUpdateTimeElapsed = sElapsedRealtimeClock.millis();
+            mChangedJobs.clear();
+            mTotalCount = 0;
+            mCheckedCount = 0;
         }
 
         @Override
         public void accept(JobStatus jobStatus) {
             mTotalCount++;
             mCheckedCount++;
-            if (updateSingleJobRestrictionLocked(jobStatus, activeState)) {
-                mChanged = true;
+            if (updateSingleJobRestrictionLocked(jobStatus, mUpdateTimeElapsed, mActiveState)) {
+                mChangedJobs.add(jobStatus);
             }
         }
     }

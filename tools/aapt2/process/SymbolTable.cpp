@@ -75,8 +75,8 @@ const SymbolTable::Symbol* SymbolTable::FindByName(const ResourceName& name) {
 
   // Fill in the package name if necessary.
   // If there is no package in `name`, we will need to copy the ResourceName
-  // and store it somewhere; we use the Maybe<> class to reserve storage.
-  Maybe<ResourceName> name_with_package_impl;
+  // and store it somewhere; we use the std::optional<> class to reserve storage.
+  std::optional<ResourceName> name_with_package_impl;
   if (name.package.empty()) {
     name_with_package_impl = ResourceName(mangler_->GetTargetPackageName(), name.type, name.entry);
     name_with_package = &name_with_package_impl.value();
@@ -88,9 +88,9 @@ const SymbolTable::Symbol* SymbolTable::FindByName(const ResourceName& name) {
   }
 
   // The name was not found in the cache. Mangle it (if necessary) and find it in our sources.
-  // Again, here we use a Maybe<> object to reserve storage if we need to mangle.
+  // Again, here we use a std::optional<> object to reserve storage if we need to mangle.
   const ResourceName* mangled_name = name_with_package;
-  Maybe<ResourceName> mangled_name_impl;
+  std::optional<ResourceName> mangled_name_impl;
   if (mangler_->ShouldMangle(name_with_package->package)) {
     mangled_name_impl = mangler_->MangleName(*name_with_package);
     mangled_name = &mangled_name_impl.value();
@@ -183,9 +183,9 @@ std::unique_ptr<SymbolTable::Symbol> DefaultSymbolTableDelegate::FindById(
 
 std::unique_ptr<SymbolTable::Symbol> ResourceTableSymbolSource::FindByName(
     const ResourceName& name) {
-  Maybe<ResourceTable::SearchResult> result = table_->FindResource(name);
+  std::optional<ResourceTable::SearchResult> result = table_->FindResource(name);
   if (!result) {
-    if (name.type == ResourceType::kAttr) {
+    if (name.type.type == ResourceType::kAttr) {
       // Recurse and try looking up a private attribute.
       return FindByName(ResourceName(name.package, ResourceType::kAttrPrivate, name.entry));
     }
@@ -197,12 +197,13 @@ std::unique_ptr<SymbolTable::Symbol> ResourceTableSymbolSource::FindByName(
   std::unique_ptr<SymbolTable::Symbol> symbol = util::make_unique<SymbolTable::Symbol>();
   symbol->is_public = (sr.entry->visibility.level == Visibility::Level::kPublic);
 
-  if (sr.package->id && sr.type->id && sr.entry->id) {
-    symbol->id = ResourceId(sr.package->id.value(), sr.type->id.value(), sr.entry->id.value());
-    symbol->is_dynamic = (sr.package->id.value() == 0);
+  if (sr.entry->id) {
+    symbol->id = sr.entry->id.value();
+    symbol->is_dynamic =
+        (sr.entry->id.value().package_id() == 0) || sr.entry->visibility.staged_api;
   }
 
-  if (name.type == ResourceType::kAttr || name.type == ResourceType::kAttrPrivate) {
+  if (name.type.type == ResourceType::kAttr || name.type.type == ResourceType::kAttrPrivate) {
     const ConfigDescription kDefaultConfig;
     ResourceConfigValue* config_value = sr.entry->FindValue(kDefaultConfig);
     if (config_value) {
@@ -227,8 +228,7 @@ bool AssetManagerSymbolSource::AddAssetPath(const StringPiece& path) {
       apk_assets.push_back(apk_asset.get());
     }
 
-    asset_manager_.SetApkAssets(apk_assets, true /* invalidate_caches */,
-                                false /* filter_incompatible_configs */);
+    asset_manager_.SetApkAssets(apk_assets);
     return true;
   }
   return false;
@@ -265,21 +265,22 @@ bool AssetManagerSymbolSource::IsPackageDynamic(uint32_t packageId,
 
 static std::unique_ptr<SymbolTable::Symbol> LookupAttributeInTable(
     android::AssetManager2& am, ResourceId id) {
+  using namespace android;
   if (am.GetApkAssets().empty()) {
     return {};
   }
 
-  const android::ResolvedBag* bag = am.GetBag(id.id);
-  if (bag == nullptr) {
+  auto bag_result = am.GetBag(id.id);
+  if (!bag_result.has_value()) {
     return nullptr;
   }
 
   // We found a resource.
   std::unique_ptr<SymbolTable::Symbol> s = util::make_unique<SymbolTable::Symbol>(id);
-
+  const ResolvedBag* bag = *bag_result;
   const size_t count = bag->entry_count;
   for (uint32_t i = 0; i < count; i++) {
-    if (bag->entries[i].key == android::ResTable_map::ATTR_TYPE) {
+    if (bag->entries[i].key == ResTable_map::ATTR_TYPE) {
       s->attribute = std::make_shared<Attribute>(bag->entries[i].value.data);
       break;
     }
@@ -287,25 +288,25 @@ static std::unique_ptr<SymbolTable::Symbol> LookupAttributeInTable(
 
   if (s->attribute) {
     for (size_t i = 0; i < count; i++) {
-      const android::ResolvedBag::Entry& map_entry = bag->entries[i];
+      const ResolvedBag::Entry& map_entry = bag->entries[i];
       if (Res_INTERNALID(map_entry.key)) {
         switch (map_entry.key) {
-          case android::ResTable_map::ATTR_MIN:
+          case ResTable_map::ATTR_MIN:
             s->attribute->min_int = static_cast<int32_t>(map_entry.value.data);
             break;
-          case android::ResTable_map::ATTR_MAX:
+          case ResTable_map::ATTR_MAX:
             s->attribute->max_int = static_cast<int32_t>(map_entry.value.data);
             break;
         }
         continue;
       }
 
-      android::AssetManager2::ResourceName name;
-      if (!am.GetResourceName(map_entry.key, &name)) {
+      auto name = am.GetResourceName(map_entry.key);
+      if (!name.has_value()) {
         return nullptr;
       }
 
-      Maybe<ResourceName> parsed_name = ResourceUtils::ToResourceName(name);
+      std::optional<ResourceName> parsed_name = ResourceUtils::ToResourceName(*name);
       if (!parsed_name) {
         return nullptr;
       }
@@ -328,7 +329,7 @@ std::unique_ptr<SymbolTable::Symbol> AssetManagerSymbolSource::FindByName(
 
   bool found = false;
   ResourceId res_id = 0;
-  uint32_t type_spec_flags;
+  uint32_t type_spec_flags = 0;
   ResourceName real_name;
 
   // There can be mangled resources embedded within other packages. Here we will
@@ -340,8 +341,19 @@ std::unique_ptr<SymbolTable::Symbol> AssetManagerSymbolSource::FindByName(
       real_name.package = package_name;
     }
 
-    res_id = asset_manager_.GetResourceId(real_name.to_string());
-    if (res_id.is_valid_static() && asset_manager_.GetResourceFlags(res_id.id, &type_spec_flags)) {
+    auto real_res_id = asset_manager_.GetResourceId(real_name.to_string());
+    if (!real_res_id.has_value()) {
+      return true;
+    }
+
+    res_id.id = *real_res_id;
+    if (!res_id.is_valid_static()) {
+      return true;
+    }
+
+    auto flags = asset_manager_.GetResourceTypeSpecFlags(res_id.id);
+    if (flags.has_value()) {
+      type_spec_flags = *flags;
       found = true;
       return false;
     }
@@ -354,28 +366,28 @@ std::unique_ptr<SymbolTable::Symbol> AssetManagerSymbolSource::FindByName(
   }
 
   std::unique_ptr<SymbolTable::Symbol> s;
-  if (real_name.type == ResourceType::kAttr) {
+  if (real_name.type.type == ResourceType::kAttr) {
     s = LookupAttributeInTable(asset_manager_, res_id);
   } else {
     s = util::make_unique<SymbolTable::Symbol>();
     s->id = res_id;
-    s->is_dynamic = IsPackageDynamic(ResourceId(res_id).package_id(), real_name.package);
   }
 
   if (s) {
     s->is_public = (type_spec_flags & android::ResTable_typeSpec::SPEC_PUBLIC) != 0;
+    s->is_dynamic = IsPackageDynamic(ResourceId(res_id).package_id(), real_name.package) ||
+                    (type_spec_flags & android::ResTable_typeSpec::SPEC_STAGED_API) != 0;
     return s;
   }
   return {};
 }
 
-static Maybe<ResourceName> GetResourceName(android::AssetManager2& am,
-                                           ResourceId id) {
-  android::AssetManager2::ResourceName name;
-  if (!am.GetResourceName(id.id, &name)) {
+static std::optional<ResourceName> GetResourceName(android::AssetManager2& am, ResourceId id) {
+  auto name = am.GetResourceName(id.id);
+  if (!name.has_value()) {
     return {};
   }
-  return ResourceUtils::ToResourceName(name);
+  return ResourceUtils::ToResourceName(*name);
 }
 
 std::unique_ptr<SymbolTable::Symbol> AssetManagerSymbolSource::FindById(
@@ -389,29 +401,29 @@ std::unique_ptr<SymbolTable::Symbol> AssetManagerSymbolSource::FindById(
     return {};
   }
 
-  Maybe<ResourceName> maybe_name = GetResourceName(asset_manager_, id);
+  std::optional<ResourceName> maybe_name = GetResourceName(asset_manager_, id);
   if (!maybe_name) {
     return {};
   }
 
-
-  uint32_t type_spec_flags = 0;
-  if (!asset_manager_.GetResourceFlags(id.id, &type_spec_flags)) {
+  auto flags = asset_manager_.GetResourceTypeSpecFlags(id.id);
+  if (!flags.has_value()) {
     return {};
   }
 
   ResourceName& name = maybe_name.value();
   std::unique_ptr<SymbolTable::Symbol> s;
-  if (name.type == ResourceType::kAttr) {
+  if (name.type.type == ResourceType::kAttr) {
     s = LookupAttributeInTable(asset_manager_, id);
   } else {
     s = util::make_unique<SymbolTable::Symbol>();
     s->id = id;
-    s->is_dynamic = IsPackageDynamic(ResourceId(id).package_id(), name.package);
   }
 
   if (s) {
-    s->is_public = (type_spec_flags & android::ResTable_typeSpec::SPEC_PUBLIC) != 0;
+    s->is_public = (*flags & android::ResTable_typeSpec::SPEC_PUBLIC) != 0;
+    s->is_dynamic = IsPackageDynamic(ResourceId(id).package_id(), name.package) ||
+                    (*flags & android::ResTable_typeSpec::SPEC_STAGED_API) != 0;
     return s;
   }
   return {};

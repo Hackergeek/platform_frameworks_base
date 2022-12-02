@@ -34,7 +34,7 @@ public class IntArray implements Cloneable {
     private int[] mValues;
     private int mSize;
 
-    private  IntArray(int[] array, int size) {
+    private IntArray(int[] array, int size) {
         mValues = array;
         mSize = Preconditions.checkArgumentInRange(size, 0, array.length, "size");
     }
@@ -144,6 +144,17 @@ public class IntArray implements Cloneable {
     }
 
     /**
+     * Adds the values in the specified array to this array.
+     */
+    public void addAll(int[] values) {
+        final int count = values.length;
+        ensureCapacity(count);
+
+        System.arraycopy(values, 0, mValues, mSize, count);
+        mSize += count;
+    }
+
+    /**
      * Ensures capacity to append at least <code>count</code> values.
      */
     private void ensureCapacity(int count) {
@@ -167,10 +178,8 @@ public class IntArray implements Cloneable {
     }
 
     @Override
-    public IntArray clone() throws CloneNotSupportedException {
-        final IntArray clone = (IntArray) super.clone();
-        clone.mValues = mValues.clone();
-        return clone;
+    public IntArray clone() {
+        return new IntArray(mValues.clone(), mSize);
     }
 
     /**

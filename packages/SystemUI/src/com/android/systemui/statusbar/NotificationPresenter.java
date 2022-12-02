@@ -19,7 +19,7 @@ import com.android.systemui.statusbar.notification.row.ActivatableNotificationVi
 import com.android.systemui.statusbar.notification.row.ExpandableNotificationRow;
 
 /**
- * An abstraction of something that presents notifications, e.g. StatusBar. Contains methods
+ * An abstraction of something that presents notifications, e.g. CentralSurfaces. Contains methods
  * for both querying the state of the system (some modularised piece of functionality may
  * want to act differently based on e.g. whether the presenter is visible to the user or not) and
  * for affecting the state of the system (e.g. starting an intent, given that the presenter may
@@ -53,14 +53,6 @@ public interface NotificationPresenter extends ExpandableNotificationRow.OnExpan
      * Updates the visual representation of the notifications.
      */
     void updateNotificationViews(String reason);
-
-    /**
-     * Returns the maximum number of notifications to show while locked.
-     *
-     * @param recompute whether something has changed that means we should recompute this value
-     * @return the maximum number of notifications to show while locked
-     */
-    int getMaxNotificationsWhileLocked(boolean recompute);
 
     /**
      * Called when the row states are updated by {@link NotificationViewHierarchyManager}.

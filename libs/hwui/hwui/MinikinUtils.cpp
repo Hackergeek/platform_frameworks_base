@@ -21,6 +21,7 @@
 #include <log/log.h>
 
 #include <minikin/MeasuredText.h>
+#include <minikin/Measurement.h>
 #include "Paint.h"
 #include "SkPathMeasure.h"
 #include "Typeface.h"
@@ -69,6 +70,18 @@ minikin::Layout MinikinUtils::doLayout(const Paint* paint, minikin::Bidi bidiFla
     }
 }
 
+void MinikinUtils::getBounds(const Paint* paint, minikin::Bidi bidiFlags, const Typeface* typeface,
+                             const uint16_t* buf, size_t bufSize, minikin::MinikinRect* out) {
+    minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
+
+    const minikin::U16StringPiece textBuf(buf, bufSize);
+    const minikin::StartHyphenEdit startHyphen = paint->getStartHyphenEdit();
+    const minikin::EndHyphenEdit endHyphen = paint->getEndHyphenEdit();
+
+    minikin::getBounds(textBuf, minikin::Range(0, textBuf.size()), bidiFlags, minikinPaint,
+        startHyphen, endHyphen, out);
+}
+
 float MinikinUtils::measureText(const Paint* paint, minikin::Bidi bidiFlags,
                                 const Typeface* typeface, const uint16_t* buf, size_t start,
                                 size_t count, size_t bufSize, float* advances) {
@@ -80,6 +93,16 @@ float MinikinUtils::measureText(const Paint* paint, minikin::Bidi bidiFlags,
 
     return minikin::Layout::measureText(textBuf, range, bidiFlags, minikinPaint, startHyphen,
                                         endHyphen, advances);
+}
+
+minikin::MinikinExtent MinikinUtils::getFontExtent(const Paint* paint, minikin::Bidi bidiFlags,
+                                                   const Typeface* typeface, const uint16_t* buf,
+                                                   size_t start, size_t count, size_t bufSize) {
+    minikin::MinikinPaint minikinPaint = prepareMinikinPaint(paint, typeface);
+    const minikin::U16StringPiece textBuf(buf, bufSize);
+    const minikin::Range range(start, start + count);
+
+    return minikin::getFontExtent(textBuf, range, bidiFlags, minikinPaint);
 }
 
 bool MinikinUtils::hasVariationSelector(const Typeface* typeface, uint32_t codepoint, uint32_t vs) {

@@ -27,8 +27,12 @@ import android.annotation.Nullable;
 import android.app.AlertDialog;
 import android.app.AppGlobals;
 import android.app.KeyguardManager;
+import android.app.usage.UsageStatsManager;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.IntentSender;
 import android.content.pm.IPackageManager;
 import android.content.pm.PackageManager;
@@ -64,9 +68,28 @@ public class SuspendedAppActivity extends AlertActivity
     private int mNeutralButtonAction;
     private int mUserId;
     private PackageManager mPm;
+    private UsageStatsManager mUsm;
     private Resources mSuspendingAppResources;
     private SuspendDialogInfo mSuppliedDialogInfo;
     private Bundle mOptions;
+    private BroadcastReceiver mSuspendModifiedReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (Intent.ACTION_PACKAGES_SUSPENSION_CHANGED.equals(intent.getAction())) {
+                // Suspension conditions were modified, dismiss any related visible dialogs.
+                final String[] modified = intent.getStringArrayExtra(
+                        Intent.EXTRA_CHANGED_PACKAGE_LIST);
+                if (ArrayUtils.contains(modified, mSuspendedPackage)) {
+                    if (!isFinishing()) {
+                        Slog.w(TAG, "Package " + mSuspendedPackage + " has modified"
+                                + " suspension conditions while dialog was visible. Finishing.");
+                        SuspendedAppActivity.this.finish();
+                        // TODO (b/198201994): reload the suspend dialog to show most relevant info
+                    }
+                }
+            }
+        }
+    };
 
     private CharSequence getAppLabel(String packageName) {
         try {
@@ -106,13 +129,17 @@ public class SuspendedAppActivity extends AlertActivity
     }
 
     private String resolveTitle() {
-        final int titleId = (mSuppliedDialogInfo != null) ? mSuppliedDialogInfo.getTitleResId()
-                : ID_NULL;
-        if (titleId != ID_NULL && mSuspendingAppResources != null) {
-            try {
-                return mSuspendingAppResources.getString(titleId);
-            } catch (Resources.NotFoundException nfe) {
-                Slog.e(TAG, "Could not resolve string resource id " + titleId);
+        if (mSuppliedDialogInfo != null) {
+            final int titleId = mSuppliedDialogInfo.getTitleResId();
+            final String title = mSuppliedDialogInfo.getTitle();
+            if (titleId != ID_NULL && mSuspendingAppResources != null) {
+                try {
+                    return mSuspendingAppResources.getString(titleId);
+                } catch (Resources.NotFoundException nfe) {
+                    Slog.e(TAG, "Could not resolve string resource id " + titleId);
+                }
+            } else if (title != null) {
+                return title;
             }
         }
         return getString(R.string.app_suspended_title);
@@ -159,13 +186,17 @@ public class SuspendedAppActivity extends AlertActivity
                 Slog.w(TAG, "Unknown neutral button action: " + mNeutralButtonAction);
                 return null;
         }
-        final int buttonTextId = (mSuppliedDialogInfo != null)
-                ? mSuppliedDialogInfo.getNeutralButtonTextResId() : ID_NULL;
-        if (buttonTextId != ID_NULL && mSuspendingAppResources != null) {
-            try {
-                return mSuspendingAppResources.getString(buttonTextId);
-            } catch (Resources.NotFoundException nfe) {
-                Slog.e(TAG, "Could not resolve string resource id " + buttonTextId);
+        if (mSuppliedDialogInfo != null) {
+            final int buttonTextId = mSuppliedDialogInfo.getNeutralButtonTextResId();
+            final String buttonText = mSuppliedDialogInfo.getNeutralButtonText();
+            if (buttonTextId != ID_NULL && mSuspendingAppResources != null) {
+                try {
+                    return mSuspendingAppResources.getString(buttonTextId);
+                } catch (Resources.NotFoundException nfe) {
+                    Slog.e(TAG, "Could not resolve string resource id " + buttonTextId);
+                }
+            } else if (buttonText != null) {
+                return buttonText;
             }
         }
         return getString(defaultButtonTextId);
@@ -175,6 +206,7 @@ public class SuspendedAppActivity extends AlertActivity
     public void onCreate(Bundle icicle) {
         super.onCreate(icicle);
         mPm = getPackageManager();
+        mUsm = getSystemService(UsageStatsManager.class);
         getWindow().setType(WindowManager.LayoutParams.TYPE_SYSTEM_DIALOG);
 
         final Intent intent = getIntent();
@@ -191,8 +223,9 @@ public class SuspendedAppActivity extends AlertActivity
         mOnUnsuspend = intent.getParcelableExtra(EXTRA_UNSUSPEND_INTENT);
         if (mSuppliedDialogInfo != null) {
             try {
-                mSuspendingAppResources = mPm.getResourcesForApplicationAsUser(mSuspendingPackage,
-                        mUserId);
+                mSuspendingAppResources = createContextAsUser(
+                        UserHandle.of(mUserId), /* flags */ 0).getPackageManager()
+                        .getResourcesForApplication(mSuspendingPackage);
             } catch (PackageManager.NameNotFoundException ne) {
                 Slog.e(TAG, "Could not find resources for " + mSuspendingPackage, ne);
             }
@@ -213,6 +246,17 @@ public class SuspendedAppActivity extends AlertActivity
         requestDismissKeyguardIfNeeded(ap.mMessage);
 
         setupAlert();
+
+        final IntentFilter suspendModifiedFilter =
+                new IntentFilter(Intent.ACTION_PACKAGES_SUSPENSION_CHANGED);
+        registerReceiverAsUser(mSuspendModifiedReceiver, UserHandle.of(mUserId),
+                suspendModifiedFilter, null, null);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        unregisterReceiver(mSuspendModifiedReceiver);
     }
 
     private void requestDismissKeyguardIfNeeded(CharSequence dismissMessage) {
@@ -283,6 +327,7 @@ public class SuspendedAppActivity extends AlertActivity
                 }
                 break;
         }
+        mUsm.reportUserInteraction(mSuspendingPackage, mUserId);
         finish();
     }
 

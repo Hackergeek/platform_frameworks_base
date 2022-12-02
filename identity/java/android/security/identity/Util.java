@@ -16,29 +16,25 @@
 
 package android.security.identity;
 
+import android.annotation.NonNull;
+
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.math.BigInteger;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.security.PublicKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECPoint;
-import java.util.Collection;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
-class Util {
+/**
+ * @hide
+ */
+public class Util {
     private static final String TAG = "Util";
-
-    static int[] integerCollectionToArray(Collection<Integer> collection) {
-        int[] result = new int[collection.size()];
-        int n = 0;
-        for (int item : collection) {
-            result[n++] = item;
-        }
-        return result;
-    }
 
     static byte[] stripLeadingZeroes(byte[] value) {
         int n = 0;
@@ -56,15 +52,47 @@ class Util {
 
     static byte[] publicKeyEncodeUncompressedForm(PublicKey publicKey) {
         ECPoint w = ((ECPublicKey) publicKey).getW();
-        // X and Y are always positive so for interop we remove any leading zeroes
-        // inserted by the BigInteger encoder.
-        byte[] x = stripLeadingZeroes(w.getAffineX().toByteArray());
-        byte[] y = stripLeadingZeroes(w.getAffineY().toByteArray());
+        BigInteger x = w.getAffineX();
+        BigInteger y = w.getAffineY();
+        if (x.compareTo(BigInteger.ZERO) < 0) {
+            throw new RuntimeException("X is negative");
+        }
+        if (y.compareTo(BigInteger.ZERO) < 0) {
+            throw new RuntimeException("Y is negative");
+        }
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             baos.write(0x04);
-            baos.write(x);
-            baos.write(y);
+
+            // Each coordinate may be encoded in 33*, 32, or fewer bytes.
+            //
+            //  * : it can be 33 bytes because toByteArray() guarantees "The array will contain the
+            //      minimum number of bytes required to represent this BigInteger, including at
+            //      least one sign bit, which is (ceil((this.bitLength() + 1)/8))" which means that
+            //      the MSB is always 0x00. This is taken care of by calling calling
+            //      stripLeadingZeroes().
+            //
+            // We need the encoding to be exactly 32 bytes since according to RFC 5480 section 2.2
+            // and SEC 1: Elliptic Curve Cryptography section 2.3.3 the encoding is 0x04 | X | Y
+            // where X and Y are encoded in exactly 32 byte, big endian integer values each.
+            //
+            byte[] xBytes = stripLeadingZeroes(x.toByteArray());
+            if (xBytes.length > 32) {
+                throw new RuntimeException("xBytes is " + xBytes.length + " which is unexpected");
+            }
+            for (int n = 0; n < 32 - xBytes.length; n++) {
+                baos.write(0x00);
+            }
+            baos.write(xBytes);
+
+            byte[] yBytes = stripLeadingZeroes(y.toByteArray());
+            if (yBytes.length > 32) {
+                throw new RuntimeException("yBytes is " + yBytes.length + " which is unexpected");
+            }
+            for (int n = 0; n < 32 - yBytes.length; n++) {
+                baos.write(0x00);
+            }
+            baos.write(yBytes);
             return baos.toByteArray();
         } catch (IOException e) {
             throw new RuntimeException("Unexpected IOException", e);
@@ -91,8 +119,9 @@ class Util {
      *                     255.DigestSize, where DigestSize is the size of the underlying HMAC.
      * @return size pseudorandom bytes.
      */
-    static byte[] computeHkdf(
-            String macAlgorithm, final byte[] ikm, final byte[] salt, final byte[] info, int size) {
+    @NonNull public static byte[] computeHkdf(
+            @NonNull String macAlgorithm, @NonNull final byte[] ikm, @NonNull final byte[] salt,
+            @NonNull final byte[] info, int size) {
         Mac mac = null;
         try {
             mac = Mac.getInstance(macAlgorithm);
@@ -137,4 +166,5 @@ class Util {
         }
     }
 
+    private Util() {}
 }

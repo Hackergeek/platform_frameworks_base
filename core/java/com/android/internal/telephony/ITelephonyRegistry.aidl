@@ -23,6 +23,7 @@ import android.telephony.BarringInfo;
 import android.telephony.CallQuality;
 import android.telephony.CellIdentity;
 import android.telephony.CellInfo;
+import android.telephony.LinkCapacityEstimate;
 import android.telephony.TelephonyDisplayInfo;
 import android.telephony.ims.ImsReasonInfo;
 import android.telephony.PhoneCapability;
@@ -31,6 +32,7 @@ import android.telephony.PreciseDataConnectionState;
 import android.telephony.ServiceState;
 import android.telephony.SignalStrength;
 import android.telephony.emergency.EmergencyNumber;
+import com.android.internal.telephony.ICarrierPrivilegesCallback;
 import com.android.internal.telephony.IPhoneStateListener;
 import com.android.internal.telephony.IOnSubscriptionsChangedListener;
 
@@ -41,17 +43,11 @@ interface ITelephonyRegistry {
             IOnSubscriptionsChangedListener callback);
     void removeOnSubscriptionsChangedListener(String pkg,
             IOnSubscriptionsChangedListener callback);
-    /**
-      * @deprecated Use {@link #listenWithFeature(String, String, IPhoneStateListener, int,
-      * boolean) instead
-      */
-    @UnsupportedAppUsage
-    void listen(String pkg, IPhoneStateListener callback, int events, boolean notifyNow);
-    void listenWithFeature(String pkg, String featureId, IPhoneStateListener callback, int events,
-            boolean notifyNow);
-    void listenForSubscriber(in int subId, String pkg, String featureId,
-            IPhoneStateListener callback, int events, boolean notifyNow);
-    @UnsupportedAppUsage
+
+    void listenWithEventList(in boolean renounceFineLocationAccess,
+            in boolean renounceCoarseLocationAccess, in int subId, String pkg, String featureId,
+            IPhoneStateListener callback, in int[] events, boolean notifyNow);
+    @UnsupportedAppUsage(maxTargetSdk = 30, trackingBug = 170729553)
     void notifyCallStateForAllSubs(int state, String incomingNumber);
     void notifyCallState(in int phoneId, in int subId, int state, String incomingNumber);
     void notifyServiceStateForPhoneId(in int phoneId, in int subId, in ServiceState state);
@@ -67,7 +63,6 @@ interface ITelephonyRegistry {
     void notifyDataConnectionForSubscriber(
             int phoneId, int subId, in PreciseDataConnectionState preciseState);
     // Uses CellIdentity which is Parcelable here; will convert to CellLocation in client.
-    void notifyCellLocation(in CellIdentity cellLocation);
     void notifyCellLocationForSubscriber(in int subId, in CellIdentity cellLocation);
     @UnsupportedAppUsage
     void notifyCellInfo(in List<CellInfo> cellInfo);
@@ -83,6 +78,7 @@ interface ITelephonyRegistry {
     void notifySubscriptionInfoChanged();
     void notifyOpportunisticSubscriptionInfoChanged();
     void notifyCarrierNetworkChange(in boolean active);
+    void notifyCarrierNetworkChangeWithSubId(in int subId, in boolean active);
     void notifyUserMobileDataStateChangedForPhoneId(in int phoneId, in int subId, in boolean state);
     void notifyDisplayInfoChanged(int slotIndex, int subId, in TelephonyDisplayInfo telephonyDisplayInfo);
     void notifyPhoneCapabilityChanged(in PhoneCapability capability);
@@ -99,4 +95,18 @@ interface ITelephonyRegistry {
     void notifyRegistrationFailed(int slotIndex, int subId, in CellIdentity cellIdentity,
             String chosenPlmn, int domain, int causeCode, int additionalCauseCode);
     void notifyBarringInfoChanged(int slotIndex, int subId, in BarringInfo barringInfo);
+    void notifyPhysicalChannelConfigForSubscriber(in int phoneId, in int subId,
+            in List<PhysicalChannelConfig> configs);
+    void notifyDataEnabled(in int phoneId, int subId, boolean enabled, int reason);
+    void notifyAllowedNetworkTypesChanged(in int phoneId, in int subId, in int reason, in long allowedNetworkType);
+    void notifyLinkCapacityEstimateChanged(in int phoneId, in int subId,
+            in List<LinkCapacityEstimate> linkCapacityEstimateList);
+
+    void addCarrierPrivilegesCallback(
+            int phoneId, ICarrierPrivilegesCallback callback, String pkg, String featureId);
+    void removeCarrierPrivilegesCallback(ICarrierPrivilegesCallback callback, String pkg);
+    void notifyCarrierPrivilegesChanged(
+            int phoneId, in List<String> privilegedPackageNames, in int[] privilegedUids);
+    void notifyCarrierServiceChanged(int phoneId, in String packageName, int uid);
+
 }

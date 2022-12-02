@@ -16,9 +16,9 @@
 
 package com.android.systemui.statusbar.notification.collection
 
+import com.android.systemui.statusbar.notification.collection.listbuilder.NotifSection
 import com.android.systemui.statusbar.notification.collection.listbuilder.pluggable.NotifFilter
 import com.android.systemui.statusbar.notification.collection.listbuilder.pluggable.NotifPromoter
-import com.android.systemui.statusbar.notification.collection.listbuilder.pluggable.NotifSection
 
 /**
  * Stores the state that [ShadeListBuilder] assigns to this [ListEntry]
@@ -35,7 +35,6 @@ data class ListAttachState private constructor(
      * parent's section. Null if not attached to the list.
      */
     var section: NotifSection?,
-    var sectionIndex: Int,
 
     /**
      * If a [NotifFilter] is excluding this entry from the list, then that filter. Always null for
@@ -46,36 +45,62 @@ data class ListAttachState private constructor(
     /**
      * The [NotifPromoter] promoting this entry to top-level, if any. Always null for [GroupEntry]s.
      */
-    var promoter: NotifPromoter?
+    var promoter: NotifPromoter?,
+
+    /**
+     * If an entry's group was pruned from the list by NotifPipeline logic, the reason is here.
+     */
+    var groupPruneReason: String?,
+
+    /**
+     * If the [VisualStabilityManager] is suppressing group or section changes for this entry,
+     * suppressedChanges will contain the new parent or section that we would have assigned to
+     * the entry had it not been suppressed by the VisualStabilityManager.
+     */
+    var suppressedChanges: SuppressedAttachState
 ) {
+
+    /**
+     * Identifies the notification order in the entire notification list.
+     * NOTE: this property is intentionally excluded from equals calculation (by not making it a
+     *  constructor arg) because its value changes based on the presence of other members in the
+     *  list, rather than anything having to do with this entry's attachment.
+     */
+    var stableIndex: Int = -1
 
     /** Copies the state of another instance. */
     fun clone(other: ListAttachState) {
         parent = other.parent
         section = other.section
-        sectionIndex = other.sectionIndex
         excludingFilter = other.excludingFilter
         promoter = other.promoter
+        groupPruneReason = other.groupPruneReason
+        suppressedChanges.clone(other.suppressedChanges)
+        stableIndex = other.stableIndex
     }
 
     /** Resets back to a "clean" state (the same as created by the factory method) */
     fun reset() {
         parent = null
         section = null
-        sectionIndex = -1
         excludingFilter = null
         promoter = null
+        groupPruneReason = null
+        suppressedChanges.reset()
+        stableIndex = -1
     }
 
     companion object {
         @JvmStatic
         fun create(): ListAttachState {
             return ListAttachState(
-                    null,
-                    null,
-                    -1,
-                    null,
-                    null)
+                null,
+                null,
+                null,
+                null,
+                null,
+                SuppressedAttachState.create()
+            )
         }
     }
 }

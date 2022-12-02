@@ -16,6 +16,8 @@
 
 package com.android.systemui.statusbar.policy;
 
+import static android.app.admin.DevicePolicyManager.DEVICE_OWNER_TYPE_FINANCED;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -47,6 +49,7 @@ import androidx.test.runner.AndroidJUnit4;
 
 import com.android.systemui.SysuiTestCase;
 import com.android.systemui.broadcast.BroadcastDispatcher;
+import com.android.systemui.dump.DumpManager;
 import com.android.systemui.util.concurrency.FakeExecutor;
 import com.android.systemui.util.time.FakeSystemClock;
 
@@ -54,6 +57,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -62,6 +66,9 @@ import java.util.List;
 @SmallTest
 @RunWith(AndroidJUnit4.class)
 public class SecurityControllerTest extends SysuiTestCase {
+    private static final ComponentName DEVICE_OWNER_COMPONENT =
+            new ComponentName("com.android.foo", "bar");
+
     private final DevicePolicyManager mDevicePolicyManager = mock(DevicePolicyManager.class);
     private final IKeyChainService.Stub mKeyChainService = mock(IKeyChainService.Stub.class);
     private final UserManager mUserManager = mock(UserManager.class);
@@ -100,7 +107,8 @@ public class SecurityControllerTest extends SysuiTestCase {
                 mContext,
                 mHandler,
                 mBroadcastDispatcher,
-                mBgExecutor);
+                mBgExecutor,
+                Mockito.mock(DumpManager.class));
 
         verify(mBroadcastDispatcher).registerReceiverWithHandler(
                 brCaptor.capture(),
@@ -124,6 +132,22 @@ public class SecurityControllerTest extends SysuiTestCase {
     public void testGetDeviceOwnerOrganizationName() {
         when(mDevicePolicyManager.getDeviceOwnerOrganizationName()).thenReturn("organization");
         assertEquals("organization", mSecurityController.getDeviceOwnerOrganizationName());
+    }
+
+    @Test
+    public void testGetDeviceOwnerComponentOnAnyUser() {
+        when(mDevicePolicyManager.getDeviceOwnerComponentOnAnyUser())
+                .thenReturn(DEVICE_OWNER_COMPONENT);
+        assertEquals(mSecurityController.getDeviceOwnerComponentOnAnyUser(),
+                DEVICE_OWNER_COMPONENT);
+    }
+
+    @Test
+    public void testGetDeviceOwnerType() {
+        when(mDevicePolicyManager.getDeviceOwnerType(DEVICE_OWNER_COMPONENT))
+                .thenReturn(DEVICE_OWNER_TYPE_FINANCED);
+        assertEquals(mSecurityController.getDeviceOwnerType(DEVICE_OWNER_COMPONENT),
+                DEVICE_OWNER_TYPE_FINANCED);
     }
 
     @Test
@@ -181,8 +205,8 @@ public class SecurityControllerTest extends SysuiTestCase {
     @Test
     public void testNetworkRequest() {
         verify(mConnectivityManager, times(1)).registerNetworkCallback(argThat(
-                (NetworkRequest request) -> request.networkCapabilities.getUids() == null
-                        && request.networkCapabilities.getCapabilities().length == 0
+                (NetworkRequest request) ->
+                        request.equals(new NetworkRequest.Builder().clearCapabilities().build())
                 ), any(NetworkCallback.class));
     }
 

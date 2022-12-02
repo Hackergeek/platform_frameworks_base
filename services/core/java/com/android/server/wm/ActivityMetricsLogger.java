@@ -3,15 +3,14 @@ package com.android.server.wm;
 import static android.app.ActivityManager.START_SUCCESS;
 import static android.app.ActivityManager.START_TASK_TO_FRONT;
 import static android.app.ActivityManager.processStateAmToProto;
+import static android.app.WaitResult.INVALID_DELAY;
 import static android.app.WaitResult.LAUNCH_STATE_COLD;
 import static android.app.WaitResult.LAUNCH_STATE_HOT;
+import static android.app.WaitResult.LAUNCH_STATE_RELAUNCH;
 import static android.app.WaitResult.LAUNCH_STATE_WARM;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.app.WindowConfiguration.WINDOWING_MODE_MULTI_WINDOW;
-import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
-import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
-import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 
 import static com.android.internal.logging.nano.MetricsProto.MetricsEvent.ACTION_ACTIVITY_START;
@@ -57,6 +56,13 @@ import static com.android.internal.logging.nano.MetricsProto.MetricsEvent.TYPE_T
 import static com.android.internal.logging.nano.MetricsProto.MetricsEvent.TYPE_TRANSITION_REPORTED_DRAWN_NO_BUNDLE;
 import static com.android.internal.logging.nano.MetricsProto.MetricsEvent.TYPE_TRANSITION_REPORTED_DRAWN_WITH_BUNDLE;
 import static com.android.internal.logging.nano.MetricsProto.MetricsEvent.TYPE_TRANSITION_WARM_LAUNCH;
+import static com.android.internal.util.FrameworkStatsLog.APP_COMPAT_STATE_CHANGED__STATE__NOT_LETTERBOXED;
+import static com.android.internal.util.FrameworkStatsLog.APP_COMPAT_STATE_CHANGED__STATE__NOT_VISIBLE;
+import static com.android.internal.util.FrameworkStatsLog.CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__APPEARED_APPLY_TREATMENT;
+import static com.android.internal.util.FrameworkStatsLog.CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__APPEARED_REVERT_TREATMENT;
+import static com.android.internal.util.FrameworkStatsLog.CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__CLICKED_APPLY_TREATMENT;
+import static com.android.internal.util.FrameworkStatsLog.CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__CLICKED_DISMISS;
+import static com.android.internal.util.FrameworkStatsLog.CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__CLICKED_REVERT_TREATMENT;
 import static com.android.server.am.MemoryStatUtil.MemoryStat;
 import static com.android.server.am.MemoryStatUtil.readMemoryStatFromFilesystem;
 import static com.android.server.wm.ActivityTaskManagerDebugConfig.DEBUG_METRICS;
@@ -67,34 +73,41 @@ import static com.android.server.wm.EventLogTags.WM_ACTIVITY_LAUNCH_TIME;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.app.ActivityOptions;
+import android.app.ActivityOptions.SourceInfo;
+import android.app.TaskInfo;
+import android.app.TaskInfo.CameraCompatControlState;
 import android.app.WaitResult;
 import android.app.WindowConfiguration.WindowingMode;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.IncrementalStatesInfo;
 import android.content.pm.dex.ArtManagerInternal;
 import android.content.pm.dex.PackageOptimizationInfo;
 import android.metrics.LogMaker;
-import android.os.Binder;
+import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.os.Trace;
+import android.os.incremental.IncrementalManager;
 import android.util.ArrayMap;
 import android.util.EventLog;
 import android.util.Log;
 import android.util.Slog;
+import android.util.SparseArray;
 import android.util.TimeUtils;
-import android.util.proto.ProtoOutputStream;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.logging.MetricsLogger;
-import com.android.internal.os.BackgroundThread;
 import com.android.internal.util.FrameworkStatsLog;
 import com.android.internal.util.function.pooled.PooledLambda;
+import com.android.server.FgThread;
 import com.android.server.LocalServices;
+import com.android.server.apphibernation.AppHibernationManagerInternal;
+import com.android.server.apphibernation.AppHibernationService;
 
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -124,12 +137,16 @@ class ActivityMetricsLogger {
     private static final int WINDOW_STATE_INVALID = -1;
 
     /**
+     * If a launching activity isn't visible within this duration when the device is sleeping, e.g.
+     * keyguard is locked, its transition info will be dropped.
+     */
+    private static final long UNKNOWN_VISIBILITY_CHECK_DELAY_MS = 3000;
+
+    /**
      * The flag for {@link #notifyActivityLaunching} to skip associating a new launch with an active
      * transition, in the case the launch is standalone (e.g. from recents).
      */
     private static final int IGNORE_CALLER = -1;
-    private static final int INVALID_DELAY = -1;
-    private static final int INVALID_TRANSITION_TYPE = -1;
 
     // Preallocated strings we are sending to tron, so we don't have to allocate a new one every
     // time we log.
@@ -138,13 +155,17 @@ class ActivityMetricsLogger {
 
     private int mWindowState = WINDOW_STATE_STANDARD;
     private long mLastLogTimeSecs;
-    private final ActivityStackSupervisor mSupervisor;
+    private final ActivityTaskSupervisor mSupervisor;
     private final MetricsLogger mMetricsLogger = new MetricsLogger();
+    private final Handler mLoggerHandler = FgThread.getHandler();
 
     /** All active transitions. */
     private final ArrayList<TransitionInfo> mTransitionInfoList = new ArrayList<>();
     /** Map : Last launched activity => {@link TransitionInfo} */
     private final ArrayMap<ActivityRecord, TransitionInfo> mLastTransitionInfo = new ArrayMap<>();
+    /** SparseArray : Package UID => {@link PackageCompatStateInfo} */
+    private final SparseArray<PackageCompatStateInfo> mPackageUidToCompatStateInfo =
+            new SparseArray<>(0);
 
     private ArtManagerInternal mArtManagerInternal;
     private final StringBuilder mStringBuilder = new StringBuilder();
@@ -154,21 +175,68 @@ class ActivityMetricsLogger {
      * in-order on the same thread to fulfill the "happens-before" guarantee in LaunchObserver.
      */
     private final LaunchObserverRegistryImpl mLaunchObserver;
-    @VisibleForTesting static final int LAUNCH_OBSERVER_ACTIVITY_RECORD_PROTO_CHUNK_SIZE = 512;
+    private final ArrayMap<String, Boolean> mLastHibernationStates = new ArrayMap<>();
+    private AppHibernationManagerInternal mAppHibernationManagerInternal;
 
     /**
      * The information created when an intent is incoming but we do not yet know whether it will be
      * launched successfully.
      */
     static final class LaunchingState {
+        /** The device uptime of {@link #notifyActivityLaunching}. */
+        private final long mCurrentUpTimeMs = SystemClock.uptimeMillis();
         /** The timestamp of {@link #notifyActivityLaunching}. */
         private long mCurrentTransitionStartTimeNs;
         /** Non-null when a {@link TransitionInfo} is created for this state. */
         private TransitionInfo mAssociatedTransitionInfo;
+        /** The sequence id for trace. It is used to map the traces before resolving intent. */
+        private static int sTraceSeqId;
+        /** The trace format is "launchingActivity#$seqId:$state(:$packageName)". */
+        String mTraceName;
+
+        LaunchingState() {
+            if (!Trace.isTagEnabled(Trace.TRACE_TAG_ACTIVITY_MANAGER)) {
+                return;
+            }
+            // Use an id because the launching app is not yet known before resolving intent.
+            sTraceSeqId++;
+            mTraceName = "launchingActivity#" + sTraceSeqId;
+            Trace.asyncTraceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, mTraceName, 0);
+        }
+
+        void stopTrace(boolean abort, TransitionInfo endInfo) {
+            if (mTraceName == null) return;
+            if (!abort && endInfo != mAssociatedTransitionInfo) {
+                // Multiple TransitionInfo can be associated with the same LaunchingState (e.g. a
+                // launching activity launches another activity in a different windowing mode or
+                // display). Only the original associated info can emit a "completed" trace.
+                return;
+            }
+            Trace.asyncTraceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER, mTraceName, 0);
+            final String launchResult;
+            if (mAssociatedTransitionInfo == null) {
+                launchResult = ":failed";
+            } else {
+                launchResult = (abort ? ":canceled:" : mAssociatedTransitionInfo.mProcessSwitch
+                        ? ":completed:" : ":completed-same-process:")
+                        + mAssociatedTransitionInfo.mLastLaunchedActivity.packageName;
+            }
+            // Put a supplement trace as the description of the async trace with the same id.
+            Trace.instant(Trace.TRACE_TAG_ACTIVITY_MANAGER, mTraceName + launchResult);
+            mTraceName = null;
+        }
 
         @VisibleForTesting
         boolean allDrawn() {
-            return mAssociatedTransitionInfo != null && mAssociatedTransitionInfo.allDrawn();
+            return mAssociatedTransitionInfo != null && mAssociatedTransitionInfo.mIsDrawn;
+        }
+
+        boolean hasActiveTransitionInfo() {
+            return mAssociatedTransitionInfo != null;
+        }
+
+        boolean contains(ActivityRecord r) {
+            return mAssociatedTransitionInfo != null && mAssociatedTransitionInfo.contains(r);
         }
     }
 
@@ -186,19 +254,23 @@ class ActivityMetricsLogger {
          * observer to identify which callbacks belong to a launch event.
          */
         final long mTransitionStartTimeNs;
-        /** The device uptime in seconds when this transition info is created. */
-        final int mCurrentTransitionDeviceUptime;
+        /** The device uptime in millis when this transition info is created. */
+        final long mTransitionDeviceUptimeMs;
         /** The type can be cold (new process), warm (new activity), or hot (bring to front). */
         final int mTransitionType;
         /** Whether the process was already running when the transition started. */
         final boolean mProcessRunning;
         /** whether the process of the launching activity didn't have any active activity. */
         final boolean mProcessSwitch;
-        /** The activities that should be drawn. */
-        final LinkedList<ActivityRecord> mPendingDrawActivities = new LinkedList<>();
+        /** Whether the last launched activity has reported drawn. */
+        boolean mIsDrawn;
         /** The latest activity to have been launched. */
         @NonNull ActivityRecord mLastLaunchedActivity;
 
+        /** The type of the source that triggers the launch event. */
+        @SourceInfo.SourceType int mSourceType;
+        /** The time from the source event (e.g. touch) to {@link #notifyActivityLaunching}. */
+        int mSourceEventDelayMs = INVALID_DELAY;
         /** The time from {@link #mTransitionStartTimeNs} to {@link #notifyTransitionStarting}. */
         int mCurrentTransitionDelayMs;
         /** The time from {@link #mTransitionStartTimeNs} to {@link #notifyStartingWindowDrawn}. */
@@ -213,6 +285,8 @@ class ActivityMetricsLogger {
         boolean mLoggedStartingWindowDrawn;
         /** If the any app transitions have been logged as starting. */
         boolean mLoggedTransitionStarting;
+        /** Whether any activity belonging to this transition has relaunched. */
+        boolean mRelaunched;
 
         /** Non-null if the application has reported drawn but its window hasn't. */
         @Nullable Runnable mPendingFullyDrawn;
@@ -222,40 +296,50 @@ class ActivityMetricsLogger {
         /** @return Non-null if there will be a window drawn event for the launch. */
         @Nullable
         static TransitionInfo create(@NonNull ActivityRecord r,
-                @NonNull LaunchingState launchingState, boolean processRunning,
-                boolean processSwitch, int startResult) {
-            int transitionType = INVALID_TRANSITION_TYPE;
+                @NonNull LaunchingState launchingState, @Nullable ActivityOptions options,
+                boolean processRunning, boolean processSwitch, boolean newActivityCreated,
+                int startResult) {
+            if (startResult != START_SUCCESS && startResult != START_TASK_TO_FRONT) {
+                return null;
+            }
+            final int transitionType;
             if (processRunning) {
-                if (startResult == START_SUCCESS) {
-                    transitionType = TYPE_TRANSITION_WARM_LAUNCH;
-                } else if (startResult == START_TASK_TO_FRONT) {
-                    transitionType = TYPE_TRANSITION_HOT_LAUNCH;
-                }
-            } else if (startResult == START_SUCCESS || startResult == START_TASK_TO_FRONT) {
+                transitionType = !newActivityCreated && r.attachedToProcess()
+                        ? TYPE_TRANSITION_HOT_LAUNCH
+                        : TYPE_TRANSITION_WARM_LAUNCH;
+            } else {
                 // Task may still exist when cold launching an activity and the start result will be
                 // set to START_TASK_TO_FRONT. Treat this as a COLD launch.
                 transitionType = TYPE_TRANSITION_COLD_LAUNCH;
             }
-            if (transitionType == INVALID_TRANSITION_TYPE) {
-                // That means the startResult is neither START_SUCCESS nor START_TASK_TO_FRONT.
-                return null;
-            }
-            return new TransitionInfo(r, launchingState, transitionType, processRunning,
+            return new TransitionInfo(r, launchingState, options, transitionType, processRunning,
                     processSwitch);
         }
 
         /** Use {@link TransitionInfo#create} instead to ensure the transition type is valid. */
-        private TransitionInfo(ActivityRecord r, LaunchingState launchingState, int transitionType,
-                boolean processRunning, boolean processSwitch) {
+        private TransitionInfo(ActivityRecord r, LaunchingState launchingState,
+                ActivityOptions options, int transitionType, boolean processRunning,
+                boolean processSwitch) {
             mLaunchingState = launchingState;
             mTransitionStartTimeNs = launchingState.mCurrentTransitionStartTimeNs;
             mTransitionType = transitionType;
             mProcessRunning = processRunning;
             mProcessSwitch = processSwitch;
-            mCurrentTransitionDeviceUptime =
-                    (int) TimeUnit.MILLISECONDS.toSeconds(SystemClock.uptimeMillis());
+            mTransitionDeviceUptimeMs = launchingState.mCurrentUpTimeMs;
             setLatestLaunchedActivity(r);
-            launchingState.mAssociatedTransitionInfo = this;
+            // The launching state can be reused by consecutive launch. Its original association
+            // shouldn't be changed by a separated transition.
+            if (launchingState.mAssociatedTransitionInfo == null) {
+                launchingState.mAssociatedTransitionInfo = this;
+            }
+            if (options != null) {
+                final SourceInfo sourceInfo = options.getSourceInfo();
+                if (sourceInfo != null) {
+                    mSourceType = sourceInfo.type;
+                    mSourceEventDelayMs =
+                            (int) (launchingState.mCurrentUpTimeMs - sourceInfo.eventTimeMs);
+                }
+            }
         }
 
         /**
@@ -267,27 +351,27 @@ class ActivityMetricsLogger {
             if (mLastLaunchedActivity == r) {
                 return;
             }
-            mLastLaunchedActivity = r;
-            if (!r.noDisplay) {
-                if (DEBUG_METRICS) Slog.i(TAG, "Add pending draw " + r);
-                mPendingDrawActivities.add(r);
+            if (mLastLaunchedActivity != null) {
+                // Transfer the launch cookie and launch root task because it is a consecutive
+                // launch event.
+                r.mLaunchCookie = mLastLaunchedActivity.mLaunchCookie;
+                mLastLaunchedActivity.mLaunchCookie = null;
+                r.mLaunchRootTask = mLastLaunchedActivity.mLaunchRootTask;
+                mLastLaunchedActivity.mLaunchRootTask = null;
             }
+            mLastLaunchedActivity = r;
+            mIsDrawn = r.isReportedDrawn();
+        }
+
+        /** Returns {@code true} if the incoming activity can belong to this transition. */
+        boolean canCoalesce(ActivityRecord r) {
+            return mLastLaunchedActivity.mDisplayContent == r.mDisplayContent
+                    && mLastLaunchedActivity.getWindowingMode() == r.getWindowingMode();
         }
 
         /** @return {@code true} if the activity matches a launched activity in this transition. */
-        boolean contains(WindowContainer wc) {
-            final ActivityRecord r = AppTransitionController.getAppFromContainer(wc);
-            return r != null && (r == mLastLaunchedActivity || mPendingDrawActivities.contains(r));
-        }
-
-        /** Called when the activity is drawn or won't be drawn. */
-        void removePendingDrawActivity(ActivityRecord r) {
-            if (DEBUG_METRICS) Slog.i(TAG, "Remove pending draw " + r);
-            mPendingDrawActivities.remove(r);
-        }
-
-        boolean allDrawn() {
-            return mPendingDrawActivities.isEmpty();
+        boolean contains(ActivityRecord r) {
+            return r == mLastLaunchedActivity;
         }
 
         /**
@@ -310,7 +394,7 @@ class ActivityMetricsLogger {
         @Override
         public String toString() {
             return "TransitionInfo{" + Integer.toHexString(System.identityHashCode(this))
-                    + " a=" + mLastLaunchedActivity + " ua=" + mPendingDrawActivities + "}";
+                    + " a=" + mLastLaunchedActivity + " d=" + mIsDrawn + "}";
         }
     }
 
@@ -324,6 +408,8 @@ class ActivityMetricsLogger {
         final private String launchedActivityAppRecordRequiredAbi;
         final String launchedActivityShortComponentName;
         final private String processName;
+        @VisibleForTesting final @SourceInfo.SourceType int sourceType;
+        @VisibleForTesting final int sourceEventDelayMs;
         final private int reason;
         final private int startingWindowDelayMs;
         final private int bindApplicationDelayMs;
@@ -336,6 +422,7 @@ class ActivityMetricsLogger {
          */
         final int windowsFullyDrawnDelayMs;
         final int activityRecordIdHashCode;
+        final boolean relaunched;
 
         private TransitionInfoSnapshot(TransitionInfo info) {
             this(info, info.mLastLaunchedActivity, INVALID_DELAY);
@@ -352,16 +439,19 @@ class ActivityMetricsLogger {
                     ? null
                     : launchedActivity.app.getRequiredAbi();
             reason = info.mReason;
+            sourceEventDelayMs = info.mSourceEventDelayMs;
             startingWindowDelayMs = info.mStartingWindowDelayMs;
             bindApplicationDelayMs = info.mBindApplicationDelayMs;
             windowsDrawnDelayMs = info.mWindowsDrawnDelayMs;
             type = info.mTransitionType;
             processRecord = launchedActivity.app;
             processName = launchedActivity.processName;
+            sourceType = info.mSourceType;
             userId = launchedActivity.mUserId;
             launchedActivityShortComponentName = launchedActivity.shortComponentName;
             activityRecordIdHashCode = System.identityHashCode(launchedActivity);
             this.windowsFullyDrawnDelayMs = windowsFullyDrawnDelayMs;
+            relaunched = info.mRelaunched;
         }
 
         @WaitResult.LaunchState int getLaunchState() {
@@ -369,19 +459,39 @@ class ActivityMetricsLogger {
                 case TYPE_TRANSITION_WARM_LAUNCH:
                     return LAUNCH_STATE_WARM;
                 case TYPE_TRANSITION_HOT_LAUNCH:
-                    return LAUNCH_STATE_HOT;
+                    return relaunched ? LAUNCH_STATE_RELAUNCH : LAUNCH_STATE_HOT;
                 case TYPE_TRANSITION_COLD_LAUNCH:
                     return LAUNCH_STATE_COLD;
                 default:
                     return -1;
             }
         }
+
+        PackageOptimizationInfo getPackageOptimizationInfo(ArtManagerInternal artManagerInternal) {
+            return artManagerInternal == null || launchedActivityAppRecordRequiredAbi == null
+                    ? PackageOptimizationInfo.createWithNoInfo()
+                    : artManagerInternal.getPackageOptimizationInfo(applicationInfo,
+                            launchedActivityAppRecordRequiredAbi, launchedActivityName);
+        }
     }
 
-    ActivityMetricsLogger(ActivityStackSupervisor supervisor, Looper looper) {
+    /** Information about the App Compat state logging associated with a package UID . */
+    private static final class PackageCompatStateInfo {
+        /** All activities that have a visible state. */
+        final ArrayList<ActivityRecord> mVisibleActivities = new ArrayList<>();
+        /** The last logged state. */
+        int mLastLoggedState = APP_COMPAT_STATE_CHANGED__STATE__NOT_VISIBLE;
+        @Nullable ActivityRecord mLastLoggedActivity;
+    }
+
+    ActivityMetricsLogger(ActivityTaskSupervisor supervisor, Looper looper) {
         mLastLogTimeSecs = SystemClock.elapsedRealtime() / 1000;
         mSupervisor = supervisor;
         mLaunchObserver = new LaunchObserverRegistryImpl(looper);
+    }
+
+    private void logWindowState(String state, int durationSecs) {
+        mMetricsLogger.count(state, durationSecs);
     }
 
     void logWindowState() {
@@ -390,35 +500,24 @@ class ActivityMetricsLogger {
             // We log even if the window state hasn't changed, because the user might remain in
             // home/fullscreen move forever and we would like to track this kind of behavior
             // too.
-            mMetricsLogger.count(TRON_WINDOW_STATE_VARZ_STRINGS[mWindowState],
-                    (int) (now - mLastLogTimeSecs));
+            mLoggerHandler.sendMessage(PooledLambda.obtainMessage(
+                    ActivityMetricsLogger::logWindowState, this,
+                    TRON_WINDOW_STATE_VARZ_STRINGS[mWindowState], (int) (now - mLastLogTimeSecs)));
         }
         mLastLogTimeSecs = now;
 
         mWindowState = WINDOW_STATE_INVALID;
-        ActivityStack stack =
-                mSupervisor.mRootWindowContainer.getTopDisplayFocusedStack();
-        if (stack == null) {
-            return;
-        }
-
-        if (stack.isActivityTypeAssistant()) {
+        final Task focusedTask = mSupervisor.mRootWindowContainer.getTopDisplayFocusedRootTask();
+        if (focusedTask == null)  return;
+        if (focusedTask.isActivityTypeAssistant()) {
             mWindowState = WINDOW_STATE_ASSISTANT;
             return;
         }
 
-        @WindowingMode int windowingMode = stack.getWindowingMode();
-        if (windowingMode == WINDOWING_MODE_PINNED) {
-            stack = mSupervisor.mRootWindowContainer.findStackBehind(stack);
-            windowingMode = stack.getWindowingMode();
-        }
+        @WindowingMode final int windowingMode = focusedTask.getWindowingMode();
         switch (windowingMode) {
             case WINDOWING_MODE_FULLSCREEN:
                 mWindowState = WINDOW_STATE_STANDARD;
-                break;
-            case WINDOWING_MODE_SPLIT_SCREEN_PRIMARY:
-            case WINDOWING_MODE_SPLIT_SCREEN_SECONDARY:
-                mWindowState = WINDOW_STATE_SIDE_BY_SIDE;
                 break;
             case WINDOWING_MODE_FREEFORM:
                 mWindowState = WINDOW_STATE_FREEFORM;
@@ -428,7 +527,7 @@ class ActivityMetricsLogger {
                 break;
             default:
                 if (windowingMode != WINDOWING_MODE_UNDEFINED) {
-                    throw new IllegalStateException("Unknown windowing mode for stack=" + stack
+                    Slog.wtf(TAG, "Unknown windowing mode for task=" + focusedTask
                             + " windowingMode=" + windowingMode);
                 }
         }
@@ -436,10 +535,10 @@ class ActivityMetricsLogger {
 
     /** @return Non-null {@link TransitionInfo} if the activity is found in an active transition. */
     @Nullable
-    private TransitionInfo getActiveTransitionInfo(WindowContainer wc) {
+    private TransitionInfo getActiveTransitionInfo(ActivityRecord r) {
         for (int i = mTransitionInfoList.size() - 1; i >= 0; i--) {
             final TransitionInfo info = mTransitionInfoList.get(i);
-            if (info.contains(wc)) {
+            if (info.contains(r)) {
                 return info;
             }
         }
@@ -457,21 +556,12 @@ class ActivityMetricsLogger {
     }
 
     /**
-     * If the caller is found in an active transition, it will be considered as consecutive launch
-     * and coalesced into the active transition.
-     *
-     * @see #notifyActivityLaunching(Intent, ActivityRecord, int)
-     */
-    LaunchingState notifyActivityLaunching(Intent intent, @Nullable ActivityRecord caller) {
-        return notifyActivityLaunching(intent, caller, Binder.getCallingUid());
-    }
-
-    /**
      * Notifies the tracker at the earliest possible point when we are starting to launch an
      * activity. The caller must ensure that {@link #notifyActivityLaunched} will be called later
-     * with the returned {@link LaunchingState}.
+     * with the returned {@link LaunchingState}. If the caller is found in an active transition,
+     * it will be considered as consecutive launch and coalesced into the active transition.
      */
-    private LaunchingState notifyActivityLaunching(Intent intent, @Nullable ActivityRecord caller,
+    LaunchingState notifyActivityLaunching(Intent intent, @Nullable ActivityRecord caller,
             int callingUid) {
         final long transitionStartTimeNs = SystemClock.elapsedRealtimeNanos();
         TransitionInfo existingInfo = null;
@@ -497,10 +587,10 @@ class ActivityMetricsLogger {
         }
 
         if (existingInfo == null) {
-            // Only notify the observer for a new launching event.
-            launchObserverNotifyIntentStarted(intent, transitionStartTimeNs);
             final LaunchingState launchingState = new LaunchingState();
             launchingState.mCurrentTransitionStartTimeNs = transitionStartTimeNs;
+            // Only notify the observer for a new launching event.
+            launchObserverNotifyIntentStarted(intent, transitionStartTimeNs);
             return launchingState;
         }
         existingInfo.mLaunchingState.mCurrentTransitionStartTimeNs = transitionStartTimeNs;
@@ -514,12 +604,15 @@ class ActivityMetricsLogger {
      * @param resultCode One of the {@link android.app.ActivityManager}.START_* flags, indicating
      *                   the result of the launch.
      * @param launchedActivity The activity that is being launched
+     * @param newActivityCreated Whether a new activity instance is created.
+     * @param options The given options of the launching activity.
      */
     void notifyActivityLaunched(@NonNull LaunchingState launchingState, int resultCode,
-            @Nullable ActivityRecord launchedActivity) {
+            boolean newActivityCreated, @Nullable ActivityRecord launchedActivity,
+            @Nullable ActivityOptions options) {
         if (launchedActivity == null) {
             // The launch is aborted, e.g. intent not resolved, class not found.
-            abort(null /* info */, "nothing launched");
+            abort(launchingState, "nothing launched");
             return;
         }
 
@@ -540,30 +633,45 @@ class ActivityMetricsLogger {
         if (DEBUG_METRICS) {
             Slog.i(TAG, "notifyActivityLaunched" + " resultCode=" + resultCode
                     + " launchedActivity=" + launchedActivity + " processRunning=" + processRunning
-                    + " processSwitch=" + processSwitch + " info=" + info);
+                    + " processSwitch=" + processSwitch
+                    + " newActivityCreated=" + newActivityCreated + " info=" + info);
         }
 
-        if (launchedActivity.mDrawn) {
+        if (launchedActivity.isReportedDrawn() && launchedActivity.isVisible()) {
             // Launched activity is already visible. We cannot measure windows drawn delay.
-            abort(info, "launched activity already visible");
+            abort(launchingState, "launched activity already visible");
             return;
         }
 
-        if (info != null
-                && info.mLastLaunchedActivity.mDisplayContent == launchedActivity.mDisplayContent) {
-            // If we are already in an existing transition on the same display, only update the
-            // activity name, but not the other attributes.
+        // If the launched activity is started from an existing active transition, it will be put
+        // into the transition info.
+        if (info != null && info.canCoalesce(launchedActivity)) {
+            if (DEBUG_METRICS) Slog.i(TAG, "notifyActivityLaunched consecutive launch");
 
-            if (DEBUG_METRICS) Slog.i(TAG, "notifyActivityLaunched update launched activity");
+            final boolean crossPackage =
+                    !info.mLastLaunchedActivity.packageName.equals(launchedActivity.packageName);
+            // The trace name uses package name so different packages should be separated.
+            if (crossPackage) {
+                stopLaunchTrace(info);
+            }
+
+            mLastTransitionInfo.remove(info.mLastLaunchedActivity);
             // Coalesce multiple (trampoline) activities from a single sequence together.
             info.setLatestLaunchedActivity(launchedActivity);
+            // Update the latest one so it can be found when reporting fully-drawn.
+            mLastTransitionInfo.put(launchedActivity, info);
+
+            if (crossPackage) {
+                startLaunchTrace(info);
+            }
+            scheduleCheckActivityToBeDrawnIfSleeping(launchedActivity);
             return;
         }
 
         final TransitionInfo newInfo = TransitionInfo.create(launchedActivity, launchingState,
-                processRunning, processSwitch, resultCode);
+                options, processRunning, processSwitch, newActivityCreated, resultCode);
         if (newInfo == null) {
-            abort(info, "unrecognized launch");
+            abort(launchingState, "unrecognized launch");
             return;
         }
 
@@ -576,7 +684,29 @@ class ActivityMetricsLogger {
             launchObserverNotifyActivityLaunched(newInfo);
         } else {
             // As abort for no process switch.
-            launchObserverNotifyIntentFailed();
+            launchObserverNotifyIntentFailed(newInfo.mTransitionStartTimeNs);
+        }
+        scheduleCheckActivityToBeDrawnIfSleeping(launchedActivity);
+
+        // If the previous transitions are no longer visible, abort them to avoid counting the
+        // launch time when resuming from back stack. E.g. launch 2 independent tasks in a short
+        // time, the transition info of the first task should not keep active until it becomes
+        // visible such as after the top task is finished.
+        for (int i = mTransitionInfoList.size() - 2; i >= 0; i--) {
+            final TransitionInfo prevInfo = mTransitionInfoList.get(i);
+            if (prevInfo.mIsDrawn || !prevInfo.mLastLaunchedActivity.mVisibleRequested) {
+                scheduleCheckActivityToBeDrawn(prevInfo.mLastLaunchedActivity, 0 /* delay */);
+            }
+        }
+    }
+
+    private void scheduleCheckActivityToBeDrawnIfSleeping(@NonNull ActivityRecord r) {
+        if (r.mDisplayContent.isSleeping()) {
+            // It is unknown whether the activity can be drawn or not, e.g. it depends on the
+            // keyguard states and the attributes or flags set by the activity. If the activity
+            // keeps invisible in the grace period, the tracker will be cancelled so it won't get
+            // a very long launch time that takes unlocking as the end of launch.
+            scheduleCheckActivityToBeDrawn(r, UNKNOWN_VISIBILITY_CHECK_DELAY_MS);
         }
     }
 
@@ -591,16 +721,20 @@ class ActivityMetricsLogger {
         if (DEBUG_METRICS) Slog.i(TAG, "notifyWindowsDrawn " + r);
 
         final TransitionInfo info = getActiveTransitionInfo(r);
-        if (info == null || info.allDrawn()) {
-            if (DEBUG_METRICS) Slog.i(TAG, "notifyWindowsDrawn no activity to be drawn");
+        if (info == null || info.mIsDrawn) {
+            if (DEBUG_METRICS) Slog.i(TAG, "notifyWindowsDrawn not pending drawn " + info);
             return null;
         }
         // Always calculate the delay because the caller may need to know the individual drawn time.
         info.mWindowsDrawnDelayMs = info.calculateDelay(timestampNs);
-        info.removePendingDrawActivity(r);
+        info.mIsDrawn = true;
         final TransitionInfoSnapshot infoSnapshot = new TransitionInfoSnapshot(info);
-        if (info.mLoggedTransitionStarting && info.allDrawn()) {
-            done(false /* abort */, info, "notifyWindowsDrawn - all windows drawn", timestampNs);
+        if (info.mLoggedTransitionStarting) {
+            done(false /* abort */, info, "notifyWindowsDrawn", timestampNs);
+        }
+        if (r.mWmService.isRecentsAnimationTarget(r)) {
+            r.mWmService.getRecentsAnimationController().logRecentsAnimationStartTime(
+                    info.mSourceEventDelayMs + info.mWindowsDrawnDelayMs);
         }
         return infoSnapshot;
     }
@@ -625,12 +759,15 @@ class ActivityMetricsLogger {
      *                         ActivityTaskManagerInternal.APP_TRANSITION_* reasons.
      */
     void notifyTransitionStarting(ArrayMap<WindowContainer, Integer> activityToReason) {
-        if (DEBUG_METRICS) Slog.i(TAG, "notifyTransitionStarting");
+        if (DEBUG_METRICS) Slog.i(TAG, "notifyTransitionStarting " + activityToReason);
 
         final long timestampNs = SystemClock.elapsedRealtimeNanos();
         for (int index = activityToReason.size() - 1; index >= 0; index--) {
-            final WindowContainer wc = activityToReason.keyAt(index);
-            final TransitionInfo info = getActiveTransitionInfo(wc);
+            final WindowContainer<?> wc = activityToReason.keyAt(index);
+            final ActivityRecord activity = wc.asActivityRecord();
+            final ActivityRecord r = activity != null ? activity
+                    : wc.getTopActivity(false /* includeFinishing */, true /* includeOverlays */);
+            final TransitionInfo info = getActiveTransitionInfo(r);
             if (info == null || info.mLoggedTransitionStarting) {
                 // Ignore any subsequent notifyTransitionStarting.
                 continue;
@@ -642,16 +779,37 @@ class ActivityMetricsLogger {
             info.mCurrentTransitionDelayMs = info.calculateDelay(timestampNs);
             info.mReason = activityToReason.valueAt(index);
             info.mLoggedTransitionStarting = true;
-            if (info.allDrawn()) {
-                done(false /* abort */, info, "notifyTransitionStarting - all windows drawn",
-                        timestampNs);
+            if (info.mIsDrawn) {
+                done(false /* abort */, info, "notifyTransitionStarting drawn", timestampNs);
             }
+        }
+    }
+
+    void notifyActivityRelaunched(ActivityRecord r) {
+        final TransitionInfo info = getActiveTransitionInfo(r);
+        if (info != null) {
+            info.mRelaunched = true;
         }
     }
 
     /** Makes sure that the reference to the removed activity is cleared. */
     void notifyActivityRemoved(@NonNull ActivityRecord r) {
         mLastTransitionInfo.remove(r);
+        final TransitionInfo info = getActiveTransitionInfo(r);
+        if (info != null) {
+            abort(info, "removed");
+        }
+
+        final int packageUid = r.info.applicationInfo.uid;
+        final PackageCompatStateInfo compatStateInfo = mPackageUidToCompatStateInfo.get(packageUid);
+        if (compatStateInfo == null) {
+            return;
+        }
+
+        compatStateInfo.mVisibleActivities.remove(r);
+        if (compatStateInfo.mLastLoggedActivity == r) {
+            compatStateInfo.mLastLoggedActivity = null;
+        }
     }
 
     /**
@@ -668,39 +826,37 @@ class ActivityMetricsLogger {
             Slog.i(TAG, "notifyVisibilityChanged " + r + " visible=" + r.mVisibleRequested
                     + " state=" + r.getState() + " finishing=" + r.finishing);
         }
-        if (!r.mVisibleRequested || r.finishing) {
-            info.removePendingDrawActivity(r);
-        }
-        if (info.mLastLaunchedActivity != r) {
+        if (r.isState(ActivityRecord.State.RESUMED) && r.mDisplayContent.isSleeping()) {
+            // The activity may be launching while keyguard is locked. The keyguard may be dismissed
+            // after the activity finished relayout, so skip the visibility check to avoid aborting
+            // the tracking of launch event.
             return;
         }
-        // The activity and its task are passed separately because the activity may be removed from
-        // the task later.
-        r.mAtmService.mH.sendMessage(PooledLambda.obtainMessage(
-                ActivityMetricsLogger::checkVisibility, this, r.getTask(), r));
+        if (!r.mVisibleRequested || r.finishing) {
+            // Check if the tracker can be cancelled because the last launched activity may be
+            // no longer visible.
+            scheduleCheckActivityToBeDrawn(r, 0 /* delay */);
+        }
     }
 
-    /** @return {@code true} if the given task has an activity will be drawn. */
-    private static boolean hasActivityToBeDrawn(Task t) {
-        return t.forAllActivities((r) -> r.mVisibleRequested && !r.mDrawn && !r.finishing);
+    private void scheduleCheckActivityToBeDrawn(@NonNull ActivityRecord r, long delay) {
+        // The activity and its task are passed separately because it is possible that the activity
+        // is removed from the task later.
+        r.mAtmService.mH.sendMessageDelayed(PooledLambda.obtainMessage(
+                ActivityMetricsLogger::checkActivityToBeDrawn, this, r.getTask(), r), delay);
     }
 
-    private void checkVisibility(Task t, ActivityRecord r) {
+    /** Cancels the tracking of launch if there won't be an activity to be drawn. */
+    private void checkActivityToBeDrawn(Task t, ActivityRecord r) {
         synchronized (mSupervisor.mService.mGlobalLock) {
-
             final TransitionInfo info = getActiveTransitionInfo(r);
 
             // If we have an active transition that's waiting on a certain activity that will be
             // invisible now, we'll never get onWindowsDrawn, so abort the transition if necessary.
 
-            // We have no active transitions.
+            // We have no active transitions. Or the notified activity whose visibility changed is
+            // no longer the launched activity, then we can still wait to get onWindowsDrawn.
             if (info == null) {
-                return;
-            }
-
-            // The notified activity whose visibility changed is no longer the launched activity.
-            // We can still wait to get onWindowsDrawn.
-            if (info.mLastLaunchedActivity != r) {
                 return;
             }
 
@@ -708,13 +864,35 @@ class ActivityMetricsLogger {
             // window drawn event should report later to complete the transition. Otherwise all
             // activities in this task may be finished, invisible or drawn, so the transition event
             // should be cancelled.
-            if (hasActivityToBeDrawn(t)) {
+            if (t != null && t.forAllActivities(
+                    a -> a.mVisibleRequested && !a.isReportedDrawn() && !a.finishing)) {
                 return;
             }
 
-            if (DEBUG_METRICS) Slog.i(TAG, "notifyVisibilityChanged to invisible activity=" + r);
+            if (DEBUG_METRICS) Slog.i(TAG, "checkActivityToBeDrawn cancels activity=" + r);
             logAppTransitionCancel(info);
-            abort(info, "notifyVisibilityChanged to invisible");
+            abort(info, "checkActivityToBeDrawn (invisible or drawn already)");
+        }
+    }
+
+    @Nullable
+    private AppHibernationManagerInternal getAppHibernationManagerInternal() {
+        if (!AppHibernationService.isAppHibernationEnabled()) return null;
+        if (mAppHibernationManagerInternal == null) {
+            mAppHibernationManagerInternal =
+                    LocalServices.getService(AppHibernationManagerInternal.class);
+        }
+        return mAppHibernationManagerInternal;
+    }
+
+    /**
+     * Notifies the tracker before the package is unstopped because of launching activity.
+     * @param packageName The package to be unstopped.
+     */
+    void notifyBeforePackageUnstopped(@NonNull String packageName) {
+        final AppHibernationManagerInternal ahmInternal = getAppHibernationManagerInternal();
+        if (ahmInternal != null) {
+            mLastHibernationStates.put(packageName, ahmInternal.isHibernatingGlobally(packageName));
         }
     }
 
@@ -734,33 +912,42 @@ class ActivityMetricsLogger {
         }
     }
 
+    private void abort(@NonNull LaunchingState state, String cause) {
+        if (state.mAssociatedTransitionInfo != null) {
+            abort(state.mAssociatedTransitionInfo, cause);
+            return;
+        }
+        if (DEBUG_METRICS) Slog.i(TAG, "abort launch cause=" + cause);
+        state.stopTrace(true /* abort */, null /* endInfo */);
+        launchObserverNotifyIntentFailed(state.mCurrentTransitionStartTimeNs);
+    }
+
     /** Aborts tracking of current launch metrics. */
-    private void abort(TransitionInfo info, String cause) {
+    private void abort(@NonNull TransitionInfo info, String cause) {
         done(true /* abort */, info, cause, 0L /* timestampNs */);
     }
 
     /** Called when the given transition (info) is no longer active. */
-    private void done(boolean abort, @Nullable TransitionInfo info, String cause,
+    private void done(boolean abort, @NonNull TransitionInfo info, String cause,
             long timestampNs) {
         if (DEBUG_METRICS) {
             Slog.i(TAG, "done abort=" + abort + " cause=" + cause + " timestamp=" + timestampNs
                     + " info=" + info);
         }
-        if (info == null) {
-            launchObserverNotifyIntentFailed();
-            return;
-        }
-
+        info.mLaunchingState.stopTrace(abort, info);
         stopLaunchTrace(info);
+        final Boolean isHibernating =
+                mLastHibernationStates.remove(info.mLastLaunchedActivity.packageName);
         if (abort) {
+            mLastTransitionInfo.remove(info.mLastLaunchedActivity);
+            mSupervisor.stopWaitingForActivityVisible(info.mLastLaunchedActivity);
             launchObserverNotifyActivityLaunchCancelled(info);
         } else {
             if (info.isInterestingToLoggerAndObserver()) {
                 launchObserverNotifyActivityLaunchFinished(info, timestampNs);
             }
-            logAppTransitionFinished(info);
+            logAppTransitionFinished(info, isHibernating != null ? isHibernating : false);
         }
-        info.mPendingDrawActivities.clear();
         mTransitionInfoList.remove(info);
     }
 
@@ -776,29 +963,31 @@ class ActivityMetricsLogger {
                 FrameworkStatsLog.APP_START_CANCELED,
                 activity.info.applicationInfo.uid,
                 activity.packageName,
-                convertAppStartTransitionType(type),
+                getAppStartTransitionType(type, info.mRelaunched),
                 activity.info.name);
         if (DEBUG_METRICS) {
             Slog.i(TAG, String.format("APP_START_CANCELED(%s, %s, %s, %s)",
                     activity.info.applicationInfo.uid,
                     activity.packageName,
-                    convertAppStartTransitionType(type),
+                    getAppStartTransitionType(type, info.mRelaunched),
                     activity.info.name));
         }
     }
 
-    private void logAppTransitionFinished(@NonNull TransitionInfo info) {
+    private void logAppTransitionFinished(@NonNull TransitionInfo info, boolean isHibernating) {
         if (DEBUG_METRICS) Slog.i(TAG, "logging finished transition " + info);
 
         // Take a snapshot of the transition info before sending it to the handler for logging.
         // This will avoid any races with other operations that modify the ActivityRecord.
         final TransitionInfoSnapshot infoSnapshot = new TransitionInfoSnapshot(info);
         if (info.isInterestingToLoggerAndObserver()) {
-            BackgroundThread.getHandler().post(() -> logAppTransition(
-                    info.mCurrentTransitionDeviceUptime, info.mCurrentTransitionDelayMs,
-                    infoSnapshot));
+            final long timestamp = info.mTransitionStartTimeNs;
+            final long uptime = info.mTransitionDeviceUptimeMs;
+            final int transitionDelay = info.mCurrentTransitionDelayMs;
+            mLoggerHandler.post(() -> logAppTransition(
+                    timestamp, uptime, transitionDelay, infoSnapshot, isHibernating));
         }
-        BackgroundThread.getHandler().post(() -> logAppDisplayed(infoSnapshot));
+        mLoggerHandler.post(() -> logAppDisplayed(infoSnapshot));
         if (info.mPendingFullyDrawn != null) {
             info.mPendingFullyDrawn.run();
         }
@@ -806,9 +995,9 @@ class ActivityMetricsLogger {
         info.mLastLaunchedActivity.info.launchToken = null;
     }
 
-    // This gets called on a background thread without holding the activity manager lock.
-    private void logAppTransition(int currentTransitionDeviceUptime, int currentTransitionDelayMs,
-            TransitionInfoSnapshot info) {
+    // This gets called on another thread without holding the activity manager lock.
+    private void logAppTransition(long transitionStartTimeNs, long transitionDeviceUptimeMs,
+            int currentTransitionDelayMs, TransitionInfoSnapshot info, boolean isHibernating) {
         final LogMaker builder = new LogMaker(APP_TRANSITION);
         builder.setPackageName(info.packageName);
         builder.setType(info.type);
@@ -824,7 +1013,7 @@ class ActivityMetricsLogger {
         }
         builder.addTaggedData(APP_TRANSITION_IS_EPHEMERAL, isInstantApp ? 1 : 0);
         builder.addTaggedData(APP_TRANSITION_DEVICE_UPTIME_SECONDS,
-                currentTransitionDeviceUptime);
+                TimeUnit.MILLISECONDS.toSeconds(transitionDeviceUptimeMs));
         builder.addTaggedData(APP_TRANSITION_DELAY_MS, currentTransitionDelayMs);
         builder.setSubtype(info.reason);
         if (info.startingWindowDelayMs != INVALID_DELAY) {
@@ -836,28 +1025,30 @@ class ActivityMetricsLogger {
                     info.bindApplicationDelayMs);
         }
         builder.addTaggedData(APP_TRANSITION_WINDOWS_DRAWN_DELAY_MS, info.windowsDrawnDelayMs);
-        final ArtManagerInternal artManagerInternal = getArtManagerInternal();
         final PackageOptimizationInfo packageOptimizationInfo =
-                (artManagerInternal == null) || (info.launchedActivityAppRecordRequiredAbi == null)
-                ? PackageOptimizationInfo.createWithNoInfo()
-                : artManagerInternal.getPackageOptimizationInfo(
-                        info.applicationInfo,
-                        info.launchedActivityAppRecordRequiredAbi,
-                        info.launchedActivityName);
+                info.getPackageOptimizationInfo(getArtManagerInternal());
         builder.addTaggedData(PACKAGE_OPTIMIZATION_COMPILATION_REASON,
                 packageOptimizationInfo.getCompilationReason());
         builder.addTaggedData(PACKAGE_OPTIMIZATION_COMPILATION_FILTER,
                 packageOptimizationInfo.getCompilationFilter());
         mMetricsLogger.write(builder);
+
+        // Incremental info
+        boolean isIncremental = false, isLoading = false;
+        final String codePath = info.applicationInfo.getCodePath();
+        if (codePath != null && IncrementalManager.isIncrementalPath(codePath)) {
+            isIncremental = true;
+            isLoading = isIncrementalLoading(info.packageName, info.userId);
+        }
         FrameworkStatsLog.write(
                 FrameworkStatsLog.APP_START_OCCURRED,
                 info.applicationInfo.uid,
                 info.packageName,
-                convertAppStartTransitionType(info.type),
+                getAppStartTransitionType(info.type, info.relaunched),
                 info.launchedActivityName,
                 info.launchedActivityLaunchedFromPackage,
                 isInstantApp,
-                currentTransitionDeviceUptime * 1000,
+                0 /* deprecated transitionDeviceUptimeMs */,
                 info.reason,
                 currentTransitionDelayMs,
                 info.startingWindowDelayMs,
@@ -865,19 +1056,32 @@ class ActivityMetricsLogger {
                 info.windowsDrawnDelayMs,
                 launchToken,
                 packageOptimizationInfo.getCompilationReason(),
-                packageOptimizationInfo.getCompilationFilter());
+                packageOptimizationInfo.getCompilationFilter(),
+                info.sourceType,
+                info.sourceEventDelayMs,
+                isHibernating,
+                isIncremental,
+                isLoading,
+                info.launchedActivityName.hashCode(),
+                TimeUnit.NANOSECONDS.toMillis(transitionStartTimeNs));
 
         if (DEBUG_METRICS) {
             Slog.i(TAG, String.format("APP_START_OCCURRED(%s, %s, %s, %s, %s)",
                     info.applicationInfo.uid,
                     info.packageName,
-                    convertAppStartTransitionType(info.type),
+                    getAppStartTransitionType(info.type, info.relaunched),
                     info.launchedActivityName,
                     info.launchedActivityLaunchedFromPackage));
         }
 
 
         logAppStartMemoryStateCapture(info);
+    }
+
+    private boolean isIncrementalLoading(String packageName, int userId) {
+        final IncrementalStatesInfo info = mSupervisor.mService.getPackageManagerInternalLocked()
+                .getIncrementalStatesInfo(packageName, 0 /* filterCallingUid */, userId);
+        return info != null && info.isLoading();
     }
 
     private void logAppDisplayed(TransitionInfoSnapshot info) {
@@ -898,7 +1102,7 @@ class ActivityMetricsLogger {
         Log.i(TAG, sb.toString());
     }
 
-    private int convertAppStartTransitionType(int tronType) {
+    private static int getAppStartTransitionType(int tronType, boolean relaunched) {
         if (tronType == TYPE_TRANSITION_COLD_LAUNCH) {
             return FrameworkStatsLog.APP_START_OCCURRED__TYPE__COLD;
         }
@@ -906,15 +1110,11 @@ class ActivityMetricsLogger {
             return FrameworkStatsLog.APP_START_OCCURRED__TYPE__WARM;
         }
         if (tronType == TYPE_TRANSITION_HOT_LAUNCH) {
-            return FrameworkStatsLog.APP_START_OCCURRED__TYPE__HOT;
+            return relaunched
+                    ? FrameworkStatsLog.APP_START_OCCURRED__TYPE__RELAUNCH
+                    : FrameworkStatsLog.APP_START_OCCURRED__TYPE__HOT;
         }
         return FrameworkStatsLog.APP_START_OCCURRED__TYPE__UNKNOWN;
-    }
-
-    /** @return the last known window drawn delay of the given activity. */
-    int getLastDrawnDelayMs(ActivityRecord r) {
-        final TransitionInfo info = mLastTransitionInfo.get(r);
-        return info != null ? info.mWindowsDrawnDelayMs : INVALID_DELAY;
     }
 
     /** @see android.app.Activity#reportFullyDrawn */
@@ -924,7 +1124,7 @@ class ActivityMetricsLogger {
         if (info == null) {
             return null;
         }
-        if (!info.allDrawn() && info.mPendingFullyDrawn == null) {
+        if (!info.mIsDrawn && info.mPendingFullyDrawn == null) {
             // There are still undrawn activities, postpone reporting fully drawn until all of its
             // windows are drawn. So that is closer to an usable state.
             info.mPendingFullyDrawn = () -> {
@@ -940,7 +1140,8 @@ class ActivityMetricsLogger {
                 : TimeUnit.NANOSECONDS.toMillis(currentTimestampNs - info.mTransitionStartTimeNs);
         final TransitionInfoSnapshot infoSnapshot =
                 new TransitionInfoSnapshot(info, r, (int) startupTimeMs);
-        BackgroundThread.getHandler().post(() -> logAppFullyDrawn(infoSnapshot));
+        mLoggerHandler.post(() -> logAppFullyDrawn(infoSnapshot));
+        mLastTransitionInfo.remove(r);
 
         if (!info.isInterestingToLoggerAndObserver()) {
             return infoSnapshot;
@@ -962,6 +1163,16 @@ class ActivityMetricsLogger {
         builder.addTaggedData(APP_TRANSITION_PROCESS_RUNNING,
                 info.mProcessRunning ? 1 : 0);
         mMetricsLogger.write(builder);
+        final PackageOptimizationInfo packageOptimizationInfo =
+                infoSnapshot.getPackageOptimizationInfo(getArtManagerInternal());
+        // Incremental info
+        boolean isIncremental = false, isLoading = false;
+        final String codePath = info.mLastLaunchedActivity.info.applicationInfo.getCodePath();
+        if (codePath != null && IncrementalManager.isIncrementalPath(codePath)) {
+            isIncremental = true;
+            isLoading = isIncrementalLoading(info.mLastLaunchedActivity.packageName,
+                            info.mLastLaunchedActivity.mUserId);
+        }
         FrameworkStatsLog.write(
                 FrameworkStatsLog.APP_START_FULLY_DRAWN,
                 info.mLastLaunchedActivity.info.applicationInfo.uid,
@@ -971,14 +1182,21 @@ class ActivityMetricsLogger {
                         : FrameworkStatsLog.APP_START_FULLY_DRAWN__TYPE__WITHOUT_BUNDLE,
                 info.mLastLaunchedActivity.info.name,
                 info.mProcessRunning,
-                startupTimeMs);
+                startupTimeMs,
+                packageOptimizationInfo.getCompilationReason(),
+                packageOptimizationInfo.getCompilationFilter(),
+                info.mSourceType,
+                info.mSourceEventDelayMs,
+                isIncremental,
+                isLoading,
+                info.mLastLaunchedActivity.info.name.hashCode());
 
         // Ends the trace started at the beginning of this function. This is located here to allow
         // the trace slice to have a noticable duration.
         Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
 
         // Notify reportFullyDrawn event.
-        launchObserverNotifyReportFullyDrawn(r, currentTimestampNs);
+        launchObserverNotifyReportFullyDrawn(info, currentTimestampNs);
 
         return infoSnapshot;
     }
@@ -1085,6 +1303,191 @@ class ActivityMetricsLogger {
                 memoryStat.swapInBytes);
     }
 
+    /**
+     * Logs the current App Compat state of the given {@link ActivityRecord} with its package
+     * UID, if all of the following hold:
+     * <ul>
+     *   <li>The current state is different than the last logged state for the package UID of the
+     *   activity.
+     *   <li>If the current state is NOT_VISIBLE, there is a previously logged state for the
+     *   package UID and there are no other visible activities with the same package UID.
+     *   <li>The last logged activity with the same package UID is either {@code activity} (or an
+     *   activity that has been removed) or the last logged state is NOT_VISIBLE or NOT_LETTERBOXED.
+     * </ul>
+     *
+     * <p>If the current state is NOT_VISIBLE and the previous state which was logged by {@code
+     * activity} (or an activity that has been removed) wasn't, looks for the first visible activity
+     * with the same package UID that has a letterboxed state, or a non-letterboxed state if
+     * there isn't one, and logs that state.
+     *
+     * <p>This method assumes that the caller is wrapping the call with a synchronized block so
+     * that there won't be a race condition between two activities with the same package.
+     */
+    void logAppCompatState(@NonNull ActivityRecord activity) {
+        final int packageUid = activity.info.applicationInfo.uid;
+        final int state = activity.getAppCompatState();
+
+        if (!mPackageUidToCompatStateInfo.contains(packageUid)) {
+            mPackageUidToCompatStateInfo.put(packageUid, new PackageCompatStateInfo());
+        }
+        final PackageCompatStateInfo compatStateInfo = mPackageUidToCompatStateInfo.get(packageUid);
+        final int lastLoggedState = compatStateInfo.mLastLoggedState;
+        final ActivityRecord lastLoggedActivity = compatStateInfo.mLastLoggedActivity;
+
+        final boolean isVisible = state != APP_COMPAT_STATE_CHANGED__STATE__NOT_VISIBLE;
+        final ArrayList<ActivityRecord> visibleActivities = compatStateInfo.mVisibleActivities;
+        if (isVisible && !visibleActivities.contains(activity)) {
+            visibleActivities.add(activity);
+        } else if (!isVisible) {
+            visibleActivities.remove(activity);
+            if (visibleActivities.isEmpty()) {
+                // No need to keep the entry if there are no visible activities.
+                mPackageUidToCompatStateInfo.remove(packageUid);
+            }
+        }
+
+        if (state == lastLoggedState) {
+            // We don’t want to log the same state twice or log DEFAULT_NOT_VISIBLE before any
+            // visible state was logged.
+            return;
+        }
+
+        if (!isVisible && !visibleActivities.isEmpty()) {
+            // There is another visible activity for this package UID.
+            if (lastLoggedActivity == null || activity == lastLoggedActivity) {
+                // Make sure a new visible state is logged if needed.
+                findAppCompatStateToLog(compatStateInfo, packageUid);
+            }
+            return;
+        }
+
+        if (lastLoggedActivity != null && activity != lastLoggedActivity
+                && lastLoggedState != APP_COMPAT_STATE_CHANGED__STATE__NOT_VISIBLE
+                && lastLoggedState != APP_COMPAT_STATE_CHANGED__STATE__NOT_LETTERBOXED) {
+            // Another visible activity for this package UID has logged a letterboxed state.
+            return;
+        }
+
+        logAppCompatStateInternal(activity, state, packageUid, compatStateInfo);
+    }
+
+    /**
+     * Looks for the first visible activity in {@code compatStateInfo} that has a letterboxed
+     * state, or a non-letterboxed state if there isn't one, and logs that state for the given
+     * {@code packageUid}.
+     *
+     * <p>If there is a visible activity in {@code compatStateInfo} with the same state as the
+     * last logged state for the given {@code packageUid}, changes the last logged activity to
+     * reference the first such activity without actually logging the same state twice.
+     */
+    private void findAppCompatStateToLog(PackageCompatStateInfo compatStateInfo, int packageUid) {
+        final ArrayList<ActivityRecord> visibleActivities = compatStateInfo.mVisibleActivities;
+        final int lastLoggedState = compatStateInfo.mLastLoggedState;
+
+        ActivityRecord activityToLog = null;
+        int stateToLog = APP_COMPAT_STATE_CHANGED__STATE__NOT_VISIBLE;
+        for (int i = 0; i < visibleActivities.size(); i++) {
+            ActivityRecord activity = visibleActivities.get(i);
+            int state = activity.getAppCompatState();
+            if (state == lastLoggedState) {
+                // Change last logged activity without logging the same state twice.
+                compatStateInfo.mLastLoggedActivity = activity;
+                return;
+            }
+            if (state == APP_COMPAT_STATE_CHANGED__STATE__NOT_VISIBLE) {
+                // This shouldn't happen.
+                Slog.w(TAG, "Visible activity with NOT_VISIBLE App Compat state for package UID: "
+                        + packageUid);
+                continue;
+            }
+            if (stateToLog == APP_COMPAT_STATE_CHANGED__STATE__NOT_VISIBLE || (
+                    stateToLog == APP_COMPAT_STATE_CHANGED__STATE__NOT_LETTERBOXED
+                            && state != APP_COMPAT_STATE_CHANGED__STATE__NOT_LETTERBOXED)) {
+                activityToLog = activity;
+                stateToLog = state;
+            }
+        }
+        if (activityToLog != null && stateToLog != APP_COMPAT_STATE_CHANGED__STATE__NOT_VISIBLE) {
+            logAppCompatStateInternal(activityToLog, stateToLog, packageUid, compatStateInfo);
+        }
+    }
+
+    private void logAppCompatStateInternal(@NonNull ActivityRecord activity, int state,
+            int packageUid, PackageCompatStateInfo compatStateInfo) {
+        compatStateInfo.mLastLoggedState = state;
+        compatStateInfo.mLastLoggedActivity = activity;
+        FrameworkStatsLog.write(FrameworkStatsLog.APP_COMPAT_STATE_CHANGED, packageUid, state);
+
+        if (DEBUG_METRICS) {
+            Slog.i(TAG, String.format("APP_COMPAT_STATE_CHANGED(%s, %s)", packageUid, state));
+        }
+    }
+
+    /**
+     * Logs the Camera Compat Control appeared event that corresponds to the given {@code state}
+     * with the given {@code packageUid}.
+     */
+    void logCameraCompatControlAppearedEventReported(@CameraCompatControlState int state,
+            int packageUid) {
+        switch (state) {
+            case TaskInfo.CAMERA_COMPAT_CONTROL_TREATMENT_SUGGESTED:
+                logCameraCompatControlEventReported(
+                        CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__APPEARED_APPLY_TREATMENT,
+                        packageUid);
+                break;
+            case TaskInfo.CAMERA_COMPAT_CONTROL_TREATMENT_APPLIED:
+                logCameraCompatControlEventReported(
+                        CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__APPEARED_REVERT_TREATMENT,
+                        packageUid);
+                break;
+            case TaskInfo.CAMERA_COMPAT_CONTROL_HIDDEN:
+                // Nothing to log.
+                break;
+            default:
+                Slog.w(TAG, "Unexpected state in logCameraCompatControlAppearedEventReported: "
+                        + state);
+                break;
+        }
+    }
+
+    /**
+     * Logs the Camera Compat Control clicked event that corresponds to the given {@code state}
+     * with the given {@code packageUid}.
+     */
+    void logCameraCompatControlClickedEventReported(@CameraCompatControlState int state,
+            int packageUid) {
+        switch (state) {
+            case TaskInfo.CAMERA_COMPAT_CONTROL_TREATMENT_APPLIED:
+                logCameraCompatControlEventReported(
+                        CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__CLICKED_APPLY_TREATMENT,
+                        packageUid);
+                break;
+            case TaskInfo.CAMERA_COMPAT_CONTROL_TREATMENT_SUGGESTED:
+                logCameraCompatControlEventReported(
+                        CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__CLICKED_REVERT_TREATMENT,
+                        packageUid);
+                break;
+            case TaskInfo.CAMERA_COMPAT_CONTROL_DISMISSED:
+                logCameraCompatControlEventReported(
+                        CAMERA_COMPAT_CONTROL_EVENT_REPORTED__EVENT__CLICKED_DISMISS,
+                        packageUid);
+                break;
+            default:
+                Slog.w(TAG, "Unexpected state in logCameraCompatControlAppearedEventReported: "
+                        + state);
+                break;
+        }
+    }
+
+    private void logCameraCompatControlEventReported(int event, int packageUid) {
+        FrameworkStatsLog.write(FrameworkStatsLog.CAMERA_COMPAT_CONTROL_EVENT_REPORTED, packageUid,
+                event);
+        if (DEBUG_METRICS) {
+            Slog.i(TAG, String.format("CAMERA_COMPAT_CONTROL_EVENT_REPORTED(%s, %s)", packageUid,
+                    event));
+        }
+    }
+
     private ArtManagerInternal getArtManagerInternal() {
         if (mArtManagerInternal == null) {
             // Note that this may be null.
@@ -1098,7 +1501,7 @@ class ActivityMetricsLogger {
     /** Starts trace for an activity is actually launching. */
     private void startLaunchTrace(@NonNull TransitionInfo info) {
         if (DEBUG_METRICS) Slog.i(TAG, "startLaunchTrace " + info);
-        if (!Trace.isTagEnabled(Trace.TRACE_TAG_ACTIVITY_MANAGER)) {
+        if (info.mLaunchingState.mTraceName == null) {
             return;
         }
         info.mLaunchTraceName = "launching: " + info.mLastLaunchedActivity.packageName;
@@ -1137,11 +1540,11 @@ class ActivityMetricsLogger {
      * aborted due to intent failure (e.g. intent resolve failed or security error, etc) or
      * intent being delivered to the top running activity.
      */
-    private void launchObserverNotifyIntentFailed() {
+    private void launchObserverNotifyIntentFailed(long id) {
        Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER,
                 "MetricsLogger:launchObserverNotifyIntentFailed");
 
-        mLaunchObserver.onIntentFailed();
+        mLaunchObserver.onIntentFailed(id);
 
         Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
     }
@@ -1158,8 +1561,8 @@ class ActivityMetricsLogger {
                 convertTransitionTypeToLaunchObserverTemperature(info.mTransitionType);
 
         // Beginning a launch is timing sensitive and so should be observed as soon as possible.
-        mLaunchObserver.onActivityLaunched(convertActivityRecordToProto(info.mLastLaunchedActivity),
-                temperature);
+        mLaunchObserver.onActivityLaunched(info.mTransitionStartTimeNs,
+                info.mLastLaunchedActivity.mActivityComponent, temperature);
 
         Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
     }
@@ -1167,10 +1570,10 @@ class ActivityMetricsLogger {
     /**
      * Notifies the {@link ActivityMetricsLaunchObserver} the reportFullDrawn event.
      */
-    private void launchObserverNotifyReportFullyDrawn(ActivityRecord r, long timestampNs) {
+    private void launchObserverNotifyReportFullyDrawn(TransitionInfo info, long timestampNs) {
         Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER,
             "MetricsLogger:launchObserverNotifyReportFullyDrawn");
-        mLaunchObserver.onReportFullyDrawn(convertActivityRecordToProto(r), timestampNs);
+        mLaunchObserver.onReportFullyDrawn(info.mTransitionStartTimeNs, timestampNs);
         Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
     }
 
@@ -1182,10 +1585,7 @@ class ActivityMetricsLogger {
         Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER,
                 "MetricsLogger:launchObserverNotifyActivityLaunchCancelled");
 
-        final @ActivityMetricsLaunchObserver.ActivityRecordProto byte[] activityRecordProto =
-                info != null ? convertActivityRecordToProto(info.mLastLaunchedActivity) : null;
-
-        mLaunchObserver.onActivityLaunchCancelled(activityRecordProto);
+        mLaunchObserver.onActivityLaunchCancelled(info.mTransitionStartTimeNs);
 
         Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
     }
@@ -1198,31 +1598,10 @@ class ActivityMetricsLogger {
         Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER,
                 "MetricsLogger:launchObserverNotifyActivityLaunchFinished");
 
-        mLaunchObserver.onActivityLaunchFinished(
-                convertActivityRecordToProto(info.mLastLaunchedActivity), timestampNs);
+        mLaunchObserver.onActivityLaunchFinished(info.mTransitionStartTimeNs,
+                info.mLastLaunchedActivity.mActivityComponent, timestampNs);
 
         Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
-    }
-
-    @VisibleForTesting
-    static @ActivityMetricsLaunchObserver.ActivityRecordProto byte[]
-            convertActivityRecordToProto(ActivityRecord record) {
-        // May take non-negligible amount of time to convert ActivityRecord into a proto,
-        // so track the time.
-        Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER,
-                "MetricsLogger:convertActivityRecordToProto");
-
-        // There does not appear to be a way to 'reset' a ProtoOutputBuffer stream,
-        // so create a new one every time.
-        final ProtoOutputStream protoOutputStream =
-                new ProtoOutputStream(LAUNCH_OBSERVER_ACTIVITY_RECORD_PROTO_CHUNK_SIZE);
-        // Write this data out as the top-most ActivityRecordProto (i.e. it is not a sub-object).
-        record.dumpDebug(protoOutputStream, WindowTraceLogLevel.ALL);
-        final byte[] bytes = protoOutputStream.getBytes();
-
-        Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
-
-        return bytes;
     }
 
     private static @ActivityMetricsLaunchObserver.Temperature int

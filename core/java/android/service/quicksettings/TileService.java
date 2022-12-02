@@ -15,18 +15,19 @@
  */
 package android.service.quicksettings;
 
-import android.Manifest;
 import android.annotation.SdkConstant;
 import android.annotation.SdkConstant.SdkConstantType;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
 import android.app.Dialog;
 import android.app.Service;
+import android.app.StatusBarManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Resources;
 import android.graphics.drawable.Icon;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -46,7 +47,7 @@ import com.android.internal.R;
  *
  * <p>The lifecycle of a TileService is different from some other services in
  * that it may be unbound during parts of its lifecycle.  Any of the following
- * lifecycle events can happen indepently in a separate binding/creation of the
+ * lifecycle events can happen independently in a separate binding/creation of the
  * service.</p>
  *
  * <ul>
@@ -58,6 +59,9 @@ import com.android.internal.R;
  *
  * <li>When the user removes a tile from Quick Settings {@link #onTileRemoved()}
  * will be called.</li>
+ *
+ * <li>{@link #onTileAdded()} and {@link #onTileRemoved()} may be called outside of the
+ * {@link #onCreate()} - {@link #onDestroy()} window</li>
  * </ul>
  * <p>TileService will be detected by tiles that match the {@value #ACTION_QS_TILE}
  * and require the permission "android.permission.BIND_QUICK_SETTINGS_TILE".
@@ -142,13 +146,6 @@ public class TileService extends Service {
      */
     public static final String META_DATA_TOGGLEABLE_TILE =
             "android.service.quicksettings.TOGGLEABLE_TILE";
-
-    /**
-     * Used to notify SysUI that Listening has be requested.
-     * @hide
-     */
-    public static final String ACTION_REQUEST_LISTENING =
-            "android.service.quicksettings.action.REQUEST_LISTENING";
 
     /**
      * @hide
@@ -356,7 +353,13 @@ public class TileService extends Service {
         try {
             mTile = mService.getTile(mTileToken);
         } catch (RemoteException e) {
-            throw new RuntimeException("Unable to reach IQSService", e);
+            String name = TileService.this.getClass().getSimpleName();
+            Log.w(TAG, name + " - Couldn't get tile from IQSService.", e);
+            // If we couldn't receive the tile, there's not much reason to continue as users won't
+            // be able to interact. Returning `null` will trigger an unbind in SystemUI and
+            // eventually we'll rebind when needed. This usually means that SystemUI crashed
+            // right after binding and therefore `mService` is outdated.
+            return null;
         }
         if (mTile != null) {
             mTile.setService(mService, mTileToken);
@@ -479,14 +482,24 @@ public class TileService extends Service {
      *
      * This method is only applicable to tiles that have {@link #META_DATA_ACTIVE_TILE} defined
      * as true on their TileService Manifest declaration, and will do nothing otherwise.
+     *
+     * For apps targeting {@link Build.VERSION_CODES#TIRAMISU} or later, this call may throw
+     * the following exceptions if the request is not valid:
+     * <ul>
+     *     <li> {@link NullPointerException} if {@code component} is {@code null}.</li>
+     *     <li> {@link SecurityException} if the package of {@code component} does not match
+     *     the calling package or if the calling user cannot act on behalf of the user from the
+     *     {@code context}.</li>
+     *     <li> {@link IllegalArgumentException} if the user of the {@code context} is not the
+     *     current user.</li>
+     * </ul>
      */
     public static final void requestListeningState(Context context, ComponentName component) {
-        final ComponentName sysuiComponent = ComponentName.unflattenFromString(
-                context.getResources().getString(
-                        com.android.internal.R.string.config_systemUIServiceComponent));
-        Intent intent = new Intent(ACTION_REQUEST_LISTENING);
-        intent.putExtra(Intent.EXTRA_COMPONENT_NAME, component);
-        intent.setPackage(sysuiComponent.getPackageName());
-        context.sendBroadcast(intent, Manifest.permission.BIND_QUICK_SETTINGS_TILE);
+        StatusBarManager sbm = context.getSystemService(StatusBarManager.class);
+        if (sbm == null) {
+            Log.e(TAG, "No StatusBarManager service found");
+            return;
+        }
+        sbm.requestTileServiceListeningState(component);
     }
 }

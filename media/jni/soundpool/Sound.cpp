@@ -99,8 +99,8 @@ static status_t decode(int fd, int64_t offset, int64_t length,
                                     __func__);
                             break;
                         }
-                        int sampleSize = AMediaExtractor_readSampleData(ex.get(), buf, bufsize);
-                        ALOGV("%s: read %d", __func__, sampleSize);
+                        ssize_t sampleSize = AMediaExtractor_readSampleData(ex.get(), buf, bufsize);
+                        ALOGV("%s: read %zd", __func__, sampleSize);
                         if (sampleSize < 0) {
                             sampleSize = 0;
                             sawInputEOS = true;
@@ -124,8 +124,8 @@ static status_t decode(int fd, int64_t offset, int64_t length,
                 }
 
                 AMediaCodecBufferInfo info;
-                const int status = AMediaCodec_dequeueOutputBuffer(codec.get(), &info, 1);
-                ALOGV("%s: dequeueoutput returned: %d", __func__, status);
+                const ssize_t status = AMediaCodec_dequeueOutputBuffer(codec.get(), &info, 1);
+                ALOGV("%s: dequeueoutput returned: %zd", __func__, status);
                 if (status >= 0) {
                     if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
                         ALOGV("%s: output EOS", __func__);
@@ -140,7 +140,7 @@ static status_t decode(int fd, int64_t offset, int64_t length,
                                 __func__);
                         break;
                     }
-                    const size_t dataSize = std::min((size_t)info.size, available);
+                    const size_t dataSize = std::min(available, (size_t)std::max(info.size, 0));
                     memcpy(writePos, buf + info.offset, dataSize);
                     writePos += dataSize;
                     written += dataSize;
@@ -167,10 +167,10 @@ static status_t decode(int fd, int64_t offset, int64_t length,
                 } else if (status == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
                     ALOGV("%s: no output buffer right now", __func__);
                 } else if (status <= AMEDIA_ERROR_BASE) {
-                    ALOGE("%s: decode error: %d", __func__, status);
+                    ALOGE("%s: decode error: %zd", __func__, status);
                     break;
                 } else {
-                    ALOGV("%s: unexpected info code: %d", __func__, status);
+                    ALOGV("%s: unexpected info code: %zd", __func__, status);
                 }
             }
 
@@ -181,8 +181,11 @@ static status_t decode(int fd, int64_t offset, int64_t length,
                     format.get(), AMEDIAFORMAT_KEY_CHANNEL_COUNT, channelCount)) {
                 return UNKNOWN_ERROR;
             }
-            if (!AMediaFormat_getInt32(format.get(), AMEDIAFORMAT_KEY_CHANNEL_MASK,
-                    (int32_t*) channelMask)) {
+            int32_t mediaFormatChannelMask;
+            if (AMediaFormat_getInt32(format.get(), AMEDIAFORMAT_KEY_CHANNEL_MASK,
+                    &mediaFormatChannelMask)) {
+                *channelMask = audio_channel_mask_from_media_format_mask(mediaFormatChannelMask);
+            } else {
                 *channelMask = AUDIO_CHANNEL_NONE;
             }
             *sizeInBytes = written;
@@ -214,7 +217,7 @@ status_t Sound::doLoad()
         } else if (sampleRate > kMaxSampleRate) {
             ALOGE("%s: sample rate (%u) out of range", __func__, sampleRate);
             status = BAD_VALUE;
-        } else if (channelCount < 1 || channelCount > FCC_8) {
+        } else if (channelCount < 1 || channelCount > FCC_LIMIT) {
             ALOGE("%s: sample channel count (%d) out of range", __func__, channelCount);
             status = BAD_VALUE;
         } else {

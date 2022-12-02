@@ -104,6 +104,12 @@ public class NotificationComparator
             return -1 * Boolean.compare(leftPeople, rightPeople);
         }
 
+        boolean leftSystemMax = isSystemMax(left);
+        boolean rightSystemMax = isSystemMax(right);
+        if (leftSystemMax != rightSystemMax) {
+            return -1 * Boolean.compare(leftSystemMax, rightSystemMax);
+        }
+
         if (leftImportance != rightImportance) {
             // by importance, high to low
             return -1 * Integer.compare(leftImportance, rightImportance);
@@ -147,15 +153,16 @@ public class NotificationComparator
     }
 
     private boolean isImportantOngoing(NotificationRecord record) {
-        if (!isOngoing(record)) {
-            return false;
-        }
-
         if (record.getImportance() < NotificationManager.IMPORTANCE_LOW) {
             return false;
         }
-
-        return isCall(record) || isMediaNotification(record);
+        if (isCallStyle(record)) {
+            return true;
+        }
+        if (!isOngoing(record)) {
+            return false;
+        }
+        return isCallCategory(record) || isMediaNotification(record);
     }
 
     protected boolean isImportantPeople(NotificationRecord record) {
@@ -172,18 +179,36 @@ public class NotificationComparator
         return mMessagingUtil.isImportantMessaging(record.getSbn(), record.getImportance());
     }
 
+    protected boolean isSystemMax(NotificationRecord record) {
+        if (record.getImportance() < NotificationManager.IMPORTANCE_HIGH) {
+            return false;
+        }
+        String packageName = record.getSbn().getPackageName();
+        if ("android".equals(packageName)) {
+            return true;
+        }
+        if ("com.android.systemui".equals(packageName)) {
+            return true;
+        }
+        return false;
+    }
+
     private boolean isOngoing(NotificationRecord record) {
         final int ongoingFlags = Notification.FLAG_FOREGROUND_SERVICE;
         return (record.getNotification().flags & ongoingFlags) != 0;
     }
 
     private boolean isMediaNotification(NotificationRecord record) {
-        return record.getNotification().hasMediaSession();
+        return record.getNotification().isMediaNotification();
     }
 
-    private boolean isCall(NotificationRecord record) {
+    private boolean isCallCategory(NotificationRecord record) {
         return record.isCategory(Notification.CATEGORY_CALL)
                 && isDefaultPhoneApp(record.getSbn().getPackageName());
+    }
+
+    private boolean isCallStyle(NotificationRecord record) {
+        return record.getNotification().isStyle(Notification.CallStyle.class);
     }
 
     private boolean isDefaultPhoneApp(String pkg) {

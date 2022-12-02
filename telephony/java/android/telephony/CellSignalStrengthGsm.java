@@ -53,7 +53,7 @@ public final class CellSignalStrengthGsm extends CellSignalStrength implements P
     private int mLevel;
 
     /** @hide */
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     public CellSignalStrengthGsm() {
         setDefaultValues();
     }
@@ -64,16 +64,6 @@ public final class CellSignalStrengthGsm extends CellSignalStrength implements P
         mBitErrorRate = inRangeOrUnavailable(ber, 0, 7, 99);
         mTimingAdvance = inRangeOrUnavailable(ta, 0, 219);
         updateLevel(null, null);
-    }
-
-    /** @hide */
-    public CellSignalStrengthGsm(android.hardware.radio.V1_0.GsmSignalStrength gsm) {
-        // Convert from HAL values as part of construction.
-        this(getRssiDbmFromAsu(gsm.signalStrength), gsm.bitErrorRate, gsm.timingAdvance);
-
-        if (mRssi == CellInfo.UNAVAILABLE) {
-            setDefaultValues();
-        }
     }
 
     /** @hide */
@@ -158,7 +148,8 @@ public final class CellSignalStrengthGsm extends CellSignalStrength implements P
      *
      * Asu is calculated based on 3GPP RSSI. Refer to 3GPP 27.007 (Ver 10.3.0) Sec 8.69
      *
-     * @return RSSI in ASU 0..31, 99, or UNAVAILABLE
+     * @return RSSI in ASU 0..31, 99, or
+     *         {@link android.telephony.CellInfo#UNAVAILABLE UNAVAILABLE}.
      */
     @Override
     public int getAsuLevel() {

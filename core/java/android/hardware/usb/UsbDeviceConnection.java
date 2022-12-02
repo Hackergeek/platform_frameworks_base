@@ -47,7 +47,7 @@ public class UsbDeviceConnection {
     private Context mContext;
 
     // used by the JNI code
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     private long mNativeContext;
 
     private final CloseGuard mCloseGuard = CloseGuard.get();
@@ -69,7 +69,7 @@ public class UsbDeviceConnection {
             boolean wasOpened = native_open(name, pfd.getFileDescriptor());
 
             if (wasOpened) {
-                mCloseGuard.open("close");
+                mCloseGuard.open("UsbDeviceConnection.close");
             }
 
             return wasOpened;
@@ -299,7 +299,7 @@ public class UsbDeviceConnection {
      * @hide
      */
     @SystemApi
-    @SuppressLint("Doclava125")
+    @SuppressLint("RequiresPermission")
     public boolean resetDevice() {
         return native_reset_device();
     }

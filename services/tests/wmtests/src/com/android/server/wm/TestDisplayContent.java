@@ -18,35 +18,51 @@ package com.android.server.wm;
 
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.view.DisplayAdjustments.DEFAULT_DISPLAY_ADJUSTMENTS;
+import static android.view.WindowManagerPolicyConstants.NAV_BAR_BOTTOM;
 
+import static com.android.dx.mockito.inline.extended.ExtendedMockito.any;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.anyBoolean;
+import static com.android.dx.mockito.inline.extended.ExtendedMockito.anyInt;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.doAnswer;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.doNothing;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.doReturn;
 import static com.android.dx.mockito.inline.extended.ExtendedMockito.spyOn;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doReturn;
 
+import android.annotation.Nullable;
+import android.content.Context;
 import android.content.res.Configuration;
+import android.content.res.Resources;
 import android.graphics.Insets;
 import android.graphics.Rect;
 import android.hardware.display.DisplayManagerGlobal;
+import android.util.DisplayMetrics;
 import android.view.Display;
 import android.view.DisplayCutout;
 import android.view.DisplayInfo;
 
+import com.android.server.wm.DisplayWindowSettings.SettingsProvider.SettingsEntry;
+
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
 class TestDisplayContent extends DisplayContent {
 
-    private TestDisplayContent(RootWindowContainer rootWindowContainer, Display display) {
+    public static final int DEFAULT_LOGICAL_DISPLAY_DENSITY = 300;
+
+    /** Please use the {@link Builder} to create, visible for use in test builder overrides only. */
+    TestDisplayContent(RootWindowContainer rootWindowContainer, Display display) {
         super(display, rootWindowContainer);
         // Normally this comes from display-properties as exposed by WM. Without that, just
         // hard-code to FULLSCREEN for tests.
         setWindowingMode(WINDOWING_MODE_FULLSCREEN);
         spyOn(this);
-        for (int i = getTaskDisplayAreaCount() - 1; i >= 0; --i) {
-            spyOn(getTaskDisplayAreaAt(i));
-        }
-
+        forAllTaskDisplayAreas(taskDisplayArea -> {
+            spyOn(taskDisplayArea);
+        });
         final DisplayRotation displayRotation = getDisplayRotation();
         spyOn(displayRotation);
         doAnswer(invocation -> {
@@ -73,8 +89,15 @@ class TestDisplayContent extends DisplayContent {
         private boolean mCanRotate = true;
         private int mWindowingMode = WINDOWING_MODE_FULLSCREEN;
         private int mPosition = POSITION_BOTTOM;
-        private final ActivityTaskManagerService mService;
+        protected final ActivityTaskManagerService mService;
         private boolean mSystemDecorations = false;
+        private int mStatusBarHeight = 0;
+        private SettingsEntry mOverrideSettings;
+        private DisplayMetrics mDisplayMetrics;
+        @Mock
+        Context mMockContext;
+        @Mock
+        Resources mResources;
 
         Builder(ActivityTaskManagerService service, int width, int height) {
             mService = service;
@@ -82,12 +105,27 @@ class TestDisplayContent extends DisplayContent {
             mService.mContext.getDisplay().getDisplayInfo(mInfo);
             mInfo.logicalWidth = width;
             mInfo.logicalHeight = height;
-            mInfo.logicalDensityDpi = 300;
+            mInfo.logicalDensityDpi = DEFAULT_LOGICAL_DISPLAY_DENSITY;
             mInfo.displayCutout = null;
+            // Set unique ID so physical display overrides are not inheritted from
+            // DisplayWindowSettings.
+            mInfo.uniqueId = generateUniqueId();
+            mDisplayMetrics = new DisplayMetrics();
+            updateDisplayMetrics();
         }
         Builder(ActivityTaskManagerService service, DisplayInfo info) {
             mService = service;
             mInfo = info;
+            // Set unique ID so physical display overrides are not inheritted from
+            // DisplayWindowSettings.
+            mInfo.uniqueId = generateUniqueId();
+        }
+        private String generateUniqueId() {
+            return "TEST_DISPLAY_CONTENT_" + System.currentTimeMillis();
+        }
+        Builder setOverrideSettings(@Nullable SettingsEntry overrideSettings) {
+            mOverrideSettings = overrideSettings;
+            return this;
         }
         Builder setSystemDecorations(boolean yes) {
             mSystemDecorations = yes;
@@ -114,6 +152,10 @@ class TestDisplayContent extends DisplayContent {
                     Insets.of(0, height, 0, 0), null, new Rect(20, 0, 80, height), null, null);
             return this;
         }
+        Builder setStatusBarHeight(int height) {
+            mStatusBarHeight = height;
+            return this;
+        }
         Builder setCanRotate(boolean canRotate) {
             mCanRotate = canRotate;
             return this;
@@ -126,24 +168,60 @@ class TestDisplayContent extends DisplayContent {
             mInfo.logicalDensityDpi = dpi;
             return this;
         }
+        Builder updateDisplayMetrics() {
+            mInfo.getAppMetrics(mDisplayMetrics);
+            return this;
+        }
+        Builder setDefaultMinTaskSizeDp(int valueDp) {
+            MockitoAnnotations.initMocks(this);
+            doReturn(mMockContext).when(mService.mContext).createConfigurationContext(any());
+            doReturn(mResources).when(mMockContext).getResources();
+            doReturn(valueDp * mDisplayMetrics.density)
+                    .when(mResources)
+                    .getDimension(
+                        com.android.internal.R.dimen.default_minimal_size_resizable_task);
+            return this;
+        }
+        TestDisplayContent createInternal(Display display) {
+            return new TestDisplayContent(mService.mRootWindowContainer, display);
+        }
         TestDisplayContent build() {
             SystemServicesTestRule.checkHoldsLock(mService.mGlobalLock);
+
+            if (mOverrideSettings != null) {
+                mService.mWindowManager.mDisplayWindowSettingsProvider
+                        .updateOverrideSettings(mInfo, mOverrideSettings);
+            }
 
             final int displayId = SystemServicesTestRule.sNextDisplayId++;
             final Display display = new Display(DisplayManagerGlobal.getInstance(), displayId,
                     mInfo, DEFAULT_DISPLAY_ADJUSTMENTS);
-            final TestDisplayContent newDisplay =
-                    new TestDisplayContent(mService.mRootWindowContainer, display);
+            final TestDisplayContent newDisplay = createInternal(display);
             // disable the normal system decorations
             final DisplayPolicy displayPolicy = newDisplay.getDisplayPolicy();
             spyOn(displayPolicy);
             if (mSystemDecorations) {
                 doReturn(true).when(newDisplay).supportsSystemDecorations();
                 doReturn(true).when(displayPolicy).hasNavigationBar();
+                doReturn(NAV_BAR_BOTTOM).when(displayPolicy).navigationBarPosition(anyInt());
+                doReturn(20).when(displayPolicy).getNavigationBarHeight(anyInt());
             } else {
                 doReturn(false).when(displayPolicy).hasNavigationBar();
                 doReturn(false).when(displayPolicy).hasStatusBar();
                 doReturn(false).when(newDisplay).supportsSystemDecorations();
+            }
+            // Update the display policy to make the screen fully turned on so animation is allowed
+            displayPolicy.screenTurnedOn(null /* screenOnListener */);
+            displayPolicy.finishKeyguardDrawn();
+            displayPolicy.finishWindowsDrawn();
+            displayPolicy.finishScreenTurningOn();
+            if (mStatusBarHeight > 0) {
+                doReturn(true).when(displayPolicy).hasStatusBar();
+                doAnswer(invocation -> {
+                    Rect inOutInsets = (Rect) invocation.getArgument(0);
+                    inOutInsets.top = mStatusBarHeight;
+                    return null;
+                }).when(displayPolicy).convertNonDecorInsetsToStableInsets(any(), anyInt());
             }
             Configuration c = new Configuration();
             newDisplay.computeScreenConfiguration(c);
@@ -151,12 +229,16 @@ class TestDisplayContent extends DisplayContent {
             newDisplay.onRequestedOverrideConfigurationChanged(c);
             if (!mCanRotate) {
                 final DisplayRotation displayRotation = newDisplay.getDisplayRotation();
-                doReturn(false).when(displayRotation).respectAppRequestedOrientation();
+                doReturn(true).when(displayRotation).isFixedToUserRotation();
             }
             // Please add stubbing before this line. Services will start using this display in other
             // threads immediately after adding it to hierarchy. Calling doAnswer() type of stubbing
             // reduces chance of races, but still doesn't eliminate race conditions.
             mService.mRootWindowContainer.addChild(newDisplay, mPosition);
+
+            // Set the default focused TDA.
+            newDisplay.onLastFocusedTaskDisplayAreaChanged(newDisplay.getDefaultTaskDisplayArea());
+
             return newDisplay;
         }
     }

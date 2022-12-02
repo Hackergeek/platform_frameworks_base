@@ -7,21 +7,14 @@ import static com.android.systemui.shared.system.QuickStepContract.SYSUI_STATE_A
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.app.ActivityManager;
 import android.app.ActivityOptions;
 import android.app.SearchManager;
 import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ActivityInfo;
-import android.content.pm.PackageManager;
-import android.content.res.Configuration;
-import android.content.res.Resources;
-import android.graphics.PixelFormat;
 import android.metrics.LogMaker;
 import android.os.AsyncTask;
-import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.RemoteException;
@@ -30,37 +23,29 @@ import android.os.UserHandle;
 import android.provider.Settings;
 import android.service.voice.VoiceInteractionSession;
 import android.util.Log;
-import android.view.Gravity;
-import android.view.LayoutInflater;
-import android.view.View;
-import android.view.ViewGroup;
-import android.view.WindowManager;
-import android.widget.ImageView;
 
 import com.android.internal.app.AssistUtils;
 import com.android.internal.app.IVoiceInteractionSessionListener;
-import com.android.internal.app.IVoiceInteractionSessionShowCallback;
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
 import com.android.keyguard.KeyguardUpdateMonitor;
-import com.android.settingslib.applications.InterestingConfigChanges;
 import com.android.systemui.R;
 import com.android.systemui.assist.ui.DefaultUiController;
+import com.android.systemui.dagger.SysUISingleton;
+import com.android.systemui.dagger.qualifiers.Main;
 import com.android.systemui.model.SysUiState;
 import com.android.systemui.recents.OverviewProxyService;
 import com.android.systemui.statusbar.CommandQueue;
-import com.android.systemui.statusbar.policy.ConfigurationController;
 import com.android.systemui.statusbar.policy.DeviceProvisionedController;
 
 import javax.inject.Inject;
-import javax.inject.Singleton;
 
 import dagger.Lazy;
 
 /**
  * Class to manage everything related to assist in SystemUI.
  */
-@Singleton
+@SysUISingleton
 public class AssistManager {
 
     /**
@@ -72,7 +57,7 @@ public class AssistManager {
          *
          * @param type     one of INVOCATION_TYPE_GESTURE, INVOCATION_TYPE_ACTIVE_EDGE,
          *                 INVOCATION_TYPE_VOICE, INVOCATION_TYPE_QUICK_SEARCH_BAR,
-         *                 INVOCATION_HOME_BUTTON_LONG_PRESS
+         *                 INVOCATION_TYPE_HOME_BUTTON_LONG_PRESS
          * @param progress a float between 0 and 1 inclusive. 0 represents the beginning of the
          *                 gesture; 1 represents the end.
          */
@@ -97,22 +82,28 @@ public class AssistManager {
     // Note that VERBOSE logging may leak PII (e.g. transcription contents).
     private static final boolean VERBOSE = false;
 
-    private static final String ASSIST_ICON_METADATA_NAME =
-            "com.android.systemui.action_assist_icon";
     private static final String INVOCATION_TIME_MS_KEY = "invocation_time_ms";
     private static final String INVOCATION_PHONE_STATE_KEY = "invocation_phone_state";
-    public static final String INVOCATION_TYPE_KEY = "invocation_type";
     protected static final String ACTION_KEY = "action";
-    protected static final String SHOW_ASSIST_HANDLES_ACTION = "show_assist_handles";
     protected static final String SET_ASSIST_GESTURE_CONSTRAINED_ACTION =
             "set_assist_gesture_constrained";
     protected static final String CONSTRAINED_KEY = "should_constrain";
 
-    public static final int INVOCATION_TYPE_GESTURE = 1;
-    public static final int INVOCATION_TYPE_OTHER = 2;
-    public static final int INVOCATION_TYPE_VOICE = 3;
-    public static final int INVOCATION_TYPE_QUICK_SEARCH_BAR = 4;
-    public static final int INVOCATION_HOME_BUTTON_LONG_PRESS = 5;
+    public static final String INVOCATION_TYPE_KEY = "invocation_type";
+    public static final int INVOCATION_TYPE_UNKNOWN =
+            AssistUtils.INVOCATION_TYPE_UNKNOWN;
+    public static final int INVOCATION_TYPE_GESTURE =
+            AssistUtils.INVOCATION_TYPE_GESTURE;
+    public static final int INVOCATION_TYPE_OTHER =
+            AssistUtils.INVOCATION_TYPE_PHYSICAL_GESTURE;
+    public static final int INVOCATION_TYPE_VOICE =
+            AssistUtils.INVOCATION_TYPE_VOICE;
+    public static final int INVOCATION_TYPE_QUICK_SEARCH_BAR =
+            AssistUtils.INVOCATION_TYPE_QUICK_SEARCH_BAR;
+    public static final int INVOCATION_TYPE_HOME_BUTTON_LONG_PRESS =
+            AssistUtils.INVOCATION_TYPE_HOME_BUTTON_LONG_PRESS;
+    public static final int INVOCATION_TYPE_POWER_BUTTON_LONG_PRESS =
+            AssistUtils.INVOCATION_TYPE_POWER_BUTTON_LONG_PRESS;
 
     public static final int DISMISS_REASON_INVOCATION_CANCELLED = 1;
     public static final int DISMISS_REASON_TAP = 2;
@@ -123,101 +114,37 @@ public class AssistManager {
     private static final long TIMEOUT_ACTIVITY = 1000;
 
     protected final Context mContext;
-    private final WindowManager mWindowManager;
     private final AssistDisclosure mAssistDisclosure;
-    private final InterestingConfigChanges mInterestingConfigChanges;
     private final PhoneStateMonitor mPhoneStateMonitor;
-    private final AssistHandleBehaviorController mHandleController;
     private final UiController mUiController;
     protected final Lazy<SysUiState> mSysUiState;
     protected final AssistLogger mAssistLogger;
 
-    private AssistOrbContainer mView;
     private final DeviceProvisionedController mDeviceProvisionedController;
     private final CommandQueue mCommandQueue;
     protected final AssistUtils mAssistUtils;
-    private final boolean mShouldEnableOrb;
-
-    private IVoiceInteractionSessionShowCallback mShowCallback =
-            new IVoiceInteractionSessionShowCallback.Stub() {
-
-                @Override
-                public void onFailed() throws RemoteException {
-                    mView.post(mHideRunnable);
-                }
-
-                @Override
-                public void onShown() throws RemoteException {
-                    mView.post(mHideRunnable);
-                }
-            };
-
-    private Runnable mHideRunnable = new Runnable() {
-        @Override
-        public void run() {
-            mView.removeCallbacks(this);
-            mView.show(false /* show */, true /* animate */);
-        }
-    };
-
-    private ConfigurationController.ConfigurationListener mConfigurationListener =
-            new ConfigurationController.ConfigurationListener() {
-                @Override
-                public void onConfigChanged(Configuration newConfig) {
-                    if (!mInterestingConfigChanges.applyNewConfig(mContext.getResources())) {
-                        return;
-                    }
-                    boolean visible = false;
-                    if (mView != null) {
-                        visible = mView.isShowing();
-                        mWindowManager.removeView(mView);
-                    }
-
-                    mView = (AssistOrbContainer) LayoutInflater.from(mContext).inflate(
-                            R.layout.assist_orb, null);
-                    mView.setVisibility(View.GONE);
-                    mView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
-                    WindowManager.LayoutParams lp = getLayoutParams();
-                    mWindowManager.addView(mView, lp);
-                    if (visible) {
-                        mView.show(true /* show */, false /* animate */);
-                    }
-                }
-            };
 
     @Inject
     public AssistManager(
             DeviceProvisionedController controller,
             Context context,
             AssistUtils assistUtils,
-            AssistHandleBehaviorController handleController,
             CommandQueue commandQueue,
             PhoneStateMonitor phoneStateMonitor,
             OverviewProxyService overviewProxyService,
-            ConfigurationController configurationController,
             Lazy<SysUiState> sysUiState,
             DefaultUiController defaultUiController,
-            AssistLogger assistLogger) {
+            AssistLogger assistLogger,
+            @Main Handler uiHandler) {
         mContext = context;
         mDeviceProvisionedController = controller;
         mCommandQueue = commandQueue;
-        mWindowManager = (WindowManager) mContext.getSystemService(Context.WINDOW_SERVICE);
         mAssistUtils = assistUtils;
-        mAssistDisclosure = new AssistDisclosure(context, new Handler());
+        mAssistDisclosure = new AssistDisclosure(context, uiHandler);
         mPhoneStateMonitor = phoneStateMonitor;
-        mHandleController = handleController;
         mAssistLogger = assistLogger;
 
-        configurationController.addCallback(mConfigurationListener);
-
         registerVoiceInteractionSessionListener();
-        mInterestingConfigChanges = new InterestingConfigChanges(ActivityInfo.CONFIG_ORIENTATION
-                | ActivityInfo.CONFIG_LOCALE | ActivityInfo.CONFIG_UI_MODE
-                | ActivityInfo.CONFIG_SCREEN_LAYOUT | ActivityInfo.CONFIG_ASSETS_PATHS);
-        mConfigurationListener.onConfigChanged(context.getResources().getConfiguration());
-        mShouldEnableOrb = !ActivityManager.isLowRamDeviceStatic();
 
         mUiController = defaultUiController;
 
@@ -260,15 +187,21 @@ public class AssistManager {
                     }
 
                     @Override
+                    public void onVoiceSessionWindowVisibilityChanged(boolean visible)
+                            throws RemoteException {
+                        if (VERBOSE) {
+                            Log.v(TAG, "Window visibility changed: " + visible);
+                        }
+                    }
+
+                    @Override
                     public void onSetUiHints(Bundle hints) {
                         if (VERBOSE) {
                             Log.v(TAG, "UI hints received");
                         }
 
                         String action = hints.getString(ACTION_KEY);
-                        if (SHOW_ASSIST_HANDLES_ACTION.equals(action)) {
-                            requestAssistHandles();
-                        } else if (SET_ASSIST_GESTURE_CONSTRAINED_ACTION.equals(action)) {
+                        if (SET_ASSIST_GESTURE_CONSTRAINED_ACTION.equals(action)) {
                             mSysUiState.get()
                                     .setFlag(
                                             SYSUI_STATE_ASSIST_GESTURE_CONSTRAINED,
@@ -279,10 +212,6 @@ public class AssistManager {
                 });
     }
 
-    protected boolean shouldShowOrb() {
-        return false;
-    }
-
     public void startAssist(Bundle args) {
         final ComponentName assistComponent = getAssistInfo();
         if (assistComponent == null) {
@@ -290,20 +219,11 @@ public class AssistManager {
         }
 
         final boolean isService = assistComponent.equals(getVoiceInteractorComponentName());
-        if (!isService || (!isVoiceSessionRunning() && shouldShowOrb())) {
-            showOrb(assistComponent, isService);
-            mView.postDelayed(mHideRunnable, isService
-                    ? TIMEOUT_SERVICE
-                    : TIMEOUT_ACTIVITY);
-        }
 
         if (args == null) {
             args = new Bundle();
         }
         int legacyInvocationType = args.getInt(INVOCATION_TYPE_KEY, 0);
-        if (legacyInvocationType == INVOCATION_TYPE_GESTURE) {
-            mHandleController.onAssistantGesturePerformed();
-        }
         int legacyDeviceState = mPhoneStateMonitor.getPhoneState();
         args.putInt(INVOCATION_PHONE_STATE_KEY, legacyDeviceState);
         args.putLong(INVOCATION_TIME_MS_KEY, SystemClock.elapsedRealtime());
@@ -330,36 +250,8 @@ public class AssistManager {
         mUiController.onGestureCompletion(velocity);
     }
 
-    protected void requestAssistHandles() {
-        mHandleController.onAssistHandlesRequested();
-    }
-
     public void hideAssist() {
         mAssistUtils.hideCurrentSession();
-    }
-
-    private WindowManager.LayoutParams getLayoutParams() {
-        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                mContext.getResources().getDimensionPixelSize(R.dimen.assist_orb_scrim_height),
-                WindowManager.LayoutParams.TYPE_VOICE_INTERACTION_STARTING,
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                        | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                PixelFormat.TRANSLUCENT);
-        lp.token = new Binder();
-        lp.gravity = Gravity.BOTTOM | Gravity.START;
-        lp.setTitle("AssistPreviewPanel");
-        lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED
-                | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING;
-        return lp;
-    }
-
-    private void showOrb(@NonNull ComponentName assistComponent, boolean isService) {
-        maybeSwapSearchIcon(assistComponent, isService);
-        if (mShouldEnableOrb) {
-            mView.show(true /* show */, true /* animate */);
-        }
     }
 
     private void startAssistInternal(Bundle args, @NonNull ComponentName assistComponent,
@@ -418,7 +310,7 @@ public class AssistManager {
 
     private void startVoiceInteractor(Bundle args) {
         mAssistUtils.showSessionForActiveService(args,
-                VoiceInteractionSession.SHOW_SOURCE_ASSIST_GESTURE, mShowCallback, null);
+                VoiceInteractionSession.SHOW_SOURCE_ASSIST_GESTURE, null, null);
     }
 
     public void launchVoiceAssistFromKeyguard() {
@@ -436,48 +328,6 @@ public class AssistManager {
 
     private boolean isVoiceSessionRunning() {
         return mAssistUtils.isSessionRunning();
-    }
-
-    private void maybeSwapSearchIcon(@NonNull ComponentName assistComponent, boolean isService) {
-        replaceDrawable(mView.getOrb().getLogo(), assistComponent, ASSIST_ICON_METADATA_NAME,
-                isService);
-    }
-
-    public void replaceDrawable(ImageView v, ComponentName component, String name,
-            boolean isService) {
-        if (component != null) {
-            try {
-                PackageManager packageManager = mContext.getPackageManager();
-                // Look for the search icon specified in the activity meta-data
-                Bundle metaData = isService
-                        ? packageManager.getServiceInfo(
-                        component, PackageManager.GET_META_DATA).metaData
-                        : packageManager.getActivityInfo(
-                                component, PackageManager.GET_META_DATA).metaData;
-                if (metaData != null) {
-                    int iconResId = metaData.getInt(name);
-                    if (iconResId != 0) {
-                        Resources res = packageManager.getResourcesForApplication(
-                                component.getPackageName());
-                        v.setImageDrawable(res.getDrawable(iconResId));
-                        return;
-                    }
-                }
-            } catch (PackageManager.NameNotFoundException e) {
-                if (VERBOSE) {
-                    Log.v(TAG, "Assistant component "
-                            + component.flattenToShortString() + " not found");
-                }
-            } catch (Resources.NotFoundException nfe) {
-                Log.w(TAG, "Failed to swap drawable from "
-                        + component.flattenToShortString(), nfe);
-            }
-        }
-        v.setImageDrawable(null);
-    }
-
-    protected AssistHandleBehaviorController getHandleBehaviorController() {
-        return mHandleController;
     }
 
     @Nullable
@@ -503,10 +353,6 @@ public class AssistManager {
         });
     }
 
-    public long getAssistHandleShowAndGoRemainingDurationMs() {
-        return mHandleController.getShowAndGoRemainingTimeMs();
-    }
-
     /** Returns the logging flags for the given Assistant invocation type. */
     public int toLoggingSubType(int invocationType) {
         return toLoggingSubType(invocationType, mPhoneStateMonitor.getPhoneState());
@@ -523,7 +369,7 @@ public class AssistManager {
         // Note that this logic will break if the number of Assistant invocation types exceeds 7.
         // There are currently 5 invocation types, but we will be migrating to the new logging
         // framework in the next update.
-        int subType = mHandleController.areHandlesShowing() ? 0 : 1;
+        int subType = 0;
         subType |= invocationType << 1;
         subType |= phoneState << 4;
         return subType;

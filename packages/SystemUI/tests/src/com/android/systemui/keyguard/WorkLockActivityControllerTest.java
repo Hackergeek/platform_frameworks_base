@@ -41,8 +41,8 @@ import androidx.test.filters.SmallTest;
 import androidx.test.runner.AndroidJUnit4;
 
 import com.android.systemui.SysuiTestCase;
-import com.android.systemui.shared.system.ActivityManagerWrapper;
 import com.android.systemui.shared.system.TaskStackChangeListener;
+import com.android.systemui.shared.system.TaskStackChangeListeners;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -60,9 +60,16 @@ import org.mockito.MockitoAnnotations;
 public class WorkLockActivityControllerTest extends SysuiTestCase {
     private static final int USER_ID = 333;
     private static final int TASK_ID = 444;
+    private static final ActivityManager.RunningTaskInfo TASK_INFO =
+            new ActivityManager.RunningTaskInfo();
+
+    static {
+        TASK_INFO.userId = USER_ID;
+        TASK_INFO.taskId = TASK_ID;
+    }
 
     private @Mock Context mContext;
-    private @Mock ActivityManagerWrapper mActivityManager;
+    private @Mock TaskStackChangeListeners mTaskStackChangeListeners;
     private @Mock IActivityTaskManager mIActivityTaskManager;
 
     private WorkLockActivityController mController;
@@ -78,10 +85,10 @@ public class WorkLockActivityControllerTest extends SysuiTestCase {
         // Construct controller. Save the TaskStackListener for injecting events.
         final ArgumentCaptor<TaskStackChangeListener> listenerCaptor =
                 ArgumentCaptor.forClass(TaskStackChangeListener.class);
-        mController = new WorkLockActivityController(mContext, mActivityManager,
+        mController = new WorkLockActivityController(mContext, mTaskStackChangeListeners,
                 mIActivityTaskManager);
 
-        verify(mActivityManager).registerTaskStackListener(listenerCaptor.capture());
+        verify(mTaskStackChangeListeners).registerTaskStackListener(listenerCaptor.capture());
         mTaskStackListener = listenerCaptor.getValue();
     }
 
@@ -91,7 +98,7 @@ public class WorkLockActivityControllerTest extends SysuiTestCase {
         setActivityStartCode(TASK_ID, true /*taskOverlay*/, ActivityManager.START_SUCCESS);
 
         // And the controller receives a message saying the profile is locked,
-        mTaskStackListener.onTaskProfileLocked(TASK_ID, USER_ID);
+        mTaskStackListener.onTaskProfileLocked(TASK_INFO);
 
         // The overlay should start and the task the activity started in should not be removed.
         verifyStartActivity(TASK_ID, true /*taskOverlay*/);
@@ -104,7 +111,7 @@ public class WorkLockActivityControllerTest extends SysuiTestCase {
         setActivityStartCode(TASK_ID, true /*taskOverlay*/, ActivityManager.START_CLASS_NOT_FOUND);
 
         // And the controller receives a message saying the profile is locked,
-        mTaskStackListener.onTaskProfileLocked(TASK_ID, USER_ID);
+        mTaskStackListener.onTaskProfileLocked(TASK_INFO);
 
         // The task the activity started in should be removed to prevent the locked task from
         // being shown.

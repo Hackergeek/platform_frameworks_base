@@ -29,10 +29,12 @@ import android.nfc.tech.NfcBarcode;
 import android.nfc.tech.NfcF;
 import android.nfc.tech.NfcV;
 import android.nfc.tech.TagTechnology;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.RemoteException;
+import android.os.SystemClock;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -111,7 +113,7 @@ import java.util.HashMap;
  * <p>
  */
 public final class Tag implements Parcelable {
-    @UnsupportedAppUsage
+    @UnsupportedAppUsage(maxTargetSdk = Build.VERSION_CODES.R, trackingBug = 170729553)
     final byte[] mId;
     final int[] mTechList;
     final String[] mTechStringList;
@@ -120,6 +122,7 @@ public final class Tag implements Parcelable {
     final INfcTag mTagService; // interface to NFC service, will be null if mock tag
 
     int mConnectedTechnology;
+    long mCookie;
 
     /**
      * Hidden constructor to be used by NFC service and internal classes.
@@ -139,6 +142,17 @@ public final class Tag implements Parcelable {
         mTagService = tagService;
 
         mConnectedTechnology = -1;
+        mCookie = SystemClock.elapsedRealtime();
+
+        if (tagService == null) {
+            return;
+        }
+
+        try {
+            tagService.setTagUpToDate(mCookie);
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
     }
 
     /**
@@ -360,6 +374,22 @@ public final class Tag implements Parcelable {
     /** @hide */
     @UnsupportedAppUsage
     public INfcTag getTagService() {
+        if (mTagService == null) {
+            return null;
+        }
+
+        try {
+            if (!mTagService.isTagUpToDate(mCookie)) {
+                String id_str = "";
+                for (int i = 0; i < mId.length; i++) {
+                    id_str = id_str + String.format("%02X ", mId[i]);
+                }
+                String msg = "Permission Denial: Tag ( ID: " + id_str + ") is out of date";
+                throw new SecurityException(msg);
+            }
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
         return mTagService;
     }
 

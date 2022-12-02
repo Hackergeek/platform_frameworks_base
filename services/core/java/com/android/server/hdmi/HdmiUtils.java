@@ -16,18 +16,29 @@
 
 package com.android.server.hdmi;
 
+import static com.android.server.hdmi.Constants.ADDR_BACKUP_1;
+import static com.android.server.hdmi.Constants.ADDR_BACKUP_2;
+import static com.android.server.hdmi.Constants.ADDR_TV;
+
+import static java.util.Map.entry;
+
 import android.annotation.Nullable;
+import android.hardware.hdmi.HdmiControlManager;
 import android.hardware.hdmi.HdmiDeviceInfo;
 import android.util.Slog;
 import android.util.SparseArray;
+import android.util.TypedXmlPullParser;
 import android.util.Xml;
 
 import com.android.internal.util.HexDump;
 import com.android.internal.util.IndentingPrintWriter;
-
 import com.android.server.hdmi.Constants.AbortReason;
 import com.android.server.hdmi.Constants.AudioCodec;
 import com.android.server.hdmi.Constants.FeatureOpcode;
+import com.android.server.hdmi.Constants.PathRelationship;
+
+import com.google.android.collect.Lists;
+
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 
@@ -47,23 +58,34 @@ final class HdmiUtils {
 
     private static final String TAG = "HdmiUtils";
 
-    private static final int[] ADDRESS_TO_TYPE = {
-        HdmiDeviceInfo.DEVICE_TV,  // ADDR_TV
-        HdmiDeviceInfo.DEVICE_RECORDER,  // ADDR_RECORDER_1
-        HdmiDeviceInfo.DEVICE_RECORDER,  // ADDR_RECORDER_2
-        HdmiDeviceInfo.DEVICE_TUNER,  // ADDR_TUNER_1
-        HdmiDeviceInfo.DEVICE_PLAYBACK,  // ADDR_PLAYBACK_1
-        HdmiDeviceInfo.DEVICE_AUDIO_SYSTEM,  // ADDR_AUDIO_SYSTEM
-        HdmiDeviceInfo.DEVICE_TUNER,  // ADDR_TUNER_2
-        HdmiDeviceInfo.DEVICE_TUNER,  // ADDR_TUNER_3
-        HdmiDeviceInfo.DEVICE_PLAYBACK,  // ADDR_PLAYBACK_2
-        HdmiDeviceInfo.DEVICE_RECORDER,  // ADDR_RECORDER_3
-        HdmiDeviceInfo.DEVICE_TUNER,  // ADDR_TUNER_4
-        HdmiDeviceInfo.DEVICE_PLAYBACK,  // ADDR_PLAYBACK_3
-        HdmiDeviceInfo.DEVICE_RESERVED,
-        HdmiDeviceInfo.DEVICE_RESERVED,
-        HdmiDeviceInfo.DEVICE_TV,  // ADDR_SPECIFIC_USE
-    };
+    private static final Map<Integer, List<Integer>> ADDRESS_TO_TYPE = Map.ofEntries(
+            entry(Constants.ADDR_TV, Lists.newArrayList(HdmiDeviceInfo.DEVICE_TV)),
+            entry(Constants.ADDR_RECORDER_1,
+                    Lists.newArrayList(HdmiDeviceInfo.DEVICE_RECORDER)),
+            entry(Constants.ADDR_RECORDER_2,
+                    Lists.newArrayList(HdmiDeviceInfo.DEVICE_RECORDER)),
+            entry(Constants.ADDR_TUNER_1, Lists.newArrayList(HdmiDeviceInfo.DEVICE_TUNER)),
+            entry(Constants.ADDR_PLAYBACK_1,
+                    Lists.newArrayList(HdmiDeviceInfo.DEVICE_PLAYBACK)),
+            entry(Constants.ADDR_AUDIO_SYSTEM,
+                    Lists.newArrayList(HdmiDeviceInfo.DEVICE_AUDIO_SYSTEM)),
+            entry(Constants.ADDR_TUNER_2, Lists.newArrayList(HdmiDeviceInfo.DEVICE_TUNER)),
+            entry(Constants.ADDR_TUNER_3, Lists.newArrayList(HdmiDeviceInfo.DEVICE_TUNER)),
+            entry(Constants.ADDR_PLAYBACK_2,
+                    Lists.newArrayList(HdmiDeviceInfo.DEVICE_PLAYBACK)),
+            entry(Constants.ADDR_RECORDER_3,
+                    Lists.newArrayList(HdmiDeviceInfo.DEVICE_RECORDER)),
+            entry(Constants.ADDR_TUNER_4, Lists.newArrayList(HdmiDeviceInfo.DEVICE_TUNER)),
+            entry(Constants.ADDR_PLAYBACK_3,
+                    Lists.newArrayList(HdmiDeviceInfo.DEVICE_PLAYBACK)),
+            entry(Constants.ADDR_BACKUP_1, Lists.newArrayList(HdmiDeviceInfo.DEVICE_PLAYBACK,
+                    HdmiDeviceInfo.DEVICE_RECORDER, HdmiDeviceInfo.DEVICE_TUNER,
+                    HdmiDeviceInfo.DEVICE_VIDEO_PROCESSOR)),
+            entry(Constants.ADDR_BACKUP_2, Lists.newArrayList(HdmiDeviceInfo.DEVICE_PLAYBACK,
+                    HdmiDeviceInfo.DEVICE_RECORDER, HdmiDeviceInfo.DEVICE_TUNER,
+                    HdmiDeviceInfo.DEVICE_VIDEO_PROCESSOR)),
+            entry(Constants.ADDR_SPECIFIC_USE, Lists.newArrayList(ADDR_TV)),
+            entry(Constants.ADDR_UNREGISTERED, Collections.emptyList()));
 
     private static final String[] DEFAULT_NAMES = {
         "TV",
@@ -78,8 +100,8 @@ final class HdmiUtils {
         "Recorder_3",
         "Tuner_4",
         "Playback_3",
-        "Reserved_1",
-        "Reserved_2",
+        "Backup_1",
+        "Backup_2",
         "Secondary_TV",
     };
 
@@ -100,21 +122,36 @@ final class HdmiUtils {
      * @return true if the given address is valid
      */
     static boolean isValidAddress(int address) {
-        return (Constants.ADDR_TV <= address && address <= Constants.ADDR_SPECIFIC_USE);
+        return (ADDR_TV <= address && address <= Constants.ADDR_SPECIFIC_USE);
+    }
+
+    static boolean isEligibleAddressForDevice(int deviceType, int logicalAddress) {
+        return isValidAddress(logicalAddress)
+                && ADDRESS_TO_TYPE.get(logicalAddress).contains(deviceType);
+    }
+
+    static boolean isEligibleAddressForCecVersion(int cecVersion, int logicalAddress) {
+        if (isValidAddress(logicalAddress)) {
+            if (logicalAddress == ADDR_BACKUP_1 || logicalAddress == ADDR_BACKUP_2) {
+                return cecVersion >= HdmiControlManager.HDMI_CEC_VERSION_2_0;
+            }
+            return true;
+        }
+        return false;
     }
 
     /**
      * Return the device type for the given logical address.
      *
-     * @param address logical address
+     * @param logicalAddress logical address
      * @return device type for the given logical address; DEVICE_INACTIVE
      *         if the address is not valid.
      */
-    static int getTypeFromAddress(int address) {
-        if (isValidAddress(address)) {
-            return ADDRESS_TO_TYPE[address];
+    static List<Integer> getTypeFromAddress(int logicalAddress) {
+        if (isValidAddress(logicalAddress)) {
+            return ADDRESS_TO_TYPE.get(logicalAddress);
         }
-        return HdmiDeviceInfo.DEVICE_INACTIVE;
+        return Lists.newArrayList(HdmiDeviceInfo.DEVICE_INACTIVE);
     }
 
     /**
@@ -141,10 +178,10 @@ final class HdmiUtils {
      * @throws IllegalArgumentException
      */
     static void verifyAddressType(int logicalAddress, int deviceType) {
-        int actualDeviceType = getTypeFromAddress(logicalAddress);
-        if (actualDeviceType != deviceType) {
+        List<Integer> actualDeviceTypes = getTypeFromAddress(logicalAddress);
+        if (!actualDeviceTypes.contains(deviceType)) {
             throw new IllegalArgumentException("Device type missmatch:[Expected:" + deviceType
-                    + ", Actual:" + actualDeviceType);
+                    + ", Actual:" + actualDeviceTypes);
         }
     }
 
@@ -311,35 +348,43 @@ final class HdmiUtils {
      * @return true if the new path in the active routing path
      */
     static boolean isInActiveRoutingPath(int activePath, int newPath) {
-        // Check each nibble of the currently active path and the new path till the position
-        // where the active nibble is not zero. For (activePath, newPath),
-        // (1.1.0.0, 1.0.0.0) -> true, new path is a parent
-        // (1.2.1.0, 1.2.1.2) -> true, new path is a descendant
-        // (1.1.0.0, 1.2.0.0) -> false, new path is a sibling
-        // (1.0.0.0, 2.0.0.0) -> false, in a completely different path
-        for (int i = 12; i >= 0; i -= 4) {
-            int nibbleActive = (activePath >> i) & 0xF;
-            if (nibbleActive == 0) {
-                break;
-            }
-            int nibbleNew = (newPath >> i) & 0xF;
-            if (nibbleNew == 0) {
-                break;
-            }
-            if (nibbleActive != nibbleNew) {
-                return false;
-            }
-        }
-        return true;
+        @PathRelationship int pathRelationship = pathRelationship(newPath, activePath);
+        return (pathRelationship == Constants.PATH_RELATIONSHIP_ANCESTOR
+                || pathRelationship == Constants.PATH_RELATIONSHIP_DESCENDANT
+                || pathRelationship == Constants.PATH_RELATIONSHIP_SAME);
     }
 
     /**
-     * Clone {@link HdmiDeviceInfo} with new power status.
+     * Computes the relationship from the first path to the second path.
      */
-    static HdmiDeviceInfo cloneHdmiDeviceInfo(HdmiDeviceInfo info, int newPowerStatus) {
-        return new HdmiDeviceInfo(info.getLogicalAddress(),
-                info.getPhysicalAddress(), info.getPortId(), info.getDeviceType(),
-                info.getVendorId(), info.getDisplayName(), newPowerStatus);
+    static @PathRelationship int pathRelationship(int firstPath, int secondPath) {
+        if (firstPath == Constants.INVALID_PHYSICAL_ADDRESS
+                || secondPath == Constants.INVALID_PHYSICAL_ADDRESS) {
+            return Constants.PATH_RELATIONSHIP_UNKNOWN;
+        }
+        // Loop forwards through both paths, looking for the first nibble where the paths differ.
+        // Checking this nibble and the next one distinguishes between most possible relationships.
+        for (int nibbleIndex = 0; nibbleIndex <= 3; nibbleIndex++) {
+            int shift = 12 - nibbleIndex * 4;
+            int firstPathNibble = (firstPath >> shift) & 0xF;
+            int secondPathNibble = (secondPath >> shift) & 0xF;
+            // Found the first nibble where the paths differ.
+            if (firstPathNibble != secondPathNibble) {
+                int firstPathNextNibble = (firstPath >> (shift - 4)) & 0xF;
+                int secondPathNextNibble = (secondPath >> (shift - 4)) & 0xF;
+                if (firstPathNibble == 0) {
+                    return Constants.PATH_RELATIONSHIP_ANCESTOR;
+                } else if (secondPathNibble == 0) {
+                    return Constants.PATH_RELATIONSHIP_DESCENDANT;
+                } else if (nibbleIndex == 3
+                        || (firstPathNextNibble == 0 && secondPathNextNibble == 0)) {
+                    return Constants.PATH_RELATIONSHIP_SIBLING;
+                } else {
+                    return Constants.PATH_RELATIONSHIP_DIFFERENT_BRANCH;
+                }
+            }
+        }
+        return Constants.PATH_RELATIONSHIP_SAME;
     }
 
     /**
@@ -413,7 +458,7 @@ final class HdmiUtils {
     }
 
     /**
-     * Method to parse target physical address to the port number on the current device.
+     * Method to build target physical address to the port number on the current device.
      *
      * <p>This check assumes target address is valid.
      *
@@ -481,6 +526,54 @@ final class HdmiUtils {
         return cmd.getParams()[1];
     }
 
+    /**
+     * Build a CEC message from a hex byte string with bytes separated by {@code :}.
+     *
+     * <p>This format is used by both cec-client and www.cec-o-matic.com
+     */
+    public static HdmiCecMessage buildMessage(String message) {
+        String[] parts = message.split(":");
+
+        if (parts.length < 2) {
+            throw new IllegalArgumentException("Message is too short");
+        }
+        for (String part : parts) {
+            if (part.length() != 2) {
+                throw new IllegalArgumentException("Malformatted CEC message: " + message);
+            }
+        }
+
+        int src = Integer.parseInt(parts[0].substring(0, 1), 16);
+        int dest = Integer.parseInt(parts[0].substring(1, 2), 16);
+        int opcode = Integer.parseInt(parts[1], 16);
+        byte[] params = new byte[parts.length - 2];
+        for (int i = 0; i < params.length; i++) {
+            params[i] = (byte) Integer.parseInt(parts[i + 2], 16);
+        }
+        return HdmiCecMessage.build(src, dest, opcode, params);
+    }
+
+    /**
+     * Some operands in the CEC spec consist of a variable number of bytes, where each byte except
+     * the last one has bit 7 set to 1.
+     * Given the index of a byte in such an operand, this method returns the index of the last byte
+     * in the operand, or -1 if the input is invalid (e.g. operand not terminated properly).
+     * @param params Byte array representing a CEC message's parameters
+     * @param offset Index of a byte in the operand to find the end of
+     */
+    public static int getEndOfSequence(byte[] params, int offset) {
+        if (offset < 0) {
+            return -1;
+        }
+        while (offset < params.length && ((params[offset] >> 7) & 1) == 1) {
+            offset++;
+        }
+        if (offset >= params.length) {
+            return -1;
+        }
+        return offset;
+    }
+
     public static class ShortAudioDescriptorXmlParser {
         // We don't use namespaces
         private static final String NS = null;
@@ -488,14 +581,13 @@ final class HdmiUtils {
         // return a list of devices config
         public static List<DeviceConfig> parse(InputStream in)
                 throws XmlPullParserException, IOException {
-            XmlPullParser parser = Xml.newPullParser();
-            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false);
-            parser.setInput(in, null);
+            TypedXmlPullParser parser = Xml.resolvePullParser(in);
             parser.nextTag();
             return readDevices(parser);
         }
 
-        private static void skip(XmlPullParser parser) throws XmlPullParserException, IOException {
+        private static void skip(TypedXmlPullParser parser)
+                throws XmlPullParserException, IOException {
             if (parser.getEventType() != XmlPullParser.START_TAG) {
                 throw new IllegalStateException();
             }
@@ -512,7 +604,7 @@ final class HdmiUtils {
             }
         }
 
-        private static List<DeviceConfig> readDevices(XmlPullParser parser)
+        private static List<DeviceConfig> readDevices(TypedXmlPullParser parser)
                 throws XmlPullParserException, IOException {
             List<DeviceConfig> devices = new ArrayList<>();
 
@@ -541,7 +633,7 @@ final class HdmiUtils {
 
         // Processes device tags in the config.
         @Nullable
-        private static DeviceConfig readDeviceConfig(XmlPullParser parser, String deviceType)
+        private static DeviceConfig readDeviceConfig(TypedXmlPullParser parser, String deviceType)
                 throws XmlPullParserException, IOException {
             List<CodecSad> codecSads = new ArrayList<>();
             int format;

@@ -18,6 +18,7 @@ package com.android.server.pm.parsing;
 
 import android.annotation.NonNull;
 import android.content.pm.PackageParserCacheHelper;
+import android.os.Environment;
 import android.os.FileUtils;
 import android.os.Parcel;
 import android.system.ErrnoException;
@@ -27,6 +28,7 @@ import android.system.StructStat;
 import android.util.Slog;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.server.pm.ApexManager;
 import com.android.server.pm.parsing.pkg.PackageImpl;
 import com.android.server.pm.parsing.pkg.ParsedPackage;
 
@@ -76,10 +78,10 @@ public class PackageCacher {
         p.unmarshall(bytes, 0, bytes.length);
         p.setDataPosition(0);
 
-        final PackageParserCacheHelper.ReadHelper helper = new PackageParserCacheHelper.ReadHelper(p);
+        final PackageParserCacheHelper.ReadHelper helper =
+                new PackageParserCacheHelper.ReadHelper(p);
         helper.startAndInstall();
 
-        // TODO(b/135203078): Hide PackageImpl constructor?
         ParsedPackage pkg = new PackageImpl(p);
 
         p.recycle();
@@ -99,9 +101,10 @@ public class PackageCacher {
     @VisibleForTesting
     public static byte[] toCacheEntryStatic(ParsedPackage pkg) {
         final Parcel p = Parcel.obtain();
-        final PackageParserCacheHelper.WriteHelper helper = new PackageParserCacheHelper.WriteHelper(p);
+        final PackageParserCacheHelper.WriteHelper helper =
+                new PackageParserCacheHelper.WriteHelper(p);
 
-        pkg.writeToParcel(p, 0 /* flags */);
+        ((PackageImpl) pkg).writeToParcel(p, 0 /* flags */);
 
         helper.finishAndUninstall();
 
@@ -117,6 +120,17 @@ public class PackageCacher {
      */
     private static boolean isCacheUpToDate(File packageFile, File cacheFile) {
         try {
+            // In case packageFile is located on one of /apex mount points it's mtime will always be
+            // 0. Instead, we can use mtime of the APEX file backing the corresponding mount point.
+            if (packageFile.toPath().startsWith(Environment.getApexDirectory().toPath())) {
+                File backingApexFile = ApexManager.getInstance().getBackingApexFile(packageFile);
+                if (backingApexFile == null) {
+                    Slog.w(TAG,
+                            "Failed to find APEX file backing " + packageFile.getAbsolutePath());
+                } else {
+                    packageFile = backingApexFile;
+                }
+            }
             // NOTE: We don't use the File.lastModified API because it has the very
             // non-ideal failure mode of returning 0 with no excepions thrown.
             // The nio2 Files API is a little better but is considerably more expensive.

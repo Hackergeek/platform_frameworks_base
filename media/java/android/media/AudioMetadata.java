@@ -30,6 +30,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -194,6 +195,61 @@ public final class AudioMetadata {
          */
         @NonNull public static final Key<Integer> KEY_AUDIO_ENCODING =
                 createKey("audio-encoding", Integer.class);
+
+
+        /**
+         * A key representing the audio presentation id being decoded by a next generation
+         * audio decoder.
+         *
+         * An Integer value representing presentation id.
+         *
+         * @see AudioPresentation#getPresentationId()
+         */
+        @NonNull public static final Key<Integer> KEY_PRESENTATION_ID =
+                createKey("presentation-id", Integer.class);
+
+         /**
+         * A key representing the audio program id being decoded by a next generation
+         * audio decoder.
+         *
+         * An Integer value representing program id.
+         *
+         * @see AudioPresentation#getProgramId()
+         */
+        @NonNull public static final Key<Integer> KEY_PROGRAM_ID =
+                createKey("program-id", Integer.class);
+
+
+         /**
+         * A key representing the audio presentation content classifier being rendered
+         * by a next generation audio decoder.
+         *
+         * An Integer value representing presentation content classifier.
+         *
+         * @see AudioPresentation.ContentClassifier
+         * One of {@link AudioPresentation#CONTENT_UNKNOWN},
+         *     {@link AudioPresentation#CONTENT_MAIN},
+         *     {@link AudioPresentation#CONTENT_MUSIC_AND_EFFECTS},
+         *     {@link AudioPresentation#CONTENT_VISUALLY_IMPAIRED},
+         *     {@link AudioPresentation#CONTENT_HEARING_IMPAIRED},
+         *     {@link AudioPresentation#CONTENT_DIALOG},
+         *     {@link AudioPresentation#CONTENT_COMMENTARY},
+         *     {@link AudioPresentation#CONTENT_EMERGENCY},
+         *     {@link AudioPresentation#CONTENT_VOICEOVER}.
+         */
+        @NonNull public static final Key<Integer> KEY_PRESENTATION_CONTENT_CLASSIFIER =
+                createKey("presentation-content-classifier", Integer.class);
+
+        /**
+         * A key representing the audio presentation language being rendered by a next
+         * generation audio decoder.
+         *
+         * A String value representing ISO 639-2 (three letter code).
+         *
+         * @see AudioPresentation#getLocale()
+         */
+        @NonNull public static final Key<String> KEY_PRESENTATION_LANGUAGE =
+                createKey("presentation-language", String.class);
 
         private Format() {} // delete constructor
     }
@@ -391,14 +447,13 @@ public final class AudioMetadata {
     // BaseMap is corresponding to audio_utils::metadata::Data
     private static final int AUDIO_METADATA_OBJ_TYPE_BASEMAP = 6;
 
-    private static final HashMap<Class, Integer> AUDIO_METADATA_OBJ_TYPES = new HashMap<>() {{
-            put(Integer.class, AUDIO_METADATA_OBJ_TYPE_INT);
-            put(Long.class, AUDIO_METADATA_OBJ_TYPE_LONG);
-            put(Float.class, AUDIO_METADATA_OBJ_TYPE_FLOAT);
-            put(Double.class, AUDIO_METADATA_OBJ_TYPE_DOUBLE);
-            put(String.class, AUDIO_METADATA_OBJ_TYPE_STRING);
-            put(BaseMap.class, AUDIO_METADATA_OBJ_TYPE_BASEMAP);
-        }};
+    private static final Map<Class, Integer> AUDIO_METADATA_OBJ_TYPES = Map.of(
+            Integer.class, AUDIO_METADATA_OBJ_TYPE_INT,
+            Long.class, AUDIO_METADATA_OBJ_TYPE_LONG,
+            Float.class, AUDIO_METADATA_OBJ_TYPE_FLOAT,
+            Double.class, AUDIO_METADATA_OBJ_TYPE_DOUBLE,
+            String.class, AUDIO_METADATA_OBJ_TYPE_STRING,
+            BaseMap.class, AUDIO_METADATA_OBJ_TYPE_BASEMAP);
 
     private static final Charset AUDIO_METADATA_CHARSET = StandardCharsets.UTF_8;
 
@@ -579,8 +634,8 @@ public final class AudioMetadata {
      *     Datum corresponds to Object
      ****************************************************************************************/
 
-    private static final HashMap<Integer, DataPackage<?>> DATA_PACKAGES = new HashMap<>() {{
-            put(AUDIO_METADATA_OBJ_TYPE_INT, new DataPackage<Integer>() {
+    private static final Map<Integer, DataPackage<?>> DATA_PACKAGES = Map.of(
+            AUDIO_METADATA_OBJ_TYPE_INT, new DataPackage<Integer>() {
                 @Override
                 @Nullable
                 public Integer unpack(ByteBuffer buffer) {
@@ -592,8 +647,8 @@ public final class AudioMetadata {
                     output.putInt(obj);
                     return true;
                 }
-            });
-            put(AUDIO_METADATA_OBJ_TYPE_LONG, new DataPackage<Long>() {
+            },
+            AUDIO_METADATA_OBJ_TYPE_LONG, new DataPackage<Long>() {
                 @Override
                 @Nullable
                 public Long unpack(ByteBuffer buffer) {
@@ -605,8 +660,8 @@ public final class AudioMetadata {
                     output.putLong(obj);
                     return true;
                 }
-            });
-            put(AUDIO_METADATA_OBJ_TYPE_FLOAT, new DataPackage<Float>() {
+            },
+            AUDIO_METADATA_OBJ_TYPE_FLOAT, new DataPackage<Float>() {
                 @Override
                 @Nullable
                 public Float unpack(ByteBuffer buffer) {
@@ -618,8 +673,8 @@ public final class AudioMetadata {
                     output.putFloat(obj);
                     return true;
                 }
-            });
-            put(AUDIO_METADATA_OBJ_TYPE_DOUBLE, new DataPackage<Double>() {
+            },
+            AUDIO_METADATA_OBJ_TYPE_DOUBLE, new DataPackage<Double>() {
                 @Override
                 @Nullable
                 public Double unpack(ByteBuffer buffer) {
@@ -631,8 +686,8 @@ public final class AudioMetadata {
                     output.putDouble(obj);
                     return true;
                 }
-            });
-            put(AUDIO_METADATA_OBJ_TYPE_STRING, new DataPackage<String>() {
+            },
+            AUDIO_METADATA_OBJ_TYPE_STRING, new DataPackage<String>() {
                 @Override
                 @Nullable
                 public String unpack(ByteBuffer buffer) {
@@ -658,9 +713,9 @@ public final class AudioMetadata {
                     output.put(valueArr);
                     return true;
                 }
-            });
-            put(AUDIO_METADATA_OBJ_TYPE_BASEMAP, new BaseMapPackage());
-        }};
+            },
+            AUDIO_METADATA_OBJ_TYPE_BASEMAP, new BaseMapPackage());
+
     // ObjectPackage is a special case that it is expected to unpack audio_utils::metadata::Datum,
     // which contains data type and data size besides the payload for the data.
     private static final ObjectPackage OBJECT_PACKAGE = new ObjectPackage();

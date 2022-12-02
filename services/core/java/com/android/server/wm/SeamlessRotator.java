@@ -20,7 +20,6 @@ import static android.view.Surface.ROTATION_270;
 import static android.view.Surface.ROTATION_90;
 
 import android.graphics.Matrix;
-import android.os.IBinder;
 import android.view.DisplayInfo;
 import android.view.Surface.Rotation;
 import android.view.SurfaceControl;
@@ -35,9 +34,6 @@ import java.io.StringWriter;
  * Helper class for seamless rotation.
  *
  * Works by transforming the {@link WindowState} back into the old display rotation.
- *
- * Uses {@link Transaction#deferTransactionUntil(SurfaceControl, IBinder, long)} instead of
- * latching on the buffer size to allow for seamless 180 degree rotations.
  */
 public class SeamlessRotator {
 
@@ -76,7 +72,7 @@ public class SeamlessRotator {
      * global display rotation.
      */
     public void unrotate(Transaction transaction, WindowContainer win) {
-        transaction.setMatrix(win.getSurfaceControl(), mTransform, mFloat9);
+        applyTransform(transaction, win.getSurfaceControl());
         // WindowState sets the position of the window so transform the position and update it.
         final float[] winSurfacePos = {win.mLastSurfacePosition.x, win.mLastSurfacePosition.y};
         mTransform.mapPoints(winSurfacePos);
@@ -84,6 +80,10 @@ public class SeamlessRotator {
         if (mApplyFixedTransformHint) {
             transaction.setFixedTransformHint(win.mSurfaceControl, mFixedTransformHint);
         }
+    }
+
+    void applyTransform(Transaction t, SurfaceControl sc) {
+        t.setMatrix(sc, mTransform, mFloat9);
     }
 
     /**
@@ -103,29 +103,21 @@ public class SeamlessRotator {
      * Removing the transform and the result of the {@link WindowState} layout are both tied to the
      * {@link WindowState} next frame, such that they apply at the same time the client draws the
      * window in the new orientation.
-     *
-     * In the case of a rotation timeout, we want to remove the transform immediately and not defer
-     * it.
      */
-    public void finish(WindowState win, boolean timeout) {
-        final Transaction t = win.getPendingTransaction();
-        finish(t, win);
-        if (win.mWinAnimator.mSurfaceController != null && !timeout) {
-            t.deferTransactionUntil(win.mSurfaceControl,
-                    win.getClientViewRootSurface(), win.getFrameNumber());
-            t.deferTransactionUntil(win.mWinAnimator.mSurfaceController.mSurfaceControl,
-                    win.getClientViewRootSurface(), win.getFrameNumber());
-        }
-    }
-
-    /** Removes the transform and restore to the original last position. */
     void finish(Transaction t, WindowContainer win) {
-        mTransform.reset();
-        t.setMatrix(win.mSurfaceControl, mTransform, mFloat9);
+        if (win.mSurfaceControl == null || !win.mSurfaceControl.isValid()) {
+            return;
+        }
+
+        setIdentityMatrix(t, win.mSurfaceControl);
         t.setPosition(win.mSurfaceControl, win.mLastSurfacePosition.x, win.mLastSurfacePosition.y);
         if (mApplyFixedTransformHint) {
             t.unsetFixedTransformHint(win.mSurfaceControl);
         }
+    }
+
+    void setIdentityMatrix(Transaction t, SurfaceControl sc) {
+        t.setMatrix(sc, Matrix.IDENTITY_MATRIX, mFloat9);
     }
 
     public void dump(PrintWriter pw) {

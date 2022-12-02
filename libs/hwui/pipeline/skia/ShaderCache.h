@@ -37,7 +37,7 @@ public:
      * "get" returns a pointer to the singleton ShaderCache object.  This
      * singleton object will never be destroyed.
      */
-    ANDROID_API static ShaderCache& get();
+    static ShaderCache& get();
 
     /**
      * initShaderDiskCache" loads the serialized cache contents from disk,
@@ -73,14 +73,14 @@ public:
      * "store" attempts to insert a new key/value blob pair into the cache.
      * This will be called by Skia after it compiled a new SKSL shader
      */
-    void store(const SkData& key, const SkData& data) override;
+    void store(const SkData& key, const SkData& data, const SkString& description) override;
 
     /**
      * "onVkFrameFlushed" tries to store Vulkan pipeline cache state.
      * Pipeline cache is saved on disk only if the size of the data has changed or there was
      * a new shader compiled.
      */
-    void onVkFrameFlushed(GrContext* context);
+    void onVkFrameFlushed(GrDirectContext* context);
 
 private:
     // Creation and (the lack of) destruction is handled internally.
@@ -209,6 +209,13 @@ private:
      * "sIDKey" is the cache key of the identity hash
      */
     static constexpr uint8_t sIDKey = 0;
+
+    /**
+     * Most of this class concerns persistent storage for shaders, but it's also
+     * interesting to keep track of how many shaders are stored in RAM. This
+     * class provides a convenient entry point for that.
+     */
+    int mNumShadersCachedInRam = 0;
 
     friend class ShaderCacheTestUtils;  // used for unit testing
 };

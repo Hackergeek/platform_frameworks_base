@@ -29,7 +29,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
-import android.widget.RemoteViews.OnClickHandler;
+import android.widget.RemoteViews.InteractionHandler;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -412,24 +412,29 @@ public abstract class AdapterViewAnimator extends AdapterView<Adapter>
     }
 
     void refreshChildren() {
-        if (mAdapter == null) return;
+        final int adapterCount = mAdapter == null ? 0 : getCount();
         for (int i = mCurrentWindowStart; i <= mCurrentWindowEnd; i++) {
             int index = modulo(i, getWindowSize());
 
-            int adapterCount = getCount();
-            // get the fresh child from the adapter
-            final View updatedChild = mAdapter.getView(modulo(i, adapterCount), null, this);
+            final View updatedChild;
+            if (i < adapterCount) {
+                // get the fresh child from the adapter
+                updatedChild = mAdapter.getView(modulo(i, adapterCount), null, this);
 
-            if (updatedChild.getImportantForAccessibility() == IMPORTANT_FOR_ACCESSIBILITY_AUTO) {
-                updatedChild.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+                if (updatedChild.getImportantForAccessibility()
+                        == IMPORTANT_FOR_ACCESSIBILITY_AUTO) {
+                    updatedChild.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+                }
+            } else {
+                updatedChild = null;
             }
 
             if (mViewsMap.containsKey(index)) {
                 final FrameLayout fl = (FrameLayout) mViewsMap.get(index).view;
-                // add the new child to the frame, if it exists
+                // flush out the old child
+                fl.removeAllViewsInLayout();
                 if (updatedChild != null) {
-                    // flush out the old child
-                    fl.removeAllViewsInLayout();
+                    // add the new child to the frame, if it exists
                     fl.addView(updatedChild);
                 }
             }
@@ -1016,11 +1021,11 @@ public abstract class AdapterViewAnimator extends AdapterView<Adapter>
      * 
      * @hide
      */
-    public void setRemoteViewsOnClickHandler(OnClickHandler handler) {
+    public void setRemoteViewsOnClickHandler(InteractionHandler handler) {
         // Ensure that we don't already have a RemoteViewsAdapter that is bound to an existing
         // service handling the specified intent.
         if (mRemoteViewsAdapter != null) {
-            mRemoteViewsAdapter.setRemoteViewsOnClickHandler(handler);
+            mRemoteViewsAdapter.setRemoteViewsInteractionHandler(handler);
         }
     }
 

@@ -22,12 +22,10 @@ import android.graphics.drawable.Icon;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.text.TextUtils;
-import android.util.Slog;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -118,7 +116,7 @@ public final class NotificationHistory implements Parcelable {
         }
 
         @Override
-        public boolean equals(Object o) {
+        public boolean equals(@Nullable Object o) {
             if (this == o) return true;
             if (o == null || getClass() != o.getClass()) return false;
             HistoricalNotification that = (HistoricalNotification) o;
@@ -387,12 +385,33 @@ public final class NotificationHistory implements Parcelable {
     /**
      * Removes all notifications from a conversation and regenerates the string pool
      */
-    public boolean removeConversationFromWrite(String packageName, String conversationId) {
+    public boolean removeConversationsFromWrite(String packageName, Set<String> conversationIds) {
         boolean removed = false;
         for (int i = mNotificationsToWrite.size() - 1; i >= 0; i--) {
             HistoricalNotification hn = mNotificationsToWrite.get(i);
             if (packageName.equals(hn.getPackage())
-                    && conversationId.equals(hn.getConversationId())) {
+                    && hn.getConversationId() != null
+                    && conversationIds.contains(hn.getConversationId())) {
+                removed = true;
+                mNotificationsToWrite.remove(i);
+            }
+        }
+        if (removed) {
+            poolStringsFromNotifications();
+        }
+
+        return removed;
+    }
+
+    /**
+     * Removes all notifications from a channel and regenerates the string pool
+     */
+    public boolean removeChannelFromWrite(String packageName, String channelId) {
+        boolean removed = false;
+        for (int i = mNotificationsToWrite.size() - 1; i >= 0; i--) {
+            HistoricalNotification hn = mNotificationsToWrite.get(i);
+            if (packageName.equals(hn.getPackage())
+                    && Objects.equals(channelId, hn.getChannelId())) {
                 removed = true;
                 mNotificationsToWrite.remove(i);
             }
@@ -478,7 +497,11 @@ public final class NotificationHistory implements Parcelable {
         p.writeLong(notification.getPostedTimeMs());
         p.writeString(notification.getTitle());
         p.writeString(notification.getText());
-        notification.getIcon().writeToParcel(p, flags);
+        p.writeBoolean(false);
+        // The current design does not display icons, so don't bother adding them to the parcel
+        //if (notification.getIcon() != null) {
+        //    notification.getIcon().writeToParcel(p, flags);
+        //}
     }
 
     /**
@@ -520,7 +543,9 @@ public final class NotificationHistory implements Parcelable {
         notificationOut.setPostedTimeMs(p.readLong());
         notificationOut.setTitle(p.readString());
         notificationOut.setText(p.readString());
-        notificationOut.setIcon(Icon.CREATOR.createFromParcel(p));
+        if (p.readBoolean()) {
+            notificationOut.setIcon(Icon.CREATOR.createFromParcel(p));
+        }
 
         return notificationOut.build();
     }
@@ -585,6 +610,7 @@ public final class NotificationHistory implements Parcelable {
         // Data can be too large for a transact. Write the data as a Blob, which will be written to
         // ashmem if too large.
         dest.writeBlob(data.marshall());
+        data.recycle();
     }
 
     public static final @NonNull Creator<NotificationHistory> CREATOR

@@ -27,7 +27,6 @@ import org.xmlpull.v1.XmlPullParserException;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -39,6 +38,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.zip.GZIPInputStream;
 
 /**
@@ -54,6 +55,7 @@ class LicenseHtmlGeneratorFromXml {
     private static final String TAG_FILE_NAME = "file-name";
     private static final String TAG_FILE_CONTENT = "file-content";
     private static final String ATTR_CONTENT_ID = "contentId";
+    private static final String ATTR_LIBRARY_NAME = "lib";
 
     private static final String HTML_HEAD_STRING =
             "<html><head>\n"
@@ -67,26 +69,40 @@ class LicenseHtmlGeneratorFromXml {
             + "</style>\n"
             + "</head>"
             + "<body topmargin=\"0\" leftmargin=\"0\" rightmargin=\"0\" bottommargin=\"0\">\n"
-            + "<div class=\"toc\">\n"
-            + "<ul>";
+            + "<div class=\"toc\">";
+    private static final String LIBRARY_HEAD_STRING =
+            "<strong>Libraries</strong>\n<ul class=\"libraries\">";
+    private static final String LIBRARY_TAIL_STRING = "</ul>\n<strong>Files</strong>";
 
-    private static final String HTML_MIDDLE_STRING =
-            "</ul>\n"
-            + "</div><!-- table of contents -->\n"
-            + "<table cellpadding=\"0\" cellspacing=\"0\" border=\"0\">";
+    private static final String FILES_HEAD_STRING = "<ul class=\"files\">";
+    private static final String FILES_TAIL_STRING = "</ul>\n</div><!-- table of contents -->";
 
-    private static final String HTML_REAR_STRING =
-            "</table></body></html>";
+    private static final String CONTENT_HEAD_STRING =
+            "<table cellpadding=\"0\" cellspacing=\"0\" border=\"0\">";
+    private static final String CONTENT_TAIL_STRING = "</table>";
+
+    private static final String IMAGES_HEAD_STRING =
+            "<div class=\"images-list\"><strong>Images</strong>\n<ul class=\"images\">";
+    private static final String IMAGES_TAIL_STRING = "</ul></div>\n";
+
+    private static final String PATH_COUNTS_HEAD_STRING =
+            "<div class=\"path-counts\"><table>\n  <tr><th>Path prefix</th><th>Count</th></tr>\n";
+    private static final String PATH_COUNTS_TAIL_STRING = "</table></div>\n";
+
+    private static final String HTML_TAIL_STRING =
+            "</body></html>";
 
     private final List<File> mXmlFiles;
 
     /*
-     * A map from a file name to a content id (MD5 sum of file content) for its license.
-     * For example, "/system/priv-app/TeleService/TeleService.apk" maps to
+     * A map from a file name to a library name (may be empty) to a content id (MD5 sum of file
+     * content) for its license.
+     * For example, "/system/priv-app/TeleService/TeleService.apk" maps to "service/Telephony" to
      * "9645f39e9db895a4aa6e02cb57294595". Here "9645f39e9db895a4aa6e02cb57294595" is a MD5 sum
      * of the content of packages/services/Telephony/MODULE_LICENSE_APACHE2.
      */
-    private final Map<String, Set<String>> mFileNameToContentIdMap = new HashMap();
+    private final Map<String, Map<String, Set<String>>> mFileNameToLibraryToContentIdMap =
+            new HashMap();
 
     /*
      * A map from a content id (MD5 sum of file content) to a license file content.
@@ -98,7 +114,7 @@ class LicenseHtmlGeneratorFromXml {
 
     static class ContentIdAndFileNames {
         final String mContentId;
-        final List<String> mFileNameList = new ArrayList();
+        final Map<String, List<String>> mLibraryToFileNameMap = new TreeMap();
 
         ContentIdAndFileNames(String contentId) {
             mContentId = contentId;
@@ -120,7 +136,7 @@ class LicenseHtmlGeneratorFromXml {
             parse(xmlFile);
         }
 
-        if (mFileNameToContentIdMap.isEmpty() || mContentIdToFileContentMap.isEmpty()) {
+        if (mFileNameToLibraryToContentIdMap.isEmpty() || mContentIdToFileContentMap.isEmpty()) {
             return false;
         }
 
@@ -128,13 +144,13 @@ class LicenseHtmlGeneratorFromXml {
         try {
             writer = new PrintWriter(outputFile);
 
-            generateHtml(mFileNameToContentIdMap, mContentIdToFileContentMap, writer,
-                noticeHeader);
+            generateHtml(mXmlFiles, mFileNameToLibraryToContentIdMap, mContentIdToFileContentMap,
+                    writer, noticeHeader);
 
             writer.flush();
             writer.close();
             return true;
-        } catch (FileNotFoundException | SecurityException e) {
+        } catch (IOException | SecurityException e) {
             Log.e(TAG, "Failed to generate " + outputFile, e);
 
             if (writer != null) {
@@ -157,7 +173,7 @@ class LicenseHtmlGeneratorFromXml {
                 in = new FileReader(xmlFile);
             }
 
-            parse(in, mFileNameToContentIdMap, mContentIdToFileContentMap);
+            parse(in, mFileNameToLibraryToContentIdMap, mContentIdToFileContentMap);
 
             in.close();
         } catch (XmlPullParserException | IOException e) {
@@ -180,7 +196,8 @@ class LicenseHtmlGeneratorFromXml {
      *
      *     <licenses>
      *     <file-name contentId="content_id_of_license1">file1</file-name>
-     *     <file-name contentId="content_id_of_license2">file2</file-name>
+     *     <file-name contentId="content_id_of_license2" lib="name of library">file2</file-name>
+     *     <file-name contentId="content_id_of_license2" lib="another library">file2</file-name>
      *     ...
      *     <file-content contentId="content_id_of_license1">license1 file contents</file-content>
      *     <file-content contentId="content_id_of_license2">license2 file contents</file-content>
@@ -188,10 +205,12 @@ class LicenseHtmlGeneratorFromXml {
      *     </licenses>
      */
     @VisibleForTesting
-    static void parse(InputStreamReader in, Map<String, Set<String>> outFileNameToContentIdMap,
+    static void parse(InputStreamReader in,
+            Map<String, Map<String, Set<String>>> outFileNameToLibraryToContentIdMap,
             Map<String, String> outContentIdToFileContentMap)
                     throws XmlPullParserException, IOException {
-        Map<String, Set<String>> fileNameToContentIdMap = new HashMap<String, Set<String>>();
+        Map<String, Map<String, Set<String>>> fileNameToLibraryToContentIdMap =
+                new HashMap<String, Map<String, Set<String>>>();
         Map<String, String> contentIdToFileContentMap = new HashMap<String, String>();
 
         XmlPullParser parser = Xml.newPullParser();
@@ -205,12 +224,15 @@ class LicenseHtmlGeneratorFromXml {
             if (state == XmlPullParser.START_TAG) {
                 if (TAG_FILE_NAME.equals(parser.getName())) {
                     String contentId = parser.getAttributeValue("", ATTR_CONTENT_ID);
+                    String libraryName = parser.getAttributeValue("", ATTR_LIBRARY_NAME);
                     if (!TextUtils.isEmpty(contentId)) {
                         String fileName = readText(parser).trim();
                         if (!TextUtils.isEmpty(fileName)) {
-                            Set<String> contentIds =
-                                    fileNameToContentIdMap.computeIfAbsent(
-                                            fileName, k -> new HashSet<>());
+                            Map<String, Set<String>> libs =
+                                    fileNameToLibraryToContentIdMap.computeIfAbsent(
+                                            fileName, k -> new HashMap<>());
+                            Set<String> contentIds = libs.computeIfAbsent(
+                                            libraryName, k -> new HashSet<>());
                             contentIds.add(contentId);
                         }
                     }
@@ -229,11 +251,17 @@ class LicenseHtmlGeneratorFromXml {
 
             state = parser.next();
         }
-        for (Map.Entry<String, Set<String>> entry : fileNameToContentIdMap.entrySet()) {
-            outFileNameToContentIdMap.merge(
-                    entry.getKey(), entry.getValue(), (s1, s2) -> {
-                        s1.addAll(s2);
-                        return s1;
+        for (Map.Entry<String, Map<String, Set<String>>> mapEntry :
+                fileNameToLibraryToContentIdMap.entrySet()) {
+            outFileNameToLibraryToContentIdMap.merge(
+                    mapEntry.getKey(), mapEntry.getValue(), (m1, m2) -> {
+                        for (Map.Entry<String, Set<String>> entry : m2.entrySet()) {
+                            m1.merge(entry.getKey(), entry.getValue(), (s1, s2) -> {
+                                s1.addAll(s2);
+                                return s1;
+                            });
+                        }
+                        return m1;
                     });
         }
         outContentIdToFileContentMap.putAll(contentIdToFileContentMap);
@@ -250,13 +278,47 @@ class LicenseHtmlGeneratorFromXml {
         return result.toString();
     }
 
+    private static String pathPrefix(String path) {
+        String prefix = path;
+        while (prefix.length() > 0 && prefix.substring(0, 1).equals("/")) {
+            prefix = prefix.substring(1);
+        }
+        int idx = prefix.indexOf("/");
+        if (idx > 0) {
+            prefix = prefix.substring(0, idx);
+        }
+        return prefix;
+    }
+
     @VisibleForTesting
-    static void generateHtml(Map<String, Set<String>> fileNameToContentIdMap,
+    static void generateHtml(List<File> xmlFiles,
+            Map<String, Map<String, Set<String>>> fileNameToLibraryToContentIdMap,
             Map<String, String> contentIdToFileContentMap, PrintWriter writer,
-            String noticeHeader) {
+            String noticeHeader) throws IOException {
         List<String> fileNameList = new ArrayList();
-        fileNameList.addAll(fileNameToContentIdMap.keySet());
+        fileNameList.addAll(fileNameToLibraryToContentIdMap.keySet());
         Collections.sort(fileNameList);
+
+        SortedMap<String, Integer> prefixToCount = new TreeMap();
+        for (String f : fileNameList) {
+            String prefix = pathPrefix(f);
+            prefixToCount.merge(prefix, 1, Integer::sum);
+        }
+
+        SortedMap<String, Set<String>> libraryToContentIdMap = new TreeMap();
+        for (Map<String, Set<String>> libraryToContentValue :
+                fileNameToLibraryToContentIdMap.values()) {
+            for (Map.Entry<String, Set<String>> entry : libraryToContentValue.entrySet()) {
+                if (TextUtils.isEmpty(entry.getKey())) {
+                    continue;
+                }
+                libraryToContentIdMap.merge(
+                        entry.getKey(), entry.getValue(), (s1, s2) -> {
+                            s1.addAll(s2);
+                            return s1;
+                        });
+            }
+        }
 
         writer.println(HTML_HEAD_STRING);
 
@@ -268,45 +330,115 @@ class LicenseHtmlGeneratorFromXml {
         Map<String, Integer> contentIdToOrderMap = new HashMap();
         List<ContentIdAndFileNames> contentIdAndFileNamesList = new ArrayList();
 
-        // Prints all the file list with a link to its license file content.
-        for (String fileName : fileNameList) {
-            for (String contentId : fileNameToContentIdMap.get(fileName)) {
-                // Assigns an id to a newly referred license file content.
-                if (!contentIdToOrderMap.containsKey(contentId)) {
-                    contentIdToOrderMap.put(contentId, count);
+        if (!libraryToContentIdMap.isEmpty()) {
+            writer.println(LIBRARY_HEAD_STRING);
+            for (Map.Entry<String, Set<String>> entry: libraryToContentIdMap.entrySet()) {
+                String libraryName = entry.getKey();
+                for (String contentId : entry.getValue()) {
+                    // Assigns an id to a newly referred license file content.
+                    if (!contentIdToOrderMap.containsKey(contentId)) {
+                        contentIdToOrderMap.put(contentId, count);
 
-                    // An index in contentIdAndFileNamesList is the order of each element.
-                    contentIdAndFileNamesList.add(new ContentIdAndFileNames(contentId));
+                        // An index in contentIdAndFileNamesList is the order of each element.
+                        contentIdAndFileNamesList.add(new ContentIdAndFileNames(contentId));
+                        count++;
+                    }
+                    int id = contentIdToOrderMap.get(contentId);
+                    writer.format("<li><a href=\"#id%d\">%s</a></li>\n", id, libraryName);
+                }
+            }
+            writer.println(LIBRARY_TAIL_STRING);
+        }
+
+        if (!fileNameList.isEmpty()) {
+            writer.println(FILES_HEAD_STRING);
+            // Prints all the file list with a link to its license file content.
+            for (String fileName : fileNameList) {
+                for (Map.Entry<String, Set<String>> libToContentId :
+                        fileNameToLibraryToContentIdMap.get(fileName).entrySet()) {
+                    String libraryName = libToContentId.getKey();
+                    if (libraryName == null) {
+                        libraryName = "";
+                    }
+                    for (String contentId : libToContentId.getValue()) {
+                        // Assigns an id to a newly referred license file content.
+                        if (!contentIdToOrderMap.containsKey(contentId)) {
+                            contentIdToOrderMap.put(contentId, count);
+
+                            // An index in contentIdAndFileNamesList is the order of each element.
+                            contentIdAndFileNamesList.add(new ContentIdAndFileNames(contentId));
+                            count++;
+                        }
+
+                        int id = contentIdToOrderMap.get(contentId);
+                        ContentIdAndFileNames elem = contentIdAndFileNamesList.get(id);
+                        List<String> files = elem.mLibraryToFileNameMap.computeIfAbsent(
+                                libraryName, k -> new ArrayList());
+                        files.add(fileName);
+                        if (TextUtils.isEmpty(libraryName)) {
+                            writer.format("<li><a href=\"#id%d\">%s</a></li>\n", id, fileName);
+                        } else {
+                            writer.format("<li><a href=\"#id%d\">%s - %s</a></li>\n",
+                                    id, fileName, libraryName);
+                        }
+                    }
+                }
+            }
+            writer.println(FILES_TAIL_STRING);
+        }
+
+        if (!contentIdAndFileNamesList.isEmpty()) {
+            writer.println(CONTENT_HEAD_STRING);
+            // Prints all contents of the license files in order of id.
+            for (ContentIdAndFileNames contentIdAndFileNames : contentIdAndFileNamesList) {
+                // Assigns an id to a newly referred license file content (should never happen here)
+                if (!contentIdToOrderMap.containsKey(contentIdAndFileNames.mContentId)) {
+                    contentIdToOrderMap.put(contentIdAndFileNames.mContentId, count);
                     count++;
                 }
-
-                int id = contentIdToOrderMap.get(contentId);
-                contentIdAndFileNamesList.get(id).mFileNameList.add(fileName);
-                writer.format("<li><a href=\"#id%d\">%s</a></li>\n", id, fileName);
+                int id = contentIdToOrderMap.get(contentIdAndFileNames.mContentId);
+                writer.format("<tr id=\"id%d\"><td class=\"same-license\">\n", id);
+                for (Map.Entry<String, List<String>> libraryFiles :
+                        contentIdAndFileNames.mLibraryToFileNameMap.entrySet()) {
+                    String libraryName = libraryFiles.getKey();
+                    if (TextUtils.isEmpty(libraryName)) {
+                        writer.println("<div class=\"label\">Notices for file(s):</div>");
+                    } else {
+                        writer.format("<div class=\"label\"><strong>%s</strong> used by:</div>\n",
+                                libraryName);
+                    }
+                    writer.println("<div class=\"file-list\">");
+                    for (String fileName : libraryFiles.getValue()) {
+                        writer.format("%s <br/>\n", fileName);
+                    }
+                    writer.println("</div><!-- file-list -->");
+                }
+                writer.println("<pre class=\"license-text\">");
+                writer.println(contentIdToFileContentMap.get(
+                        contentIdAndFileNames.mContentId));
+                writer.println("</pre><!-- license-text -->");
+                writer.println("</td></tr><!-- same-license -->");
             }
+            writer.println(CONTENT_TAIL_STRING);
         }
 
-        writer.println(HTML_MIDDLE_STRING);
-
-        count = 0;
-        // Prints all contents of the license files in order of id.
-        for (ContentIdAndFileNames contentIdAndFileNames : contentIdAndFileNamesList) {
-            writer.format("<tr id=\"id%d\"><td class=\"same-license\">\n", count);
-            writer.println("<div class=\"label\">Notices for file(s):</div>");
-            writer.println("<div class=\"file-list\">");
-            for (String fileName : contentIdAndFileNames.mFileNameList) {
-                writer.format("%s <br/>\n", fileName);
+        if (!xmlFiles.isEmpty()) {
+            writer.println(IMAGES_HEAD_STRING);
+            for (File file : xmlFiles) {
+                writer.format("  <li>%s</li>\n", pathPrefix(file.getCanonicalPath()));
             }
-            writer.println("</div><!-- file-list -->");
-            writer.println("<pre class=\"license-text\">");
-            writer.println(contentIdToFileContentMap.get(
-                    contentIdAndFileNames.mContentId));
-            writer.println("</pre><!-- license-text -->");
-            writer.println("</td></tr><!-- same-license -->");
-
-            count++;
+            writer.println(IMAGES_TAIL_STRING);
         }
 
-        writer.println(HTML_REAR_STRING);
+        if (!prefixToCount.isEmpty()) {
+            writer.println(PATH_COUNTS_HEAD_STRING);
+            for (Map.Entry<String, Integer> entry : prefixToCount.entrySet()) {
+                writer.format("  <tr><td>%s</td><td>%d</td></tr>\n",
+                        entry.getKey(), entry.getValue());
+            }
+            writer.println(PATH_COUNTS_TAIL_STRING);
+        }
+
+        writer.println(HTML_TAIL_STRING);
     }
 }

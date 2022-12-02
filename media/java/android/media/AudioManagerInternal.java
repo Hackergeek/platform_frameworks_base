@@ -28,15 +28,6 @@ import com.android.server.LocalServices;
  */
 public abstract class AudioManagerInternal {
 
-    public abstract void adjustSuggestedStreamVolumeForUid(int streamType, int direction,
-            int flags, String callingPackage, int uid, int pid);
-
-    public abstract void adjustStreamVolumeForUid(int streamType, int direction, int flags,
-            String callingPackage, int uid, int pid);
-
-    public abstract void setStreamVolumeForUid(int streamType, int direction, int flags,
-            String callingPackage, int uid, int pid);
-
     public abstract void setRingerModeDelegate(RingerModeDelegate delegate);
 
     public abstract int getRingerModeInternal();
@@ -48,6 +39,26 @@ public abstract class AudioManagerInternal {
     public abstract void updateRingerModeAffectedStreamsInternal();
 
     public abstract void setAccessibilityServiceUids(IntArray uids);
+
+    /**
+     * Add the UID for a new assistant service
+     *
+     * @param uid UID of the newly available assistants
+     */
+    public abstract void addAssistantServiceUid(int uid);
+
+    /**
+     * Remove the UID for an existing assistant service
+     *
+     * @param uid UID of the currently available assistant
+     */
+    public abstract void removeAssistantServiceUid(int uid);
+
+    /**
+     * Set the currently active assistant service UIDs
+     * @param activeUids active UIDs of the assistant service
+     */
+    public abstract void setActiveAssistantServicesUids(IntArray activeUids);
 
     /**
      * Called by {@link com.android.server.inputmethod.InputMethodManagerService} to notify the UID
